@@ -10,7 +10,9 @@ import 'package:window_manager/window_manager.dart';
 import 'core/app_logger.dart';
 import 'core/dev_mode.dart';
 import 'core/single_instance_guard.dart';
+import 'providers/engine_status_provider.dart';
 import 'screens/home_screen.dart';
+import 'services/engine_process.dart';
 import 'theme/theme.dart';
 import 'theme/theme_provider.dart';
 
@@ -80,8 +82,9 @@ Future<void> main() async {
         devLog('Stack trace:\n$s');
       }
 
-      // Intercept the native close button so shutdown work (later: stopping
-      // the Python engine) can finish before the process exits.
+      // Intercept the native close button so shutdown work (stopping the
+      // Python engine, flushing the diagnostic log) can finish before the
+      // process exits. See _AlphaTraderAppState.onWindowClose.
       await windowManager.setPreventClose(true);
     }
 
@@ -92,16 +95,29 @@ Future<void> main() async {
       _ => ThemeMode.light,
     };
 
+    // Created here (not lazily inside the tree) so the engine can be started
+    // right after runApp without waiting for a widget to read it.
+    final EngineStatusProvider engineStatus = EngineStatusProvider(launcher: EngineProcess());
+
     runApp(
       MultiProvider(
         providers: [
           ChangeNotifierProvider(
             create: (context) => ThemeProvider(initialThemeMode: initialThemeMode),
           ),
+          ChangeNotifierProvider<EngineStatusProvider>.value(value: engineStatus),
         ],
         child: const AlphaTraderApp(),
       ),
     );
+
+    // Start the engine only after the first frame and never await it here:
+    // the Python import alone can take seconds, and the window must stay
+    // responsive meanwhile. start() reports failures through its own state.
+    // Non-Windows hosts (tests, CI) spawn nothing.
+    if (Platform.isWindows) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => unawaited(engineStatus.start()));
+    }
   }, (Object error, StackTrace stack) {
     devLog('runZonedGuarded caught uncaught error: $error');
     devLog('Stack trace:\n$stack');
@@ -137,13 +153,25 @@ class _AlphaTraderAppState extends State<AlphaTraderApp> with WindowListener {
       await _shutdown().timeout(const Duration(seconds: 6));
     } catch (e) {
       devLog('[Shutdown] did not finish in time: $e');
+      // _shutdown's finally never ran; flush what we can before exiting.
+      AppLogger.shutdown();
     }
     exit(0);
   }
 
+  /// Stops the engine (POST /shutdown -> wait -> kill, < 4 s; see
+  /// EngineProcess.stop), then flushes the diagnostic log no matter what.
   Future<void> _shutdown() async {
-    // TODO(engine phase): stop the Python engine process here.
-    AppLogger.shutdown();
+    try {
+      final EngineStatusProvider engine = context.read<EngineStatusProvider>();
+      devLog('[Shutdown] stopping engine (state=${engine.state.name}, port=${engine.port})');
+      await engine.stop();
+    } catch (e, s) {
+      devLog('[Shutdown] engine stop failed: $e');
+      devLog('Stack trace:\n$s');
+    } finally {
+      AppLogger.shutdown();
+    }
   }
 
   @override
