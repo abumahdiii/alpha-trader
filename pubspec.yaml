@@ -1,0 +1,37 @@
+name: alpha_trader
+description: Windows desktop app for defining trading systems, backtesting them on MetaTrader 5 data, and suggesting live positions (UI in Flutter, analysis engine in Python).
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.4.3 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  intl: ^0.20.2
+  provider: ^6.1.5
+  shared_preferences: ^2.5.3
+  window_manager: ^0.5.1
+  win32: ^5.15.0
+  ffi: ^2.1.0
+  path: ^1.9.0
+  path_provider: ^2.1.5
+  # Talking to the local Python engine (REST + WebSocket).
+  dio: ^5.9.0
+  web_socket_channel: ^3.0.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  fonts:
+    - family: Mikhak
+      fonts:
+        - asset: assets/fonts/Mikhak.ttf
