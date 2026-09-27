@@ -61,6 +61,20 @@ Worked example (long, gold: point 0.01, tick 0.01 / 1.00 -> 100 per price unit, 
 100 / (5.25 * 100) = 0.190476 -> 0.19 lot; risk_amount = 0.19 * 5.25 * 100 = 99.75. A later bar has high
 2011.00 >= TP -> exit 2010.75, gross = 10.50 * 0.19 * 100 = 199.50, commission = 3.50 * 0.19 * 2 = 1.33,
 net = 198.17, R = 198.17 / 99.75 = 1.98667, balance 10198.17 (tests/test_backtest_simulator.py).
+
+Shared trade rules (phase 5)
+----------------------------
+The per-trade rules above live in module-level, strategy-agnostic helpers that take a
+:class:`~alpha_engine.strategy.signal.SignalCandidate` plus the bar lists and have no side effects on the
+caller's state: :func:`entry_block` (decision-time checks: entry bar in the window/data, ``missing`` gap),
+:func:`open_position` (fill at ask/bid, gap through the stop, levels, sizing on the fill price, commission;
+returns an :class:`OpenPosition` or an :class:`EntryRejected`), :func:`check_exit` / :func:`exit_hit`
+(SL first, gap variants), :func:`exit_time_ns`, :func:`liquidation_price` (end-of-period / mark price) and
+:func:`settle` (the :class:`~alpha_engine.backtest.models.Trade` with pnl, commission, R, flags).
+:func:`simulate_window` (one open trade at a time, momentary balance) and
+``setup_outcomes.simulate_setup`` (each setup on its own, settings balance) both call exactly these, so
+the chart's per-setup results and the backtest can never apply different rules
+(tests/test_backtest_golden.py pins the simulator's behaviour).
 """
 
 from __future__ import annotations
@@ -69,15 +83,15 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 
 from ..data.symbols import SymbolSpec
 from ..logging_setup import get_logger, is_dev_mode
-from ..risk.sizing import size_position
+from ..risk.sizing import SizingResult, size_position
 from ..storage.account_settings import AccountSettings
-from ..strategies.stddev_channel.levels import resolve_trade_levels
 from ..strategy.signal import SignalCandidate
 from .costs import SpreadSeries, commission
 from .models import (
@@ -170,23 +184,230 @@ def scan_provider(by_bar: dict[int, SignalCandidate]) -> CandidateProvider:
     return candidate_at
 
 
+# ---------------------------------------------------------------------------------------------- shared trade rules
+SpreadSource = Literal["historical", "filled", "fallback", "zero"]
+BarLists = dict[str, list]  # BarArrays.lists()
+
+
 @dataclass
-class _Open:
+class OpenPosition:
+    """A filled trade (``open_position``). ``flags`` grows while the trade is walked (``check_exit``)."""
+
     cand: SignalCandidate
-    t: int
-    entry_index: int
-    entry: float
+    t: int  # confirmation bar
+    entry_index: int  # bar t+1 (the next cached bar)
+    entry: float  # fill: buy = ask open, sell = bid open
     entry_bid_open: float
     sl: float
     tp: float
     volume: float
-    risk_amount: float
-    balance_before: float
+    risk_amount: float  # sizing.actual_risk
+    balance_before: float  # balance the volume was sized with
     sign: float
-    commission: float
+    commission: float  # round trip
     spread_entry_pts: int
     flags: list[str]
     warnings: list[str]
+    sizing: SizingResult | None = None
+    spread_source: SpreadSource = "historical"
+
+
+_Open = OpenPosition  # pre-phase-5 name
+
+
+@dataclass(frozen=True)
+class EntryRejected:
+    """Why a candidate was not entered (a ``SkippedCandidate`` in the backtest, ``rejected`` / ``pending_entry``
+    on the chart). The optional fields carry what was known when the entry failed (for display)."""
+
+    reason: SkipReason
+    detail: str | None
+    reason_fa: str
+    entry_index: int | None = None  # bar t+1 when it exists
+    bid_open: float | None = None
+    fill: float | None = None  # the would-be fill (gap / levels / sizing rejections)
+    spread_points: int | None = None
+    spread_source: SpreadSource | None = None
+    stop_loss: float | None = None
+    take_profit: float | None = None  # levels were valid (sizing rejections only)
+    sizing: SizingResult | None = None
+
+
+def value_per_price_unit(spec: SymbolSpec) -> float:
+    """Money per 1.0 price move per lot: ``tick_value / tick_size`` (same as the sizing)."""
+    return spec.trade_tick_value / spec.trade_tick_size if spec.trade_tick_size else 0.0
+
+
+def spread_source(L: BarLists, i: int) -> SpreadSource:
+    """Where the spread of bar ``i`` came from (see ``costs.py``): the broker's own value, the causal fill,
+    the fallback, or zero (no earlier spread and fallback 0)."""
+    if L["filled"][i]:
+        return "filled"
+    if L["fallback"][i]:
+        return "fallback"
+    if L["unfilled"][i]:
+        return "zero"
+    return "historical"
+
+
+def entry_block(L: BarLists, t: int, *, stop: int, window_end: datetime | None = None) -> EntryRejected | None:
+    """Decision-time checks for a candidate accepted at the close of bar ``t`` (no open trade): the entry bar
+    ``t+1`` must exist in the data and lie before ``stop`` (exclusive bar index of the window end), and the
+    step ``t -> t+1`` must not be a ``missing`` gap. ``None`` = the entry may be attempted at ``t+1``."""
+    times = L["times"]
+    n_total = len(times)
+    if t + 1 >= stop or t + 1 >= n_total:
+        return EntryRejected(
+            SkipReason.ENTRY_OUTSIDE_WINDOW,
+            "no bar after the confirmation bar in the data" if t + 1 >= n_total else
+            f"entry bar {ns_to_dt(times[t + 1]).isoformat()} >= window end "
+            f"{window_end.isoformat() if window_end is not None else '?'}",
+            SKIP_REASON_FA[SkipReason.ENTRY_OUTSIDE_WINDOW])
+    if L["missing"][t]:
+        return EntryRejected(SkipReason.MISSING_GAP,
+                             f"{ns_to_dt(times[t]).isoformat()} -> {ns_to_dt(times[t + 1]).isoformat()}",
+                             SKIP_REASON_FA[SkipReason.MISSING_GAP], entry_index=t + 1, bid_open=L["open"][t + 1])
+    return None
+
+
+def open_position(
+    cand: SignalCandidate,
+    t: int,
+    i: int,
+    L: BarLists,
+    *,
+    balance: float,
+    spec: SymbolSpec,
+    account: AccountSettings,
+    commission_per_lot_per_side: float,
+) -> OpenPosition | EntryRejected:
+    """Fill ``cand`` at the open of bar ``i`` (= ``t+1``) with ``balance`` for the sizing (module docstring,
+    rule 1): buy at the ask open, sell at the bid open; gap through the stop (buy: bid open <= SL, sell: ask
+    open >= SL), invalid levels and sizing rejections give an :class:`EntryRejected`."""
+    op = L["open"][i]
+    spr = L["spr"][i]
+    pts = L["spr_pts"][i]
+    ask_open = op + spr
+    buy = cand.direction == "buy"
+    sl = cand.stop_loss
+    fill = ask_open if buy else op
+    src = spread_source(L, i)
+    known = dict(entry_index=i, bid_open=op, fill=fill, spread_points=pts, spread_source=src, stop_loss=sl)
+    if (op <= sl) if buy else (ask_open >= sl):
+        side = f"bid open {op!r} <= SL {sl!r}" if buy else f"ask open {ask_open!r} >= SL {sl!r}"
+        return EntryRejected(SkipReason.GAP_THROUGH_STOP, f"{side} (spread {pts} points)",
+                             SKIP_REASON_FA[SkipReason.GAP_THROUGH_STOP], **known)
+    try:
+        sl, tp = cand.resolve_levels(fill)
+    except ValueError as exc:
+        return EntryRejected(SkipReason.INVALID_LEVELS, f"fill {fill!r}: {exc}",
+                             SKIP_REASON_FA[SkipReason.INVALID_LEVELS], **known)
+    sizing = size_position(
+        balance=balance, risk_pct=account.risk_pct, entry=fill, stop_loss=sl,
+        tick_value=spec.trade_tick_value, tick_size=spec.trade_tick_size, volume_min=spec.volume_min,
+        volume_step=spec.volume_step, volume_max=spec.volume_max, contract_size=spec.trade_contract_size,
+        leverage=account.leverage,
+    )
+    if not sizing.accepted:
+        return EntryRejected(SkipReason.SIZING_REJECTED, f"balance {balance!r}, fill {fill!r}, SL {sl!r}",
+                             f"{SKIP_REASON_FA[SkipReason.SIZING_REJECTED]} {sizing.reason_fa}", take_profit=tp,
+                             sizing=sizing, **known)
+    return OpenPosition(
+        cand=cand, t=t, entry_index=i, entry=fill, entry_bid_open=op, sl=sl, tp=tp, volume=sizing.volume,
+        risk_amount=sizing.actual_risk, balance_before=balance, sign=1.0 if buy else -1.0,
+        commission=commission(sizing.volume, commission_per_lot_per_side), spread_entry_pts=pts,
+        flags=[] if src == "historical" else [f"entry_spread_{src}"], warnings=list(sizing.warnings), sizing=sizing,
+        spread_source=src,
+    )
+
+
+def exit_hit(sign: float, sl: float, tp: float, op: float, hi: float, lo: float,
+             spr: float) -> tuple[ExitReason, float] | None:
+    """Exit of an open trade inside one bar (module docstring, rule 2): SL before TP, gap variants at the
+    open; longs on the bid, shorts on the ask (bar + ``spr``). ``None`` = still open after this bar."""
+    if sign > 0:
+        if op <= sl:
+            return ExitReason.SL_GAP, op
+        if op >= tp:
+            return ExitReason.TP_GAP, op
+        if lo <= sl:
+            return ExitReason.SL, sl
+        if hi >= tp:
+            return ExitReason.TP, tp
+        return None
+    a = op + spr
+    if a >= sl:
+        return ExitReason.SL_GAP, a
+    if a <= tp:
+        return ExitReason.TP_GAP, a
+    if hi + spr >= sl:
+        return ExitReason.SL, sl
+    if lo + spr <= tp:
+        return ExitReason.TP, tp
+    return None
+
+
+def check_exit(tr: OpenPosition, i: int, L: BarLists) -> tuple[ExitReason, float] | None:
+    """:func:`exit_hit` for bar ``i`` of an open trade (from its entry bar on); flags a ``missing`` gap
+    crossed while the trade is open."""
+    if i > tr.entry_index and L["missing"][i - 1] and "missing_gap_during_trade" not in tr.flags:
+        tr.flags.append("missing_gap_during_trade")
+    return exit_hit(tr.sign, tr.sl, tr.tp, L["open"][i], L["high"][i], L["low"][i], L["spr"][i])
+
+
+def exit_time_ns(reason: ExitReason, bar_open_ns: int) -> int:
+    """Gap exits are known at the bar OPEN, intrabar hits and end-of-period closes at the bar CLOSE."""
+    return bar_open_ns if reason in (ExitReason.SL_GAP, ExitReason.TP_GAP) else bar_open_ns + H1_NS
+
+
+def liquidation_price(sign: float, close: float, spr: float) -> float:
+    """Closing price at a bar close: longs at the bid close, shorts at the ask close (``close + spr``)."""
+    return close if sign > 0 else close + spr
+
+
+def settle(
+    tr: OpenPosition,
+    i: int,
+    price: float,
+    reason: ExitReason,
+    exit_ns: int,
+    L: BarLists,
+    *,
+    vpu: float,
+    balance: float,
+    window_index: int,
+    trade_index: int,
+) -> Trade:
+    """The closed trade: ``gross = (exit - entry) * dir * volume * vpu``, ``net = gross - commission``,
+    ``R = net / risk_amount``; ``balance_after = balance + net``; weekend and exit-spread flags."""
+    gross = (price - tr.entry) * tr.sign * tr.volume * vpu
+    net = gross - tr.commission
+    balance_after = balance + net
+    entry_ns = L["times"][tr.entry_index]
+    weekend = held_over_weekend(entry_ns, exit_ns)
+    flags = list(tr.flags)
+    if weekend:
+        flags.append("held_over_weekend")
+    spread_exit: int | None = None
+    if tr.sign < 0:  # sells exit on the ask side: the exit bar's spread was used
+        spread_exit = L["spr_pts"][i]
+        src = spread_source(L, i)
+        if src != "historical":
+            flags.append(f"exit_spread_{src}")
+    cand = tr.cand
+    return Trade(
+        window_index=window_index, trade_index=trade_index, direction=cand.direction, setup_type=cand.setup.value,
+        line=cand.line, pattern=cand.pattern, confirmation_bar_time=cand.confirmation_bar_open_utc,
+        decision_time=cand.decision_time_utc, entry_time=ns_to_dt(entry_ns), entry=tr.entry,
+        entry_bid_open=tr.entry_bid_open, stop_loss=tr.sl, take_profit=tr.tp, rr=cand.rr, volume=tr.volume,
+        risk_amount=tr.risk_amount, balance_before=tr.balance_before, exit_bar_time=ns_to_dt(L["times"][i]),
+        exit_time=ns_to_dt(exit_ns), exit_price=price, exit_reason=reason, exit_reason_fa=EXIT_REASON_FA[reason],
+        gross_pnl=gross, commission=tr.commission, net_pnl=net,
+        r_multiple=net / tr.risk_amount if tr.risk_amount > 0 else None, balance_after=balance_after,
+        bars_held=i - tr.entry_index + 1, spread_at_entry_points=tr.spread_entry_pts,
+        spread_at_exit_points=spread_exit, held_over_weekend=weekend, flags=flags,
+        sizing_warnings_fa=tr.warnings, reason_fa=cand.reason_fa, indicators=dict(cand.extra),
+    )
 
 
 def simulate_window(
@@ -205,13 +426,10 @@ def simulate_window(
     dev = is_dev_mode()
     wi = window.index
     i0, i1 = window_bar_range(bars.times_ns, window)
-    n_total = len(bars)
     L = bars.lists()
-    O, H, LO, C = L["open"], L["high"], L["low"], L["close"]
-    SPR, SPTS, FILLED, UNFILLED, MISSING, TIMES = (L["spr"], L["spr_pts"], L["filled"], L["unfilled"], L["missing"],
-                                                  L["times"])
+    C, SPR, SPTS, FILLED, UNFILLED, TIMES = L["close"], L["spr"], L["spr_pts"], L["filled"], L["unfilled"], L["times"]
     FALLBACK = L["fallback"]
-    vpu =spec.trade_tick_value / spec.trade_tick_size if spec.trade_tick_size else 0.0
+    vpu = value_per_price_unit(spec)
     per_side = cost_model.commission_per_lot_per_side
     initial = float(account.balance)
     balance = initial
@@ -223,7 +441,7 @@ def simulate_window(
     construct = EquityPoint.model_construct
     if i1 > i0:
         equity.append(construct(time=ns_to_dt(TIMES[i0]), balance=balance, equity=balance))
-    trade: _Open | None = None
+    trade: OpenPosition | None = None
     pending: tuple[SignalCandidate, int] | None = None
     n_candidates = 0
     stopped: str | None = None
@@ -231,8 +449,9 @@ def simulate_window(
 
     if dev:
         logger.debug("bt window %d %s..%s: bars %d..%d (%d) balance=%.2f risk=%.2f%% lev=%d rr=%g "
-                     "commission=%g/lot/side vpu=%g point=%g", wi, window.start.isoformat(), window.end.isoformat(), i0, i1, i1 - i0, balance,
-                     account.risk_pct, account.leverage, account.rr, per_side, vpu, spec.point)
+                     "commission=%g/lot/side vpu=%g point=%g", wi, window.start.isoformat(), window.end.isoformat(),
+                     i0, i1, i1 - i0, balance, account.risk_pct, account.leverage, account.rr, per_side, vpu,
+                     spec.point)
 
     def skip(cand: SignalCandidate, reason: SkipReason, detail: str | None, reason_fa: str | None = None) -> None:
         skipped.append(SkippedCandidate(
@@ -244,93 +463,37 @@ def simulate_window(
             logger.debug("bt w%d %s: %s %s skipped: %s (%s)", wi, cand.decision_time_utc.isoformat(), cand.direction,
                          cand.setup.value, reason.value, detail)
 
-    def close_trade(tr: _Open, i: int, price: float, reason: ExitReason, exit_ns: int) -> None:
+    def close_trade(tr: OpenPosition, i: int, price: float, reason: ExitReason, exit_ns: int) -> None:
         nonlocal balance, weekend_holds
-        gross = (price - tr.entry) * tr.sign * tr.volume * vpu
-        net = gross - tr.commission
         balance_before_exit = balance
-        balance = balance + net
-        entry_ns = TIMES[tr.entry_index]
-        weekend = held_over_weekend(entry_ns, exit_ns)
-        weekend_holds += weekend
-        flags = list(tr.flags)
-        if weekend:
-            flags.append("held_over_weekend")
-        spread_exit: int | None = None
-        if tr.sign < 0:  # sells exit on the ask side: the exit bar's spread was used
-            spread_exit = SPTS[i]
-            if FILLED[i]:
-                flags.append("exit_spread_filled")
-            elif FALLBACK[i]:
-                flags.append("exit_spread_fallback")
-            elif UNFILLED[i]:
-                flags.append("exit_spread_zero")
-        cand = tr.cand
-        trades.append(Trade(
-            window_index=wi, trade_index=len(trades), direction=cand.direction, setup_type=cand.setup.value,
-            line=cand.line, pattern=cand.pattern, confirmation_bar_time=cand.confirmation_bar_open_utc,
-            decision_time=cand.decision_time_utc, entry_time=ns_to_dt(entry_ns), entry=tr.entry,
-            entry_bid_open=tr.entry_bid_open, stop_loss=tr.sl, take_profit=tr.tp, rr=cand.rr, volume=tr.volume,
-            risk_amount=tr.risk_amount, balance_before=tr.balance_before, exit_bar_time=ns_to_dt(TIMES[i]),
-            exit_time=ns_to_dt(exit_ns), exit_price=price, exit_reason=reason, exit_reason_fa=EXIT_REASON_FA[reason],
-            gross_pnl=gross, commission=tr.commission, net_pnl=net,
-            r_multiple=net / tr.risk_amount if tr.risk_amount > 0 else None, balance_after=balance,
-            bars_held=i - tr.entry_index + 1, spread_at_entry_points=tr.spread_entry_pts,
-            spread_at_exit_points=spread_exit, held_over_weekend=weekend, flags=flags,
-            sizing_warnings_fa=tr.warnings, reason_fa=cand.reason_fa, indicators=dict(cand.extra),
-        ))
+        closed = settle(tr, i, price, reason, exit_ns, L, vpu=vpu, balance=balance, window_index=wi,
+                        trade_index=len(trades))
+        balance = closed.balance_after
+        weekend_holds += closed.held_over_weekend
+        trades.append(closed)
         if dev:
             logger.debug("bt w%d exit %s %s @ bar %s: %s price=%.5f entry=%.5f vol=%g gross=%.4f commission=%.4f "
-                         "net=%.4f R=%.4f balance %.2f -> %.2f weekend=%s", wi, cand.direction, cand.setup.value,
-                         ns_to_dt(TIMES[i]).isoformat(), reason.value, price, tr.entry, tr.volume, gross, tr.commission,
-                         net, trades[-1].r_multiple or 0.0, balance_before_exit, balance, weekend)
+                         "net=%.4f R=%.4f balance %.2f -> %.2f weekend=%s", wi, closed.direction, closed.setup_type,
+                         ns_to_dt(TIMES[i]).isoformat(), reason.value, price, tr.entry, tr.volume, closed.gross_pnl,
+                         tr.commission, closed.net_pnl, closed.r_multiple or 0.0, balance_before_exit, balance,
+                         closed.held_over_weekend)
 
-    def enter(cand: SignalCandidate, t: int, i: int) -> _Open | None:
-        op = O[i]
-        spr = SPR[i]
-        ask_open = op + spr
-        buy = cand.direction == "buy"
-        sl = cand.stop_loss
-        fill = ask_open if buy else op
-        if (op <= sl) if buy else (ask_open >= sl):
-            side = f"bid open {op!r} <= SL {sl!r}" if buy else f"ask open {ask_open!r} >= SL {sl!r}"
-            skip(cand, SkipReason.GAP_THROUGH_STOP, f"{side} (spread {SPTS[i]} points)")
+    def enter(cand: SignalCandidate, t: int, i: int) -> OpenPosition | None:
+        opened = open_position(cand, t, i, L, balance=balance, spec=spec, account=account,
+                               commission_per_lot_per_side=per_side)
+        if isinstance(opened, EntryRejected):
+            skip(cand, opened.reason, opened.detail, opened.reason_fa)
             return None
-        try:
-            levels = resolve_trade_levels(cand, fill)
-        except ValueError as exc:
-            skip(cand, SkipReason.INVALID_LEVELS, f"fill {fill!r}: {exc}")
-            return None
-        sizing = size_position(
-            balance=balance, risk_pct=account.risk_pct, entry=fill, stop_loss=levels.stop_loss,
-            tick_value=spec.trade_tick_value, tick_size=spec.trade_tick_size, volume_min=spec.volume_min,
-            volume_step=spec.volume_step, volume_max=spec.volume_max, contract_size=spec.trade_contract_size,
-            leverage=account.leverage,
-        )
-        if not sizing.accepted:
-            skip(cand, SkipReason.SIZING_REJECTED, f"balance {balance!r}, fill {fill!r}, SL {levels.stop_loss!r}",
-                 reason_fa=f"{SKIP_REASON_FA[SkipReason.SIZING_REJECTED]} {sizing.reason_fa}")
-            return None
-        flags: list[str] = []
-        if FILLED[i]:
-            flags.append("entry_spread_filled")
-        elif FALLBACK[i]:
-            flags.append("entry_spread_fallback")
-        elif UNFILLED[i]:
-            flags.append("entry_spread_zero")
-        tr = _Open(
-            cand=cand, t=t, entry_index=i, entry=fill, entry_bid_open=op, sl=levels.stop_loss,
-            tp=levels.take_profit, volume=sizing.volume, risk_amount=sizing.actual_risk, balance_before=balance,
-            sign=1.0 if buy else -1.0, commission=commission(sizing.volume, per_side), spread_entry_pts=SPTS[i],
-            flags=flags, warnings=list(sizing.warnings),
-        )
         if dev:
+            sizing = opened.sizing
+            assert sizing is not None
             logger.debug("bt w%d fill %s %s @ %s: bid open=%.5f spread=%d pts (%.5f)%s fill=%.5f SL=%.5f TP=%.5f "
                          "balance=%.2f risk=%.2f vol=%g (raw %.6f) actual_risk=%.4f margin=%.2f commission=%.4f", wi,
-                         cand.direction, cand.setup.value, ns_to_dt(TIMES[i]).isoformat(), op, SPTS[i], spr,
-                         " [filled]" if FILLED[i] else (" [fallback]" if FALLBACK[i] else ""), fill, tr.sl, tr.tp, balance, sizing.risk_amount,
-                         sizing.volume, sizing.raw_volume, sizing.actual_risk, sizing.margin, tr.commission)
-        return tr
+                         cand.direction, cand.setup.value, ns_to_dt(TIMES[i]).isoformat(), opened.entry_bid_open,
+                         SPTS[i], SPR[i], "" if opened.spread_source == "historical" else f" [{opened.spread_source}]",
+                         opened.entry, opened.sl, opened.tp, balance, sizing.risk_amount, sizing.volume,
+                         sizing.raw_volume, sizing.actual_risk, sizing.margin, opened.commission)
+        return opened
 
     for i in range(i0, i1):
         k = i - i0
@@ -346,38 +509,14 @@ def simulate_window(
             trade = enter(cand, t, i)
         # 2. exits (from the entry bar itself on)
         if trade is not None:
-            if i > trade.entry_index and MISSING[i - 1] and "missing_gap_during_trade" not in trade.flags:
-                trade.flags.append("missing_gap_during_trade")
-            op, hi, lo = O[i], H[i], LO[i]
-            sl, tp = trade.sl, trade.tp
-            reason: ExitReason | None = None
-            if trade.sign > 0:
-                if op <= sl:
-                    reason, price = ExitReason.SL_GAP, op
-                elif op >= tp:
-                    reason, price = ExitReason.TP_GAP, op
-                elif lo <= sl:
-                    reason, price = ExitReason.SL, sl
-                elif hi >= tp:
-                    reason, price = ExitReason.TP, tp
-            else:
-                spr = SPR[i]
-                a = op + spr
-                if a >= sl:
-                    reason, price = ExitReason.SL_GAP, a
-                elif a <= tp:
-                    reason, price = ExitReason.TP_GAP, a
-                elif hi + spr >= sl:
-                    reason, price = ExitReason.SL, sl
-                elif lo + spr <= tp:
-                    reason, price = ExitReason.TP, tp
-            if reason is not None:
-                gap = reason in (ExitReason.SL_GAP, ExitReason.TP_GAP)
-                close_trade(trade, i, price, reason, TIMES[i] if gap else TIMES[i] + H1_NS)
+            hit = check_exit(trade, i, L)
+            if hit is not None:
+                reason, price = hit
+                close_trade(trade, i, price, reason, exit_time_ns(reason, TIMES[i]))
                 trade = None
         # 3. mark to market at the close
         if trade is not None:
-            mark = C[i] if trade.sign > 0 else C[i] + SPR[i]
+            mark = liquidation_price(trade.sign, C[i], SPR[i])
             eq = balance + (mark - trade.entry) * trade.sign * trade.volume * vpu - trade.commission
         else:
             eq = balance
@@ -400,22 +539,19 @@ def simulate_window(
             if trade is not None:
                 skip(cand, SkipReason.POSITION_OPEN,
                      f"open {trade.cand.direction} since {ns_to_dt(TIMES[trade.entry_index]).isoformat()}")
-            elif i + 1 >= i1 or i + 1 >= n_total:
-                skip(cand, SkipReason.ENTRY_OUTSIDE_WINDOW,
-                     "no bar after the confirmation bar in the data" if i + 1 >= n_total else
-                     f"entry bar {ns_to_dt(TIMES[i + 1]).isoformat()} >= window end {window.end.isoformat()}")
-            elif MISSING[i]:
-                skip(cand, SkipReason.MISSING_GAP,
-                     f"{ns_to_dt(TIMES[i]).isoformat()} -> {ns_to_dt(TIMES[i + 1]).isoformat()}")
             else:
-                pending = (cand, i)
+                blocked = entry_block(L, i, stop=i1, window_end=window.end)
+                if blocked is not None:
+                    skip(cand, blocked.reason, blocked.detail, blocked.reason_fa)
+                else:
+                    pending = (cand, i)
     else:
         i1_eff = i1
 
     if trade is not None and stopped is None:
         last = i1_eff - 1
-        price = C[last] if trade.sign > 0 else C[last] + SPR[last]
-        close_trade(trade, last, price, ExitReason.END_OF_PERIOD, TIMES[last] + H1_NS)
+        close_trade(trade, last, liquidation_price(trade.sign, C[last], SPR[last]), ExitReason.END_OF_PERIOD,
+                    exit_time_ns(ExitReason.END_OF_PERIOD, TIMES[last]))
         trade = None
         # the last equity point already holds this liquidation value; keep balance/equity consistent
         equity[-1] = construct(time=equity[-1].time, balance=balance, equity=balance)
@@ -445,9 +581,22 @@ def simulate_window(
 __all__ = [
     "BacktestCancelled",
     "BarArrays",
+    "BarLists",
     "CandidateProvider",
+    "EntryRejected",
+    "OpenPosition",
+    "SpreadSource",
+    "check_exit",
+    "entry_block",
+    "exit_hit",
+    "exit_time_ns",
     "held_over_weekend",
+    "liquidation_price",
+    "open_position",
     "scan_provider",
+    "settle",
     "simulate_window",
+    "spread_source",
+    "value_per_price_unit",
     "window_bar_range",
 ]
