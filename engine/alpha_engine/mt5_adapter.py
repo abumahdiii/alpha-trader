@@ -53,6 +53,8 @@ ALLOWED_MT5_FUNCTIONS = frozenset({
 
 TRADE_MODES = {0: "demo", 1: "contest", 2: "real"}  # ACCOUNT_TRADE_MODE_DEMO/CONTEST/REAL
 _TIMEFRAME_CONSTANTS = {Timeframe.H1: ("TIMEFRAME_H1", 16385), Timeframe.H4: ("TIMEFRAME_H4", 16388)}
+INIT_TIMEOUT_MS = 15_000  # mt5.initialize waits up to 60 s by default when the terminal is unreachable
+RECONNECT_TIMEOUT_MS = 5_000  # on-demand reconnects run inside an HTTP request: keep them short
 CHUNK_DAYS = {Timeframe.H1: 180, Timeframe.H4: 365}
 DEFAULT_YEARS = 5
 
@@ -170,7 +172,7 @@ class Mt5Adapter:
 
     # --- connection -------------------------------------------------------------------------------
 
-    def connect(self) -> Mt5Status:
+    def connect(self, timeout_ms: int = INIT_TIMEOUT_MS) -> Mt5Status:
         """Attach (or log in, if a password is configured), with retries and account verification."""
         settings = self._settings
         self._last_attempt = time.monotonic()
@@ -188,6 +190,7 @@ class Mt5Adapter:
             kwargs["password"] = settings.mt5_password.get_secret_value()
             if settings.mt5_server:
                 kwargs["server"] = settings.mt5_server
+        kwargs["timeout"] = int(timeout_ms)
 
         try:
             self._module()
@@ -310,7 +313,7 @@ class Mt5Adapter:
             return False
         attempts, self._attempts = self._attempts, 1
         try:
-            return self.connect().state == "connected"
+            return self.connect(timeout_ms=RECONNECT_TIMEOUT_MS).state == "connected"
         finally:
             self._attempts = attempts
 

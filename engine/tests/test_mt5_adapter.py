@@ -55,7 +55,7 @@ def test_attach_mode_passes_no_credentials(make_settings, synthetic) -> None:
     assert status.state == "connected" and status.trade_mode == "demo"
     assert status.login_masked == "****5678" and status.server == "Fake-Server"
     init = [c for c in fake.calls if c[0] == "initialize"]
-    assert init == [("initialize", (), {"path": "C:\\T\\terminal64.exe"})]
+    assert init == [("initialize", (), {"path": "C:\\T\\terminal64.exe", "timeout": 15000})]
 
 
 def test_login_mode_only_when_password_set_and_never_leaks(make_settings, synthetic) -> None:
@@ -66,7 +66,8 @@ def test_login_mode_only_when_password_set_and_never_leaks(make_settings, synthe
     status = adapter.connect()
     assert status.state == "connected" and status.trade_mode == "real"
     kwargs = [c[2] for c in fake.calls if c[0] == "initialize"][0]
-    assert kwargs == {"login": int(FAKE_LOGIN), "password": FAKE_PASSWORD, "server": "Fake-Server"}
+    assert kwargs == {"login": int(FAKE_LOGIN), "password": FAKE_PASSWORD, "server": "Fake-Server",
+                      "timeout": 15000}
     for text in (stream.getvalue(), repr(adapter), str(adapter), status.model_dump_json(), repr(status)):
         assert FAKE_PASSWORD not in text
         assert FAKE_LOGIN not in text
@@ -139,6 +140,16 @@ def test_shutdown_and_background_connect(make_settings, synthetic) -> None:
     assert adapter.connected
     adapter.shutdown()
     assert adapter.status().state == "disconnected" and fake.names()[-1] == "shutdown"
+
+
+def test_on_demand_reconnect_is_single_short_attempt(make_settings, synthetic) -> None:
+    fake = FakeMt5(synthetic.values(), initialize_results=[False])
+    adapter = _adapter(make_settings(), fake)
+    assert adapter.ensure_connected(min_interval=0) is False
+    assert [c[2]["timeout"] for c in fake.calls if c[0] == "initialize"] == [5000]
+    assert adapter.sleeps == []
+    assert adapter.ensure_connected(min_interval=60) is False  # throttled: no second attempt
+    assert fake.names().count("initialize") == 1
 
 
 def test_allow_list_blocks_other_functions(make_settings, synthetic) -> None:
