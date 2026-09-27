@@ -116,10 +116,11 @@ class StdDevChannelStrategy(Strategy):
         # Only the last `history_bars` bars are read by the setup logic; patterns only at t, and only
         # when a setup is still possible (direction allowed and some line touched) -- pure speed-ups.
         cb = compute_channel_bars(h1, h4, p, start=t - p.history_bars + 1, pattern_from=None)
-        if (cb.buy_ok[t] or cb.sell_ok[t]) and any_touch(cb, t, p.touch_lookback):
+        patterns_checked = bool((cb.buy_ok[t] or cb.sell_ok[t]) and any_touch(cb, t, p.touch_lookback))
+        if patterns_checked:
             cb = with_patterns(cb, p, t)
         decision = decide_at(cb, t, p)
-        _log_decision(self.name, ctx.symbol, cb, decision)
+        _log_decision(self.name, ctx.symbol, cb, decision, patterns_checked)
         return _candidate(self, ctx.symbol, cb, decision, p, params_hash(clean), ctx.account)
 
     # ------------------------------------------------------------------ scan (whole history at once)
@@ -136,7 +137,12 @@ class StdDevChannelStrategy(Strategy):
 
         ``h4`` may be the full H4 history: at each H1 bar only H4 bars closed at that bar's decision
         time are used. The result at bar ``t`` equals ``evaluate`` on ``h1[:t+1]`` and
-        ``slice_closed_bars(h4, 4h, open_t + 1h)`` with ``has_open_trade=False``.
+        ``slice_closed_bars(h4, 4h, open_t + 1h)`` with ``has_open_trade=False`` (tests/test_no_lookahead.py).
+
+        Float caveat: ``rolling_regression_channel`` uses a BLAS matrix-vector product whose rounding
+        depends on the matrix shape, so channel values here and in ``evaluate`` (shorter history) can
+        differ by ~1 ulp. Setups, prices, SL/TP and texts are identical; only channel floats in ``extra``
+        may differ in the last bit (a decision could flip only on an exact float tie).
         """
         p, clean = resolve_params(params)
         if len(h1) == 0:
@@ -148,7 +154,7 @@ class StdDevChannelStrategy(Strategy):
         conflicts = 0
         for t in maybe:
             decision = decide_at(cb, int(t), p)
-            _log_decision(self.name, symbol, cb, decision)
+            _log_decision(self.name, symbol, cb, decision, True)
             conflicts += decision.note == "direction_conflict"
             cand = _candidate(self, symbol, cb, decision, p, phash, account)
             if cand is not None:
@@ -317,7 +323,7 @@ def _reason_fa(cb: ChannelBars, decision: Decision, p: StdDevParams, sl: float, 
     return " ".join(parts)
 
 
-def _log_decision(name: str, symbol: str, cb: ChannelBars, decision: Decision) -> None:
+def _log_decision(name: str, symbol: str, cb: ChannelBars, decision: Decision, patterns_checked: bool) -> None:
     """Per-decision debug log (rule 01 section 2): bar time UTC, indicator values, action."""
     if not is_dev_mode():
         return
@@ -327,6 +333,8 @@ def _log_decision(name: str, symbol: str, cb: ChannelBars, decision: Decision) -
         action = f"{decision.chosen.side}:{decision.chosen.setup.value}"
     elif decision.note == "direction_conflict":
         action = "none(direction_conflict)"
+    elif not patterns_checked:
+        action = "none(no touch or direction blocked; patterns not evaluated)"
     logger.debug(
         "%s %s bar=%s decision=%s dir=%s mid=%.5f upper=%.5f lower=%.5f slope=%.6f flat=%s atr_h4=%.5f "
         "atr_h1=%.5f tol=%.5f o=%.5f h=%.5f l=%.5f c=%.5f bull=%s(%s) bear=%s(%s) hits=%s action=%s",
