@@ -22,7 +22,14 @@ from alpha_engine.backtest.history import (
     scan_full_history,
 )
 from alpha_engine.backtest.metrics import compute_metrics, summarize_windows
-from alpha_engine.backtest.models import PROVISIONAL_LABEL_FA, CostModel, RunConfig, RunResult
+from alpha_engine.backtest.models import (
+    HISTORICAL_SPREAD_LABEL_FA,
+    PROVISIONAL_LABEL_FA,
+    ZERO_SPREAD_LABEL_FA,
+    CostModel,
+    RunConfig,
+    RunResult,
+)
 from alpha_engine.backtest.periods import PeriodError, earliest_start, manual_window, random_windows
 from alpha_engine.backtest.runner import BacktestCancelled, RunConfigError, run_backtest
 from alpha_engine.data.cache import OhlcvCache
@@ -193,7 +200,73 @@ def test_provenance_and_labels(data) -> None:
     assert not final.provisional and PROVISIONAL_LABEL_FA not in final.labels_fa and "کمیسیون صفر" in final.labels_fa
     no_spread = HistoryData(symbol=SYMBOL, h1=history.h1.drop(columns=["spread"]), h4=history.h4, spec=SPEC)
     res = run_backtest(cfg(), no_spread, scan)
-    assert res.spread_source == "none" and any("اسپرد صفر" in x for x in res.labels_fa)
+    assert res.spread_source == "none" and any(x.startswith(ZERO_SPREAD_LABEL_FA) for x in res.labels_fa)
+    assert res.spread_fallback.source == "none" and res.spread_fallback.points == 0
+    assert HISTORICAL_SPREAD_LABEL_FA not in res.labels_fa
+    # spreads on every bar: the auto fallback is resolved and recorded but never used
+    fb = final.spread_fallback
+    assert fb.source == "auto_median_observed" and fb.fallback_bars == 0 and fb.zero_bars == 0
+    assert fb.points == int(np.ceil(np.median(history.h1["spread"].to_numpy())))
+    assert HISTORICAL_SPREAD_LABEL_FA in final.labels_fa
+
+
+def _leading_zero_history(history: HistoryData, zero_until: int) -> HistoryData:
+    h1 = history.h1.copy()
+    h1.loc[: zero_until - 1, "spread"] = 0
+    return HistoryData(symbol=SYMBOL, h1=h1, h4=history.h4, spec=SPEC)
+
+
+def _full_manual(history: HistoryData, scan, **kw) -> RunConfig:
+    times = pd.DatetimeIndex(history.h1["time"]).as_unit("ns").asi8
+    earliest = earliest_start(times, pd.DatetimeIndex(history.h4["time"]).as_unit("ns").asi8,
+                              scan.first_valid_index, 14)
+    end = pd.Timestamp(int(times[-1]), tz="UTC") + pd.Timedelta(hours=1)
+    return cfg(mode="manual", start=earliest.to_pydatetime(), end=end.to_pydatetime(), **kw)
+
+
+def test_fallback_spread_auto_user_and_zero_are_recorded_and_labelled(data) -> None:
+    """Broker spread only from bar 2000 on (like the real cache): the leading bars use the fallback."""
+    history, scan, _ = data
+    lead = _leading_zero_history(history, 2000)
+    good = lead.h1["spread"].to_numpy()[2000:]
+    auto_points = int(np.ceil(np.median(good)))
+    since = lead.h1["time"].iloc[2000].strftime("%Y-%m-%d %H:%M UTC")
+
+    auto = run_backtest(_full_manual(lead, scan), lead, scan)
+    fb, w = auto.spread_fallback, auto.windows[0]
+    assert (fb.points, fb.source, fb.observed_bars) == (auto_points, "auto_median_observed", len(good))
+    assert fb.observed_from == lead.h1["time"].iloc[2000].to_pydatetime() and fb.observed_median == np.median(good)
+    i0 = int(np.searchsorted(lead.h1["time"], pd.Timestamp(w.window.start)))
+    assert fb.fallback_bars == w.spread_fallback_bars == 2000 - i0 > 0 and fb.zero_bars == 0
+    assert fb.total_bars == w.bars
+    pct = f"{(2000 - i0) / w.bars * 100:.1f}"
+    label = (f"اسپرد تاریخی بروکر فقط از {since}؛ برای {pct}٪ کندل‌ها اسپرد ثابت {auto_points} پوینت "
+             f"(میانه اسپرد مشاهده‌شده) فرض شد")
+    assert label in auto.labels_fa and HISTORICAL_SPREAD_LABEL_FA not in auto.labels_fa
+    early = [t for t in w.trades if t.entry_time < fb.observed_from]
+    assert early and all("entry_spread_fallback" in t.flags and t.spread_at_entry_points == auto_points
+                         for t in early)
+    for t in early:  # buy fill = bid open + fallback * point; sell fill = bid open
+        expected = t.entry_bid_open + auto_points * SPEC.point if t.direction == "buy" else t.entry_bid_open
+        assert t.entry == pytest.approx(expected, abs=1e-9)
+
+    user = run_backtest(_full_manual(lead, scan, cost_model=CostModel(fallback_spread_points=50)), lead, scan)
+    assert (user.spread_fallback.points, user.spread_fallback.source) == (50, "user")
+    assert any("اسپرد ثابت 50 پوینت (تعیین کاربر)" in x for x in user.labels_fa)
+    assert user.config.cost_model.fallback_spread_points == 50
+
+    zero = run_backtest(_full_manual(lead, scan, cost_model=CostModel(fallback_spread_points=0)), lead, scan)
+    zfb = zero.spread_fallback
+    assert (zfb.points, zfb.source, zfb.fallback_bars, zfb.zero_bars) == (0, "user", 0, 2000 - i0)
+    assert any(x.endswith(ZERO_SPREAD_LABEL_FA) and since in x for x in zero.labels_fa)
+    assert zero.windows[0].zero_spread_bars_unfilled == 2000 - i0
+
+    # prebuilt bar arrays must match the resolved fallback
+    with pytest.raises(RunConfigError):
+        run_backtest(_full_manual(lead, scan, cost_model=CostModel(fallback_spread_points=50)), lead, scan,
+                     bars=build_bar_arrays(lead.h1, SPEC))
+    # deterministic: same inputs -> equal results
+    assert run_backtest(_full_manual(lead, scan), lead, scan) == auto
 
 
 def test_config_and_scan_must_match(data) -> None:

@@ -86,13 +86,16 @@ class Settings(BaseModel):
     engine_mt5_autoconnect: bool = True
     # Symbols served by /symbols and /rates (ENGINE_SYMBOLS, comma-separated).
     engine_symbols: tuple[str, ...] = DEFAULT_SYMBOLS
+    # The user confirmed the raw-data check (.claude/test/phase_1_data_check.md): backtests are no longer
+    # labelled provisional ("موقت تا تایید چک داده"). ALPHA_DATA_CHECK_CONFIRMED, only "true" enables it.
+    alpha_data_check_confirmed: bool = False
     env_file: Path | None = None
     env_file_loaded: bool = False
 
-    @field_validator("dev_mode", mode="before")
+    @field_validator("dev_mode", "alpha_data_check_confirmed", mode="before")
     @classmethod
     def _parse_dev_mode(cls, value: Any) -> Any:
-        # Only the literal "true" (case-insensitive) enables DEV_MODE; "1"/"yes" do not.
+        # Only the literal "true" (case-insensitive) enables DEV_MODE / the data-check confirmation.
         if isinstance(value, str):
             return value.strip().lower() == "true"
         return value
@@ -138,6 +141,7 @@ class Settings(BaseModel):
             "data_dir": str(self.data_dir),
             "engine_mt5_autoconnect": self.engine_mt5_autoconnect,
             "engine_symbols": list(self.engine_symbols),
+            "alpha_data_check_confirmed": self.alpha_data_check_confirmed,
             "env_file": str(self.env_file) if self.env_file is not None else None,
             "env_file_loaded": self.env_file_loaded,
         }
@@ -193,6 +197,7 @@ def load_settings(
         "mt5_password": SecretStr(password) if password else None,
         "mt5_server": _clean(merged.get("MT5_SERVER")),
         "dev_mode": merged.get("DEV_MODE", "false"),
+        "alpha_data_check_confirmed": merged.get("ALPHA_DATA_CHECK_CONFIRMED", "false"),
         "data_dir": Path(data_dir) if data_dir else DEFAULT_DATA_DIR,
         "env_file": path,
         "env_file_loaded": loaded,

@@ -10,8 +10,14 @@
 4. simulates every window independently, each starting flat with the initial balance
    (``simulator.simulate_window``);
 5. returns a :class:`~alpha_engine.backtest.models.RunResult` with the plan (seed, algorithm, numpy
-   version, windows), the data fingerprint, the cost model, labels (no swap, zero commission, provisional
-   "موقت تا تایید چک داده" unless ``config.provisional`` is False) and per-window results.
+   version, windows), the data fingerprint, the cost model, the resolved fallback spread
+   (``spread_fallback``: points, source auto/user/none, observed spread period, bars that used it), labels
+   (spread: historical / fallback / zero cost -- ``models.spread_label_fa``; no swap, zero commission,
+   provisional "موقت تا تایید چک داده" unless ``config.provisional`` is False) and per-window results.
+
+``bars`` (optional, prebuilt) must have been built with the fallback spread the cost model resolves to
+(``costs.resolve_fallback_points``: user value, or auto = ceil of the median observed spread), else
+:class:`RunConfigError`.
 
 Metrics are NOT computed here (``backtest.metrics.compute_metrics`` / ``summarize_windows`` read the
 trades and equity points of each ``WindowResult``). Wall-clock times are not part of the result, so the
@@ -33,7 +39,15 @@ from ..strategies.stddev_channel import StdDevChannelStrategy, resolve_params
 from ..strategy.base import bar_open_times
 from ..strategy.params import params_hash
 from .history import HistoryData, ScanResult, build_bar_arrays, data_fingerprint, scan_full_history
-from .models import NO_SPREAD_DATA_LABEL_FA, HISTORICAL_SPREAD_LABEL_FA, PROVISIONAL_LABEL_FA, RunConfig, RunResult
+from .costs import observed_spread, resolve_fallback_points
+from .models import (
+    HISTORICAL_SPREAD_LABEL_FA,
+    PROVISIONAL_LABEL_FA,
+    RunConfig,
+    RunResult,
+    SpreadFallback,
+    spread_label_fa,
+)
 from .periods import earliest_start, manual_window, random_windows, warmup_h4_bars
 from .simulator import BacktestCancelled, BarArrays, scan_provider, simulate_window, window_bar_range
 
@@ -87,10 +101,15 @@ def run_backtest(
         scan = scan_full_history(StdDevChannelStrategy(), history.h1, history.h4, config.params, config.account,
                                  symbol=config.symbol)
     _check_scan(config, history, scan)
+    raw_spread = history.h1["spread"].to_numpy() if "spread" in history.h1.columns else None
+    fb_points, fb_source = resolve_fallback_points(raw_spread, config.cost_model.fallback_spread_points)
     if bars is None:
-        bars = build_bar_arrays(history.h1, history.spec)
+        bars = build_bar_arrays(history.h1, history.spec, fb_points)
     elif len(bars) != len(history.h1):
         raise RunConfigError("bar arrays do not match the H1 history")
+    elif bars.spread.fallback_points != fb_points:
+        raise RunConfigError(f"bar arrays were built with fallback spread {bars.spread.fallback_points} points, "
+                             f"the cost model resolves to {fb_points}")
 
     p, _ = resolve_params(config.params)
     h4_ns = bar_open_times(history.h4).as_unit("ns").asi8
@@ -107,9 +126,9 @@ def run_backtest(
     total = sum(max(1, hi - lo) for lo, hi in sizes)
     if dev:
         logger.debug("backtest run %s %s: %d window(s), %d bars, seed=%s, params %s, account %s, costs %s, "
-                     "candidates=%d provisional=%s", config.symbol, config.mode, len(plan.windows), total, plan.seed,
-                     config.params_hash[:12], config.account.model_dump(), config.cost_model.model_dump(),
-                     len(scan.candidates), config.provisional)
+                     "fallback spread %d pts (%s), candidates=%d provisional=%s", config.symbol, config.mode,
+                     len(plan.windows), total, plan.seed, config.params_hash[:12], config.account.model_dump(),
+                     config.cost_model.model_dump(), fb_points, fb_source, len(scan.candidates), config.provisional)
     last_pct = 0.0
 
     def report(pct: float, index: int) -> None:
@@ -135,15 +154,24 @@ def run_backtest(
         report(done / total * 100.0, window.index)
     report(100.0, plan.windows[-1].index)
 
-    labels = list(config.cost_model.labels_fa())
-    if not bars.spread.has_data:
-        labels = [NO_SPREAD_DATA_LABEL_FA if x == HISTORICAL_SPREAD_LABEL_FA else x for x in labels]
+    obs = observed_spread(raw_spread)
+    h1_times = bar_open_times(history.h1)
+    fallback = SpreadFallback(
+        points=fb_points, source=fb_source,
+        observed_from=None if obs.first_index is None else h1_times[obs.first_index].to_pydatetime(),
+        observed_to=None if obs.last_index is None else h1_times[obs.last_index].to_pydatetime(),
+        observed_bars=obs.count, observed_median=obs.median,
+        fallback_bars=sum(w.spread_fallback_bars for w in results),
+        zero_bars=sum(w.zero_spread_bars_unfilled for w in results), total_bars=sum(w.bars for w in results),
+    )
+    spread_label = spread_label_fa(fallback)
+    labels = [spread_label if x == HISTORICAL_SPREAD_LABEL_FA else x for x in config.cost_model.labels_fa()]
     if config.provisional:
         labels.insert(0, PROVISIONAL_LABEL_FA)
     result = RunResult(
         config=config, plan=plan, windows=results, fingerprint=data_fingerprint(history),
         provisional=config.provisional, labels_fa=labels, cost_model=config.cost_model,
-        spread_source="historical" if bars.spread.has_data else "none",
+        spread_source="historical" if bars.spread.has_data else "none", spread_fallback=fallback,
         total_trades=sum(len(w.trades) for w in results), total_skipped=sum(len(w.skipped) for w in results),
     )
     if dev:

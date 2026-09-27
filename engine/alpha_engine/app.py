@@ -16,6 +16,13 @@ Market-data routes (``GET /symbols``, ``GET /rates``, ``GET /rates/meta``, ``GET
 Chart routes (``GET /chart/channel``, ``GET /chart/setups``; cache-only, read-only) use
 ``app.state.market_data``, ``app.state.db`` and a bounded in-process cache ``app.state.chart_cache``.
 
+Backtest routes (``POST|GET /backtests``, ``GET /backtests/{id}[/trades|/equity|/skipped]``,
+``POST /backtests/{id}/cancel``, ``DELETE /backtests/{id}``, ``WS /ws/backtests/{id}``) use
+``app.state.backtest_jobs`` (:class:`~alpha_engine.backtest.jobs.BacktestJobs`: one background worker thread),
+created by the lifespan right after the database is opened; runs left ``queued``/``running`` by a previous
+process are marked ``interrupted`` first. On shutdown the jobs are stopped (running run cancelled and joined
+briefly) BEFORE the database is closed.
+
 Strategy and account-settings routes (``GET /strategies``, ``GET|PUT /strategies/{name}``,
 ``GET|PUT /settings``) use ``app.state.db`` and ``app.state.strategy_registry``:
 
@@ -144,7 +151,8 @@ def close_engine_db(app: FastAPI) -> None:
     if db is None:
         return
     try:
-        db.close()
+        with db.lock:  # never close under a writer that is mid-transaction (e.g. the backtest worker)
+            db.close()
     except Exception:
         logger.warning("engine database did not close cleanly")
         if is_dev_mode():
@@ -152,6 +160,39 @@ def close_engine_db(app: FastAPI) -> None:
         return
     if is_dev_mode():
         logger.debug("shutdown: engine database closed")
+
+
+def start_backtest_jobs(app: FastAPI) -> Any:
+    """Mark stale runs interrupted and create ``app.state.backtest_jobs`` (``None`` without a database)."""
+    from .backtest.jobs import BacktestJobs
+    from .storage.backtests_repo import BacktestsRepo
+
+    db: EngineConnection | None = getattr(app.state, "db", None)
+    if db is None:
+        return None
+    try:
+        stale = BacktestsRepo(db).mark_stale_interrupted()
+    except Exception as exc:
+        logger.error("backtest runs could not be checked at startup (%s: %s)", type(exc).__name__, exc)
+        return None
+    jobs = BacktestJobs(db, app.state.market_data.cache, getattr(app.state, "chart_cache", None))
+    if is_dev_mode():
+        logger.debug("startup: backtest jobs ready (%d stale run(s) marked interrupted)", stale)
+    return jobs
+
+
+def stop_backtest_jobs(app: FastAPI) -> None:
+    """Shut the backtest worker down (never raises)."""
+    jobs = getattr(app.state, "backtest_jobs", None)
+    app.state.backtest_jobs = None
+    if jobs is None:
+        return
+    try:
+        jobs.shutdown()
+    except Exception:
+        logger.warning("backtest jobs did not shut down cleanly")
+        if is_dev_mode():
+            logger.debug("shutdown: backtest jobs shutdown failed", exc_info=True)
 
 
 def create_app(
@@ -168,6 +209,7 @@ def create_app(
     from . import strategies  # noqa: F401  (importing the package registers every code-defined strategy)
     from .market_data import MarketDataService
     from .mt5_adapter import Mt5Adapter
+    from .routes import backtests as backtests_routes
     from .routes import chart as chart_routes
     from .routes import rates as rates_routes
     from .routes import settings as settings_routes
@@ -189,9 +231,11 @@ def create_app(
             logger.debug("startup: MT5 autoconnect disabled")
         try:
             app_.state.db = open_engine_db(settings)
+            app_.state.backtest_jobs = start_backtest_jobs(app_)
             yield
         finally:
             try:
+                stop_backtest_jobs(app_)
                 close_engine_db(app_)
             finally:
                 if is_dev_mode():
@@ -205,6 +249,7 @@ def create_app(
     app.state.mt5_status_provider = mt5_status_provider or adapter.status
     app.state.server = None  # set by __main__ to the uvicorn.Server handle
     app.state.db = None  # opened by the lifespan
+    app.state.backtest_jobs = None  # created by the lifespan (needs the database)
     app.state.strategy_registry = registry
     app.state.chart_cache = chart_routes.ChartCache()
     app.include_router(symbols_routes.router)
@@ -212,6 +257,7 @@ def create_app(
     app.include_router(strategies_routes.router)
     app.include_router(settings_routes.router)
     app.include_router(chart_routes.router)
+    app.include_router(backtests_routes.router)
 
     @app.middleware("http")
     async def dev_request_log(

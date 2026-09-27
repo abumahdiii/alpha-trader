@@ -50,6 +50,7 @@ Read from the OS environment first, then from `<repo>/.env` (OS environment wins
 | `ENGINE_SYMBOLS` | `XAUUSD.x,BRNUSD.x` | Symbols served by `/symbols` and `/rates` |
 | `ALPHA_TRADER_DATA_DIR` | `<repo>/data` | Cache, database and results |
 | `ALPHA_TRADER_ENV_FILE` | `<repo>/.env` | Alternative `.env` path |
+| `ALPHA_DATA_CHECK_CONFIRMED` | `false` | `true` once the user confirmed the raw-data check: backtests are no longer labelled «موقت تا تایید چک داده» (`provisional`) |
 
 ## Market data (phase 1)
 
@@ -232,3 +233,128 @@ tick 1.0/0.01): SL = low 2063.81 - ATR_H1 4.632355634525692 * 0.2 = 2062.8835288
 13:00 = 2064.37; distance 1.486471126905144; TP = 2064.37 + 2 * 1.486471 = 2067.34294225381; risk 10.00 /
 (1.486471 * 100) = 0.0672734 lots -> floor to 0.01 step = 0.06; actual risk 0.06 * 148.6471 = 8.9188;
 margin 0.06 * 100 * 2064.37 / 100 = 123.8622.
+
+## Backtests (phase 4, cache only, never MT5)
+
+Modules: `backtest/` (`simulator`, `runner`, `periods`, `costs`, `metrics`, `results`, `jobs`),
+`storage/backtests_repo.py`, `routes/backtests.py`. Rules (see the module docstrings): decisions on closed
+bars only, fill at the NEXT bar's open, bars are bid (buy fills at ask = bid + spread, sells exit on the ask),
+SL before TP inside one bar, open trades closed at the end of the period, no swap (labelled), one open trade
+at a time, every window starts flat with the account balance of `/settings`.
+
+**Execution.** `POST /backtests` validates and stores the run `queued` and returns 202 at once; ONE background
+worker thread (`app.state.backtest_jobs`) runs the runs in submit order. Params (the ACTIVE params version) and
+`/settings` are snapshotted at POST time. Runs left `queued`/`running` by a previous engine process become
+`interrupted` at startup; on shutdown the running run is cancelled (-> `interrupted`) before the DB closes.
+Status: `queued -> running -> done | error | cancelled`, `queued -> cancelled`, `* -> interrupted`.
+
+**Spread / costs.** Historical broker spread per bar; a zero spread is filled from the last previous non-zero
+spread; bars with NO earlier broker spread (the broker's history only carries spread for its recent part) use
+`fallback_spread_points`: omitted = auto = ceil(median of the non-zero spreads of the full cached H1 history),
+`0` = explicit zero cost, `> 0` = user value. The resolved value is stored (`spread_fallback`) and the spread
+label says honestly how much of the run used it. Commission per lot per side (default 0) on both sides.
+
+**Metrics.** Always `backtest.metrics.compute_metrics` on the FULL per-bar equity of a window (Sharpe on UTC
+daily closes, drawdown on the mark-to-market equity). Manual = one window: `metrics_kind: "single_window"`,
+`metrics` = the full metrics dict. Random = N independent (possibly overlapping) windows:
+`metrics_kind: "random_aggregate"`, `metrics = {window_count, windows_with_trades, initial_balance,
+total_trades, pooled: {trade_count, win_count, loss_count, breakeven_count, win_rate, gross_profit, gross_loss,
+profit_factor, profit_factor_infinite, expectancy, avg_win, avg_loss, largest_win, largest_loss, avg_r, r_count}
+(all trades of all windows together), mean: {net_profit, net_profit_pct, max_drawdown_abs, max_drawdown_pct,
+trade_count, win_rate, win_rate_windows, sharpe, sharpe_windows} (mean over windows), worst: {max_drawdown_abs,
+max_drawdown_pct, net_profit_pct}, note_fa}` plus `distribution` (`summarize_windows`: `count,
+windows_without_trades, mean/median_net_profit(_pct), pct_profitable, worst_window, best_window`). Windows are
+never chained into one curve. `win_rate` is a fraction 0..1; `avg_loss`/`largest_loss` are negative; metric
+times look like `2024-09-18T04:00:00+00:00`.
+
+**Stored equity is downsampled** (display only; metrics are computed before): per window the first and last
+point, the last point of every UTC day, the close of every trade's exit bar and the max-drawdown peak and
+trough. So the stored curve reproduces the stored Sharpe and `max_drawdown_abs` exactly (5-year run: ~2k of
+~30k points).
+
+**Provisional.** Every run is `provisional: true` with the label «موقت تا تایید چک داده» until
+`ALPHA_DATA_CHECK_CONFIRMED=true`.
+
+### Routes
+
+| Route | Result |
+|---|---|
+| `POST /backtests` | 202 `{id, status: "queued", provisional, labels_fa}` |
+| `GET /backtests?limit=50` (1..500) | `{count, runs: [summary]}`, newest first |
+| `GET /backtests/{id}` | detail (below) |
+| `GET /backtests/{id}/trades?window&offset=0&limit=500` (limit 1..5000) | `{run_id, window, total, offset, limit, trades: [trade]}` ordered by window, trade index |
+| `GET /backtests/{id}/equity?window` | `{run_id, window, downsampled: true, rule, count, points: [{window_index, time, balance, equity}]}` |
+| `GET /backtests/{id}/skipped?window` | `{run_id, window, count, skipped: [{window_index, time, confirmation_bar_time, direction, setup_type, reason, reason_fa, detail}]}` |
+| `POST /backtests/{id}/cancel` | `{id, status: "cancelled" (was queued) \| "running" (stops at the next check), cancel_requested: true}`; 409 `not_cancellable` when finished |
+| `DELETE /backtests/{id}` | `{id, deleted: true}`; 409 `run_active` while queued/running (cancel first) |
+| `WS /ws/backtests/{id}` | progress messages, then one final message, then close |
+
+`POST /backtests` body (`null` = not given; fields of the other mode -> 422 `field_not_for_mode`):
+
+```
+{"symbol": "XAUUSD.x", "mode": "manual", "from": "2023-01-02T00:00:00Z", "to": "2024-01-01T00:00:00Z",
+ "commission_per_lot_per_side": 0, "fallback_spread_points": null}
+{"symbol": "XAUUSD.x", "mode": "random", "windows_count": 20, "window_months": 3, "seed": 42,
+ "commission_per_lot_per_side": 3.5, "fallback_spread_points": 30}
+```
+
+Manual: `[from, to)` UTC (no offset = UTC), required. Random: `windows_count` 1..500 (default 20),
+`window_months` 1..60 (default 3), `seed` 0..2^63-1 (omitted -> generated and stored, `seed_generated: true`).
+`commission_per_lot_per_side` 0..1000, `fallback_spread_points` 0..100000. The period is validated against the
+cache at POST time with the runner's own functions.
+
+Summary item: `{id, created_at, started_at, finished_at, status, progress (0..100), symbol, mode, from, to
+(manual), windows_count, window_months, seed (the seed used; null until a seedless random run is done),
+seed_generated, strategy, strategy_version, params_version, params_hash, provisional, trade_count, net_profit,
+net_profit_pct, summary_basis: "single_window" | "window_mean" (random: mean window result), elapsed_s,
+error: {code, message_fa} | null}`.
+
+Detail = summary + `{labels_fa, provisional_label_fa, request (as validated), config (RunConfig: symbol, mode,
+start, end, windows_count, window_months, seed as submitted, cost_model {spread, fallback_spread_points,
+commission_per_lot_per_side, swap}, account {balance, risk_pct, leverage, rr}, strategy_name,
+strategy_version, params, params_version, params_hash, provisional), plan (WindowPlan: mode, windows [{index,
+start, end}], seed, seed_generated, algorithm "numpy.PCG64", numpy_version, windows_count, window_months,
+earliest_start, data_end, eligible_starts, warmup_h4_bars), fingerprint (symbol, rows, first/last bars,
+cache source mt5|seed, fetched_at, sha256 of H1/H4 content, spec), result_meta {cost_model, entry_rule
+"next_bar_open", price_basis "bid_bars", spread_source, total_trades, total_skipped, metrics_kind,
+spread_fallback}, spread_fallback {points, source auto_median_observed|user|none, observed_from, observed_to,
+observed_bars, observed_median, fallback_bars, zero_bars, total_bars}, metrics_kind, metrics, distribution,
+windows: [{index, start, end, initial_balance, final_balance, net_profit, net_profit_pct, trade_count,
+skipped_count, candidates, bars, first_bar_time, last_bar_time, zero_spread_bars_filled,
+zero_spread_bars_unfilled, weekend_holds, spread_fallback_bars, stopped_reason, equity_points_full,
+equity_points_stored, metrics}], equity_storage_rule, timings {load_s, scan_s, simulate_s, metrics_s,
+persist_s, total_s}, live (queued/running only: the WS progress snapshot)}`. `plan`, `fingerprint`,
+`metrics`, `windows` are null/empty until `done`; the spread label is added when the run is done.
+
+Trade (`trades[]`, all prices unrounded, times UTC): `{window_index, trade_index, direction, setup_type, line,
+pattern, confirmation_bar_time, decision_time, entry_time (open of the entry bar), entry, entry_bid_open,
+stop_loss, take_profit, rr, volume, risk_amount, balance_before, exit_bar_time (chart marker), exit_time,
+exit_price, exit_reason sl|tp|sl_gap|tp_gap|end_of_period, exit_reason_fa, gross_pnl, commission, net_pnl,
+r_multiple, balance_after, bars_held, spread_at_entry_points, spread_at_exit_points, held_over_weekend, flags,
+sizing_warnings_fa, reason_fa, indicators}`.
+
+WebSocket messages (`/ws/backtests/{id}`, polled every 200 ms, sent only on change):
+
+```
+{"type": "progress", "id": 3, "status": "queued|running", "phase": "queued|loading|scanning|simulating|saving",
+ "percent": 42.5, "window": 3, "window_index": 2, "windows": 20, "cancel_requested": false}
+{"type": "done", "id": 3, "status": "done", "percent": 100.0, "trade_count": 745, "net_profit": 12.3, "net_profit_pct": 1.23}
+{"type": "error"|"cancelled"|"interrupted", "id": 3, "status": ..., "percent": 57.0, "code": "...", "message_fa": "..."}
+{"type": "error", "id": 999, "status": null, "code": "backtest_not_found"|"db_unavailable", "message_fa": "..."}
+```
+
+`percent` is overall: loading 0-3, scanning 3-15, simulating 15-95 (the simulator's own progress), saving
+95-100. A finished run sends its final message immediately. `window` is 1-based (i of `windows`).
+
+Errors (`{"detail": {"code", "message_fa", "errors_fa"}}`): 422 `invalid_request` (Persian `errors_fa`),
+`field_not_for_mode`, `missing_period`, `invalid_range`, `window_too_early` (before channel + ATR warm-up),
+`window_beyond_data`, `window_empty`, `data_too_short`, `no_data`, `spec_missing`, `invalid_symbol`,
+`invalid_window`, `invalid_query`; 404 `symbol_not_configured`, `strategy_not_found`, `backtest_not_found`;
+409 `stored_params_invalid`, `not_cancellable`, `run_active`; 503 `db_unavailable`, `cache_unreadable`,
+`engine_closing`. A failed run ends `error` with the same codes (`config_mismatch`, `internal_error`).
+
+Storage (schema v2): `backtest_runs`, `backtest_windows`, `backtest_trades`, `backtest_equity` (children
+`ON DELETE CASCADE`, no foreign key to the strategy tables); the result is written in one transaction, so a
+cancelled or failed run stores no trades. Performance (31k-bar synthetic H1 cache, DEV_MODE off, through the
+API): 5-year manual run ~2.5 s cold (scan 1.4 s, simulate 0.6 s, metrics 0.2 s, persist 0.2 s), 20 x 3-month
+windows ~2.5-3 s cold, ~1.2 s with the history/scan already in the shared LRU.

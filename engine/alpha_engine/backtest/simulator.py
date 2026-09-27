@@ -6,7 +6,8 @@ confirmation bar; in the equivalence test a per-bar ``evaluate`` on ``h1[:i+1]``
 the same trades (tests/test_backtest_equivalence.py).
 
 Rules (bars are BID prices; ``spr_i`` = spread of bar i in price = points * point, zero spread filled
-causally, see ``costs.py``; ``ask = bid + spr``)
+causally, or with the run's fallback spread before the first broker spread, see ``costs.py``;
+``ask = bid + spr``)
 ------------------------------------------------------------------------------------------------------
 Per in-window bar ``i``, in this order:
 
@@ -128,6 +129,7 @@ class BarArrays:
                 open=self.open.tolist(), high=self.high.tolist(), low=self.low.tolist(), close=self.close.tolist(),
                 spr=self.spread.price.tolist(), spr_pts=self.spread.points.tolist(),
                 filled=self.spread.filled.tolist(), unfilled=self.spread.unfilled.tolist(),
+                fallback=self.spread.fallback.tolist(),
                 missing=self.missing_gap_after.tolist(), times=self.times_ns.tolist(),
             )
         return self._lists
@@ -208,7 +210,8 @@ def simulate_window(
     O, H, LO, C = L["open"], L["high"], L["low"], L["close"]
     SPR, SPTS, FILLED, UNFILLED, MISSING, TIMES = (L["spr"], L["spr_pts"], L["filled"], L["unfilled"], L["missing"],
                                                   L["times"])
-    vpu = spec.trade_tick_value / spec.trade_tick_size if spec.trade_tick_size else 0.0
+    FALLBACK = L["fallback"]
+    vpu =spec.trade_tick_value / spec.trade_tick_size if spec.trade_tick_size else 0.0
     per_side = cost_model.commission_per_lot_per_side
     initial = float(account.balance)
     balance = initial
@@ -258,6 +261,8 @@ def simulate_window(
             spread_exit = SPTS[i]
             if FILLED[i]:
                 flags.append("exit_spread_filled")
+            elif FALLBACK[i]:
+                flags.append("exit_spread_fallback")
             elif UNFILLED[i]:
                 flags.append("exit_spread_zero")
         cand = tr.cand
@@ -309,6 +314,8 @@ def simulate_window(
         flags: list[str] = []
         if FILLED[i]:
             flags.append("entry_spread_filled")
+        elif FALLBACK[i]:
+            flags.append("entry_spread_fallback")
         elif UNFILLED[i]:
             flags.append("entry_spread_zero")
         tr = _Open(
@@ -321,7 +328,7 @@ def simulate_window(
             logger.debug("bt w%d fill %s %s @ %s: bid open=%.5f spread=%d pts (%.5f)%s fill=%.5f SL=%.5f TP=%.5f "
                          "balance=%.2f risk=%.2f vol=%g (raw %.6f) actual_risk=%.4f margin=%.2f commission=%.4f", wi,
                          cand.direction, cand.setup.value, ns_to_dt(TIMES[i]).isoformat(), op, SPTS[i], spr,
-                         " [filled]" if FILLED[i] else "", fill, tr.sl, tr.tp, balance, sizing.risk_amount,
+                         " [filled]" if FILLED[i] else (" [fallback]" if FALLBACK[i] else ""), fill, tr.sl, tr.tp, balance, sizing.risk_amount,
                          sizing.volume, sizing.raw_volume, sizing.actual_risk, sizing.margin, tr.commission)
         return tr
 
@@ -416,6 +423,7 @@ def simulate_window(
     bars_done = i1_eff - i0
     filled = sum(FILLED[i0:i1_eff])
     unfilled = sum(UNFILLED[i0:i1_eff])
+    fallback_bars = sum(FALLBACK[i0:i1_eff])
     if progress is not None and bars_done:
         progress(bars_done)
     result = WindowResult(
@@ -424,11 +432,13 @@ def simulate_window(
         last_bar_time=ns_to_dt(TIMES[i1_eff - 1]) if bars_done else None,
         trades=trades, skipped=skipped, equity=equity, candidates=n_candidates, zero_spread_bars_filled=int(filled),
         zero_spread_bars_unfilled=int(unfilled), weekend_holds=int(weekend_holds), stopped_reason=stopped,
+        spread_fallback_bars=int(fallback_bars),
     )
     if dev:
         logger.debug("bt window %d done: bars=%d candidates=%d trades=%d skipped=%d balance %.2f -> %.2f "
-                     "zero_spread filled=%d unfilled=%d weekend_holds=%d stopped=%s", wi, bars_done, n_candidates,
-                     len(trades), len(skipped), initial, balance, filled, unfilled, weekend_holds, stopped)
+                     "zero_spread filled=%d fallback(%d pts)=%d unfilled=%d weekend_holds=%d stopped=%s", wi,
+                     bars_done, n_candidates, len(trades), len(skipped), initial, balance, filled,
+                     bars.spread.fallback_points, fallback_bars, unfilled, weekend_holds, stopped)
     return result
 
 

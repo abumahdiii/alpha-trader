@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import math
+import statistics
 from datetime import timedelta
 
 import numpy as np
@@ -51,11 +53,11 @@ def walk() -> tuple[pd.DataFrame, pd.DataFrame]:
     return with_spread(h1, 3), h4
 
 
-def config(h1: pd.DataFrame, start: int, end: int | None = None) -> RunConfig:
+def config(h1: pd.DataFrame, start: int, end: int | None = None, costs: CostModel = COSTS) -> RunConfig:
     _, clean = resolve_params({})
     end_ts = h1["time"].iloc[end] if end is not None else h1["time"].iloc[-1] + timedelta(hours=1)
     return RunConfig(symbol=SYMBOL, mode="manual", start=h1["time"].iloc[start].to_pydatetime(),
-                     end=end_ts.to_pydatetime(), cost_model=COSTS, account=ACCOUNT, strategy_name=STRATEGY.name,
+                     end=end_ts.to_pydatetime(), cost_model=costs, account=ACCOUNT, strategy_name=STRATEGY.name,
                      strategy_version=STRATEGY.version, params=clean, params_hash=params_hash(clean))
 
 
@@ -66,7 +68,8 @@ def reference_trades(h1: pd.DataFrame, h4: pd.DataFrame, i0: int, i1: int) -> tu
     o, h, lo, c = (h1[k].to_numpy(dtype=float).tolist() for k in ("open", "high", "low", "close"))
     raw = h1["spread"].to_numpy().tolist()
     spr = []
-    last = 0
+    positive = [s for s in raw if s > 0]
+    last = math.ceil(statistics.median(positive)) if positive else 0  # auto fallback before the first spread
     for s in raw:  # causal zero fill
         last = s if s > 0 else last
         spr.append(last * SPEC.point)
@@ -142,8 +145,13 @@ def reference_trades(h1: pd.DataFrame, h4: pd.DataFrame, i0: int, i1: int) -> tu
     return trades, skipped
 
 
-def test_scan_simulator_equals_per_bar_evaluate_reference(walk) -> None:
+@pytest.mark.parametrize("lead_zero", [0, 1600])
+def test_scan_simulator_equals_per_bar_evaluate_reference(walk, lead_zero: int) -> None:
+    """``lead_zero``: no broker spread before that bar (like the real cache) -> the auto fallback spread."""
     h1, h4 = walk
+    if lead_zero:
+        h1 = h1.copy()
+        h1.loc[: lead_zero - 1, "spread"] = 0
     cfg = config(h1, 1000)
     history = HistoryData(symbol=SYMBOL, h1=h1, h4=h4, spec=SPEC)
     result = run_backtest(cfg, history)
@@ -156,6 +164,10 @@ def test_scan_simulator_equals_per_bar_evaluate_reference(walk) -> None:
                 volume=t.volume, net=t.net_pnl, balance=t.balance_after) for t in win.trades]
     assert len(got) >= 20
     assert got == ref  # exact, float for float
+    if lead_zero:
+        first_spread = int(np.flatnonzero(h1["spread"].to_numpy() > 0)[0])  # >= lead_zero (random zeros too)
+        assert win.spread_fallback_bars == first_spread - i0 and result.spread_fallback.source == "auto_median_observed"
+        assert any("entry_spread_fallback" in t.flags for t in win.trades)
     assert [(s.confirmation_bar_time, s.reason.value) for s in win.skipped
             if s.reason is not SkipReason.POSITION_OPEN] == ref_skipped
     # the open-trade gating really mattered: scan produced candidates while a trade was open
@@ -198,6 +210,28 @@ def test_future_bars_do_not_change_the_past(walk, cutoff: int) -> None:
     eq_before = [p for p in base.equity if p.time <= decision.to_pydatetime()]
     assert [p for p in pert.equity if p.time <= decision.to_pydatetime()] == eq_before
     assert pert.trades != base.trades  # the future really changed
+
+
+def test_future_bars_do_not_change_the_past_with_a_fixed_fallback_spread(walk) -> None:
+    """No broker spread before bar 1600 and a user fallback of 40 points: prices, decisions and the causal
+    spread fill of the past never depend on later bars. (The AUTO fallback is, by design, one constant cost
+    estimate from the whole observed history -- costs.py -- so this invariant is checked with a fixed one.)"""
+    h1, h4 = walk
+    h1 = h1.copy()
+    h1.loc[:1599, "spread"] = 0
+    cutoff = 1500
+    cfg = config(h1, 1000, costs=CostModel(commission_per_lot_per_side=3.5, fallback_spread_points=40))
+    base = run_backtest(cfg, HistoryData(symbol=SYMBOL, h1=h1, h4=h4, spec=SPEC)).windows[0]
+    decision = h1["time"].iloc[cutoff] + timedelta(hours=1)
+    h1m = _randomize(h1, np.arange(cutoff + 1, len(h1)), seed=11)
+    h4m = _randomize(h4, np.flatnonzero((h4["time"] + H4_DURATION > decision).to_numpy()), seed=12)
+    pert = run_backtest(cfg, HistoryData(symbol=SYMBOL, h1=h1m, h4=h4m, spec=SPEC)).windows[0]
+    cut_open = h1["time"].iloc[cutoff].to_pydatetime()
+    before = [t for t in base.trades if t.exit_bar_time <= cut_open]
+    assert len(before) >= 3 and all("entry_spread_fallback" in t.flags for t in before)
+    assert [t for t in pert.trades if t.exit_bar_time <= cut_open] == before
+    eq_before = [p for p in base.equity if p.time <= decision.to_pydatetime()]
+    assert [p for p in pert.equity if p.time <= decision.to_pydatetime()] == eq_before
 
 
 def test_simulation_on_a_window_uses_the_full_history_scan(walk) -> None:
