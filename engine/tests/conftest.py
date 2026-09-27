@@ -106,3 +106,11 @@ def make_settings(tmp_path: Path) -> Callable[..., Settings]:
         return load_settings(env_file=env_file, environ={**base, **(environ or {})})
 
     return _make
+
+
+@pytest.fixture(scope="session")
+def synthetic():
+    """Default deterministic synthetic dataset: {(symbol, Timeframe): SyntheticSeries}. Do not mutate."""
+    from fixtures.synthetic_ohlcv import generate_dataset
+
+    return generate_dataset()
