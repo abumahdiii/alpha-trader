@@ -11,8 +11,9 @@ import 'core/app_logger.dart';
 import 'core/dev_mode.dart';
 import 'core/main_window.dart';
 import 'core/single_instance_guard.dart';
+import 'providers/engine_api_provider.dart';
 import 'providers/engine_status_provider.dart';
-import 'screens/home_screen.dart';
+import 'screens/shell_screen.dart';
 import 'services/engine_process.dart';
 import 'theme/theme.dart';
 import 'theme/theme_provider.dart';
@@ -75,6 +76,10 @@ Future<void> main() async {
             create: (context) => ThemeProvider(initialThemeMode: initialThemeMode),
           ),
           ChangeNotifierProvider<EngineStatusProvider>.value(value: engineStatus),
+          // Data API for the pages; non-null only while the engine runs.
+          ChangeNotifierProvider<EngineApiProvider>(
+            create: (_) => EngineApiProvider(engine: engineStatus),
+          ),
         ],
         child: const AlphaTraderApp(),
       ),
@@ -162,7 +167,7 @@ class _AlphaTraderAppState extends State<AlphaTraderApp> with WindowListener {
       ],
       supportedLocales: const [Locale('fa', 'IR'), Locale('en', 'US')],
       locale: const Locale('fa', 'IR'),
-      home: const HomeScreen(),
+      home: const ShellScreen(),
     );
   }
 }
