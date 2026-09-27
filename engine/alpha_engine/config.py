@@ -36,6 +36,7 @@ REPO_ROOT: Path = ENGINE_DIR.parent
 DEFAULT_ENV_FILE: Path = REPO_ROOT / ".env"
 DEFAULT_DATA_DIR: Path = REPO_ROOT / "data"
 DEFAULT_ENGINE_PORT = 8765
+DEFAULT_SYMBOLS: tuple[str, ...] = ("XAUUSD.x", "BRNUSD.x")
 
 ENV_FILE_OVERRIDE_VAR = "ALPHA_TRADER_ENV_FILE"
 DATA_DIR_VAR = "ALPHA_TRADER_DATA_DIR"
@@ -81,6 +82,10 @@ class Settings(BaseModel):
     dev_mode: bool = False
     mt5_server_utc_offset: float | None = Field(default=None, ge=-14, le=14)
     data_dir: Path = DEFAULT_DATA_DIR
+    # Connect to MT5 in the background when the app starts (tests set ENGINE_MT5_AUTOCONNECT=false).
+    engine_mt5_autoconnect: bool = True
+    # Symbols served by /symbols and /rates (ENGINE_SYMBOLS, comma-separated).
+    engine_symbols: tuple[str, ...] = DEFAULT_SYMBOLS
     env_file: Path | None = None
     env_file_loaded: bool = False
 
@@ -91,6 +96,30 @@ class Settings(BaseModel):
         if isinstance(value, str):
             return value.strip().lower() == "true"
         return value
+
+    @field_validator("engine_mt5_autoconnect", mode="before")
+    @classmethod
+    def _parse_autoconnect(cls, value: Any) -> Any:
+        # Default on; only an explicit "false"/"0"/"no"/"off" disables it.
+        if isinstance(value, str):
+            return value.strip().lower() not in {"false", "0", "no", "off"}
+        return value
+
+    @field_validator("engine_symbols", mode="before")
+    @classmethod
+    def _parse_symbols(cls, value: Any) -> Any:
+        from .data.symbols import validate_symbol_name
+
+        items = value.split(",") if isinstance(value, str) else list(value)
+        names: list[str] = []
+        for item in items:
+            if str(item).strip():
+                name = validate_symbol_name(str(item))
+                if name not in names:
+                    names.append(name)
+        if not names:
+            raise ValueError("ENGINE_SYMBOLS must name at least one symbol")
+        return tuple(names)
 
     @property
     def mt5_login_masked(self) -> str | None:
@@ -107,6 +136,8 @@ class Settings(BaseModel):
             "dev_mode": self.dev_mode,
             "mt5_server_utc_offset": self.mt5_server_utc_offset,
             "data_dir": str(self.data_dir),
+            "engine_mt5_autoconnect": self.engine_mt5_autoconnect,
+            "engine_symbols": list(self.engine_symbols),
             "env_file": str(self.env_file) if self.env_file is not None else None,
             "env_file_loaded": self.env_file_loaded,
         }
@@ -152,6 +183,8 @@ def load_settings(
     port = _clean(merged.get("ENGINE_PORT"))
     offset = _clean(merged.get("MT5_SERVER_UTC_OFFSET"))
     data_dir = _clean(merged.get(DATA_DIR_VAR))
+    autoconnect = _clean(merged.get("ENGINE_MT5_AUTOCONNECT"))
+    symbols = _clean(merged.get("ENGINE_SYMBOLS"))
 
     kwargs: dict[str, Any] = {
         "mt5_terminal_path": _clean(merged.get("MT5_TERMINAL_PATH")),
@@ -168,6 +201,10 @@ def load_settings(
         kwargs["engine_port"] = port
     if offset is not None:
         kwargs["mt5_server_utc_offset"] = offset
+    if autoconnect is not None:
+        kwargs["engine_mt5_autoconnect"] = autoconnect
+    if symbols is not None:
+        kwargs["engine_symbols"] = symbols
     return Settings(**kwargs)
 
 

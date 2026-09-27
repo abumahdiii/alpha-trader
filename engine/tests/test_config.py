@@ -75,6 +75,8 @@ def test_missing_env_file_uses_defaults(tmp_path: Path) -> None:
     assert settings.mt5_terminal_path is None
     assert settings.mt5_server_utc_offset is None
     assert settings.data_dir == DEFAULT_DATA_DIR
+    assert settings.engine_mt5_autoconnect is True
+    assert settings.engine_symbols == ("XAUUSD.x", "BRNUSD.x")
 
 
 def test_values_loaded_from_env_file(make_settings) -> None:
@@ -197,7 +199,8 @@ def test_repr_str_summary_never_leak(make_settings) -> None:
     assert "****5678" in repr(settings)
     assert set(summary) == {
         "mt5_terminal_path", "mt5_server", "mt5_login_masked", "mt5_password_set", "engine_port",
-        "dev_mode", "mt5_server_utc_offset", "data_dir", "env_file", "env_file_loaded",
+        "dev_mode", "mt5_server_utc_offset", "data_dir", "engine_mt5_autoconnect", "engine_symbols",
+        "env_file", "env_file_loaded",
     }
 
 
@@ -205,3 +208,28 @@ def test_settings_are_immutable(make_settings) -> None:
     settings = make_settings(FAKE_ENV)
     with pytest.raises(Exception):
         settings.engine_port = 9999  # type: ignore[misc]
+
+
+# --- phase 1 data settings ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(("raw", "expected"), [("false", False), ("0", False), ("OFF", False), ("no", False),
+                                               ("true", True), ("1", True), ("", True)])
+def test_autoconnect_parsing(tmp_path: Path, raw: str, expected: bool) -> None:
+    settings = load_settings(env_file=tmp_path / "none.env", environ={"ENGINE_MT5_AUTOCONNECT": raw})
+    assert settings.engine_mt5_autoconnect is expected
+
+
+def test_conftest_disables_autoconnect_for_tests(make_settings) -> None:
+    assert make_settings().engine_mt5_autoconnect is False
+    assert get_settings().engine_mt5_autoconnect is False
+
+
+def test_engine_symbols_parsing(make_settings) -> None:
+    settings = make_settings("ENGINE_SYMBOLS= XAUUSD.x , EURUSD,XAUUSD.x,\n")
+    assert settings.engine_symbols == ("XAUUSD.x", "EURUSD")
+
+
+@pytest.mark.parametrize("raw", ["../etc", "a/b", "X\\Y", ",,"])
+def test_engine_symbols_rejects_bad_names(make_settings, raw: str) -> None:
+    with pytest.raises(ValueError):
+        make_settings(f"ENGINE_SYMBOLS={raw}\n")
