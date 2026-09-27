@@ -106,9 +106,11 @@ def test_registry_import_registers_stddev_channel(started) -> None:
 
 def test_routers_are_mounted(settings: Settings) -> None:
     paths = create_app(settings).openapi()["paths"]
-    assert {"/health", "/shutdown", "/symbols", "/rates", "/rates/meta", "/strategies", "/strategies/{name}",
-            "/settings"} <= set(paths)
+    assert {"/health", "/shutdown", "/symbols", "/rates", "/rates/meta", "/rates/gaps", "/rates/update",
+            "/strategies", "/strategies/{name}", "/settings", "/chart/channel", "/chart/setups"} <= set(paths)
     assert {"get", "put"} <= set(paths["/strategies/{name}"]) and {"get", "put"} <= set(paths["/settings"])
+    assert set(paths["/rates/update"]) == {"post"} and set(paths["/rates/gaps"]) == {"get"}
+    assert set(paths["/chart/channel"]) == {"get"} and set(paths["/chart/setups"]) == {"get"}
 
 
 # --- /strategies ---------------------------------------------------------------------------------------

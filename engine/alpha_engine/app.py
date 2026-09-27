@@ -10,8 +10,11 @@ creates an :class:`~alpha_engine.mt5_adapter.Mt5Adapter` (which imports ``MetaTr
 here) and plugs ``adapter.status`` in there. On startup (lifespan) it starts a background, non-blocking
 connect when ``ENGINE_MT5_AUTOCONNECT`` is true; on shutdown it calls ``adapter.shutdown()``.
 
-Market-data routes (``GET /symbols``, ``GET /rates``, ``GET /rates/meta``) live in
-:mod:`alpha_engine.routes` and use ``app.state.market_data``.
+Market-data routes (``GET /symbols``, ``GET /rates``, ``GET /rates/meta``, ``GET /rates/gaps``,
+``POST /rates/update``) live in :mod:`alpha_engine.routes` and use ``app.state.market_data``.
+
+Chart routes (``GET /chart/channel``, ``GET /chart/setups``; cache-only, read-only) use
+``app.state.market_data``, ``app.state.db`` and a bounded in-process cache ``app.state.chart_cache``.
 
 Strategy and account-settings routes (``GET /strategies``, ``GET|PUT /strategies/{name}``,
 ``GET|PUT /settings``) use ``app.state.db`` and ``app.state.strategy_registry``:
@@ -165,6 +168,7 @@ def create_app(
     from . import strategies  # noqa: F401  (importing the package registers every code-defined strategy)
     from .market_data import MarketDataService
     from .mt5_adapter import Mt5Adapter
+    from .routes import chart as chart_routes
     from .routes import rates as rates_routes
     from .routes import settings as settings_routes
     from .routes import strategies as strategies_routes
@@ -202,10 +206,12 @@ def create_app(
     app.state.server = None  # set by __main__ to the uvicorn.Server handle
     app.state.db = None  # opened by the lifespan
     app.state.strategy_registry = registry
+    app.state.chart_cache = chart_routes.ChartCache()
     app.include_router(symbols_routes.router)
     app.include_router(rates_routes.router)
     app.include_router(strategies_routes.router)
     app.include_router(settings_routes.router)
+    app.include_router(chart_routes.router)
 
     @app.middleware("http")
     async def dev_request_log(

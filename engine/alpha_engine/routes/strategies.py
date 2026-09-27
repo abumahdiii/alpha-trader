@@ -7,7 +7,7 @@
   different -> params version n+1 becomes active. Invalid -> 422 with Persian messages.
 
 Errors use ``{"detail": {"code": ..., "message_fa": ..., "errors_fa": [...]}}``.
-Dependencies read ``request.app.state.db`` (an ``EngineConnection``) and, optionally,
+Dependencies read ``request.app.state.db`` (an ``EngineConnection``, via the shared ``routes.get_db``) and, optionally,
 ``request.app.state.strategy_registry`` (defaults to the process-wide registry).
 """
 
@@ -30,6 +30,7 @@ from ..storage.strategies_repo import (
 from ..strategy.base import Strategy
 from ..strategy.params import ParamSpec, ParamValue
 from ..strategy.registry import StrategyRegistry, UnknownStrategyError, default_registry
+from . import get_db
 
 logger = get_logger(__name__)
 
@@ -78,13 +79,6 @@ def _error(status: int, code: str, message_fa: str, errors_fa: list[str] | None 
         status_code=status,
         detail=ErrorDetail(code=code, message_fa=message_fa, errors_fa=errors_fa or []).model_dump(),
     )
-
-
-def get_db(request: Request) -> EngineConnection:
-    db = getattr(request.app.state, "db", None)
-    if db is None:
-        raise _error(503, "db_unavailable", "پایگاه داده engine در دسترس نیست.")
-    return db
 
 
 def get_registry(request: Request) -> StrategyRegistry:
