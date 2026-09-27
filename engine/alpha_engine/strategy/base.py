@@ -31,7 +31,7 @@ import pandas as pd
 
 from ..logging_setup import get_logger, is_dev_mode
 from ..storage.account_settings import AccountSettings
-from .params import ParamSchema
+from .params import ParamSchema, ParamValue
 from .signal import SignalCandidate
 
 logger = get_logger(__name__)
@@ -146,6 +146,16 @@ class Strategy(ABC):
     version: ClassVar[int]
     title_fa: ClassVar[str]
     param_schema: ClassVar[ParamSchema]
+
+    @classmethod
+    def validate_params(cls, values: Mapping[str, Any] | None) -> tuple[dict[str, ParamValue], list[str]]:
+        """Schema validation plus the strategy's cross-field rules: ``(clean, errors_fa)``.
+
+        Same contract as :meth:`ParamSchema.validate` (on any error ``clean`` is ``{}``). Default: the
+        schema only. Override to add rules the schema cannot express, so the params store / API reject a
+        parameter set the strategy would refuse at evaluation time.
+        """
+        return cls.param_schema.validate(values)
 
     def prepare(self, h1_full: pd.DataFrame, h4_full: pd.DataFrame, params: Mapping[str, Any]) -> Mapping[str, Any]:
         """Optional vectorised precompute over the full history (e.g. rolling channels).

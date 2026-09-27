@@ -1,4 +1,4 @@
-"""``/settings`` REST routes for account/risk settings (not yet mounted).
+"""``/settings`` REST routes for account/risk settings (mounted by ``create_app``).
 
 * ``GET /settings`` -- current :class:`AccountSettings` (stored, or the defaults).
 * ``PUT /settings`` -- partial update, e.g. ``{"risk_pct": 0.5}``; returns the new settings.

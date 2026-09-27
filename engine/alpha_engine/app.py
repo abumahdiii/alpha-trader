@@ -13,6 +13,17 @@ connect when ``ENGINE_MT5_AUTOCONNECT`` is true; on shutdown it calls ``adapter.
 Market-data routes (``GET /symbols``, ``GET /rates``, ``GET /rates/meta``) live in
 :mod:`alpha_engine.routes` and use ``app.state.market_data``.
 
+Strategy and account-settings routes (``GET /strategies``, ``GET|PUT /strategies/{name}``,
+``GET|PUT /settings``) use ``app.state.db`` and ``app.state.strategy_registry``:
+
+* the factory imports :mod:`alpha_engine.strategies` (which registers ``stddev_channel`` in the default
+  registry) and sets ``app.state.strategy_registry``;
+* the lifespan opens the SQLite database ``<data_dir>/alpha.db`` (:func:`~alpha_engine.storage.db.open_db`,
+  migrations applied) into ``app.state.db`` on startup and closes it on shutdown. If it cannot be opened
+  (e.g. written by a newer engine), the error is logged, ``app.state.db`` stays ``None`` and those routes
+  answer 503 ``db_unavailable`` -- ``/health`` keeps working either way. Outside the lifespan (a
+  ``TestClient`` used without ``with``) no database file is created at all.
+
 ``app`` is provided lazily (PEP 562 module ``__getattr__``) so that importing this module does not load
 settings / the ``.env`` as a side effect; ``from alpha_engine.app import app`` and
 ``uvicorn alpha_engine.app:app`` both work.
@@ -33,6 +44,7 @@ from pydantic import BaseModel, ConfigDict
 from . import __version__
 from .config import Settings, get_settings, mask_login
 from .logging_setup import configure_logging, get_logger, is_dev_mode
+from .storage.db import EngineConnection, default_db_path, open_db
 
 logger = get_logger(__name__)
 
@@ -105,23 +117,63 @@ def _request_exit(server: Any) -> None:
     server.should_exit = True
 
 
+def open_engine_db(settings: Settings) -> EngineConnection | None:
+    """Open ``<data_dir>/alpha.db`` (creating/migrating it); ``None`` (error logged) if that fails."""
+    try:
+        path = default_db_path(settings)
+        db = open_db(path)
+    except Exception as exc:
+        # Not fatal for the process: /health must keep answering; DB routes answer 503 instead.
+        logger.error("engine database could not be opened (%s: %s); /strategies and /settings will answer 503",
+                     type(exc).__name__, exc)
+        if is_dev_mode():
+            logger.debug("startup: database open failed", exc_info=True)
+        return None
+    if is_dev_mode():
+        logger.debug("startup: engine database opened at %s", path)
+    return db
+
+
+def close_engine_db(app: FastAPI) -> None:
+    """Close ``app.state.db`` (if open) and set it to ``None``. Never raises."""
+    db: EngineConnection | None = getattr(app.state, "db", None)
+    app.state.db = None
+    if db is None:
+        return
+    try:
+        db.close()
+    except Exception:
+        logger.warning("engine database did not close cleanly")
+        if is_dev_mode():
+            logger.debug("shutdown: database close failed", exc_info=True)
+        return
+    if is_dev_mode():
+        logger.debug("shutdown: engine database closed")
+
+
 def create_app(
     settings: Settings | None = None,
     mt5_status_provider: Mt5StatusProvider | None = None,
     mt5_adapter: Any | None = None,
     market_data: Any | None = None,
+    strategy_registry: Any | None = None,
 ) -> FastAPI:
     settings = settings if settings is not None else get_settings()
     configure_logging(settings, force=True)
 
     # Local imports: these modules import Mt5Status from here.
+    from . import strategies  # noqa: F401  (importing the package registers every code-defined strategy)
     from .market_data import MarketDataService
     from .mt5_adapter import Mt5Adapter
     from .routes import rates as rates_routes
+    from .routes import settings as settings_routes
+    from .routes import strategies as strategies_routes
     from .routes import symbols as symbols_routes
+    from .strategy.registry import default_registry
 
     adapter = mt5_adapter if mt5_adapter is not None else Mt5Adapter(settings)
     service = market_data if market_data is not None else MarketDataService.create(settings, adapter)
+    registry = strategy_registry if strategy_registry is not None else default_registry
 
     @asynccontextmanager
     async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
@@ -132,11 +184,15 @@ def create_app(
         elif is_dev_mode():
             logger.debug("startup: MT5 autoconnect disabled")
         try:
+            app_.state.db = open_engine_db(settings)
             yield
         finally:
-            if is_dev_mode():
-                logger.debug("shutdown: closing MT5 connection")
-            adapter.shutdown()
+            try:
+                close_engine_db(app_)
+            finally:
+                if is_dev_mode():
+                    logger.debug("shutdown: closing MT5 connection")
+                adapter.shutdown()
 
     app = FastAPI(title="Alpha Trader Engine", version=__version__, lifespan=lifespan)
     app.state.settings = settings
@@ -144,8 +200,12 @@ def create_app(
     app.state.market_data = service
     app.state.mt5_status_provider = mt5_status_provider or adapter.status
     app.state.server = None  # set by __main__ to the uvicorn.Server handle
+    app.state.db = None  # opened by the lifespan
+    app.state.strategy_registry = registry
     app.include_router(symbols_routes.router)
     app.include_router(rates_routes.router)
+    app.include_router(strategies_routes.router)
+    app.include_router(settings_routes.router)
 
     @app.middleware("http")
     async def dev_request_log(
@@ -204,7 +264,7 @@ def create_app(
         return ShutdownResponse()
 
     if is_dev_mode():
-        logger.debug("app created: %s", settings.safe_summary())
+        logger.debug("app created: %s strategies=%s", settings.safe_summary(), registry.names())
     return app
 
 

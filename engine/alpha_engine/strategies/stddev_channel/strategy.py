@@ -26,11 +26,11 @@ import pandas as pd
 from ...logging_setup import get_logger, is_dev_mode
 from ...storage.account_settings import AccountSettings
 from ...strategy.base import H4_DURATION, Strategy, StrategyContext, bar_open_times, slice_closed_bars
-from ...strategy.params import ParamSchema, params_hash
+from ...strategy.params import ParamSchema, ParamValue, params_hash
 from ...strategy.registry import register
 from ...strategy.signal import SignalCandidate
 from .levels import stop_loss_price
-from .params import SCHEMA, StdDevParams, resolve_params
+from .params import SCHEMA, InvalidParamsError, StdDevParams, resolve_params
 from .setups import (
     CHANNEL_DIR_FA,
     LINE_FA,
@@ -94,6 +94,15 @@ class StdDevChannelStrategy(Strategy):
     version: ClassVar[int] = 1
     title_fa: ClassVar[str] = "کانال انحراف معیار"
     param_schema: ClassVar[ParamSchema] = SCHEMA
+
+    @classmethod
+    def validate_params(cls, values: Mapping[str, Any] | None) -> tuple[dict[str, ParamValue], list[str]]:
+        """Schema + cross-field rules of :func:`resolve_params` (e.g. at least one confirmation pattern)."""
+        try:
+            _, clean = resolve_params(values)
+        except InvalidParamsError as exc:
+            return {}, list(exc.errors_fa)
+        return clean, []
 
     # ------------------------------------------------------------------ evaluate (one closed bar)
     def evaluate(self, ctx: StrategyContext) -> SignalCandidate | None:

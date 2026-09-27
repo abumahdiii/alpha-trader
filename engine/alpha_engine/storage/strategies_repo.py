@@ -16,7 +16,7 @@ Rules:
   receives); if they are no longer valid (removed param / tightened bound) it raises
   :class:`StoredParamsInvalidError` -- never a silent change of the user's parameters.
 * ``save_params(name, values)``: full replacement (missing keys take their defaults), validated by the
-  strategy's schema. Same canonical params as the active version -> that version is returned, no new
+  strategy's schema and cross-field rules (``Strategy.validate_params``). Same canonical params as the active version -> that version is returned, no new
   row. Different -> version n+1 becomes active. Re-saving an older parameter set also creates n+1:
   history stays linear.
 * ``list_versions(name)``: all params versions, oldest first (empty until first access).
@@ -133,7 +133,7 @@ class StrategiesRepo:
             active = self._active_row(name)
             if active is None:
                 return self._insert_active(name, cls.version, schema.defaults())
-            clean, errors = schema.validate(active.params)
+            clean, errors = cls.validate_params(active.params)
             if errors:
                 if is_dev_mode():
                     logger.debug("stored params of %s v%d are invalid now: %s", name, active.version, errors)
@@ -147,7 +147,7 @@ class StrategiesRepo:
     def save_params(self, name: str, values: Mapping[str, Any] | None) -> tuple[StrategyVersionRecord, bool]:
         """Validate and save; returns ``(active_record, created_new_version)``."""
         cls = self._registry.get(name)
-        clean, errors = cls.param_schema.validate(values)
+        clean, errors = cls.validate_params(values)
         if errors:
             if is_dev_mode():
                 logger.debug("params rejected for %s: %s", name, errors)
