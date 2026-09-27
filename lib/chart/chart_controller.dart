@@ -109,6 +109,7 @@ class ChartController extends ChangeNotifier {
   String? _dataInfoError;
   bool _updating = false;
   UpdateOutcome? _updateOutcome;
+  int? _inspectedIndex;
 
   // Inputs of the last load() that went out (snapshot at its start), for
   // the «به‌روزرسانی نمودار» highlight.
@@ -153,6 +154,10 @@ class ChartController extends ChangeNotifier {
   bool get updating => _updating;
   UpdateOutcome? get updateOutcome => _updateOutcome;
   bool get isLoading => _state == ChartLoadState.loading;
+
+  /// Bar whose values the candle info panel shows (opened by a click on a
+  /// candle); null = panel closed. Cleared by every load.
+  int? get inspectedIndex => _inspectedIndex;
 
   /// True when the selected symbol / timeframe / range differs from what the
   /// chart currently shows, i.e. «به‌روزرسانی نمودار» would change it.
@@ -294,6 +299,7 @@ class ChartController extends ChangeNotifier {
     _loadedTimeframe = tf;
     _loadedFrom = from;
     _loadedTo = to;
+    _inspectedIndex = null;
     final Stopwatch sw = Stopwatch()..start();
     _log('load #$serial $symbol ${tf.code} ${from ?? 'default'} .. ${to ?? 'default'}');
     _setState(ChartLoadState.loading);
@@ -369,6 +375,29 @@ class ChartController extends ChangeNotifier {
   void _resetSelection() {
     _selectedSetupId = null;
     _highlightIndex = null;
+    _inspectedIndex = null;
+  }
+
+  /// Opens the candle info panel on bar [index] (a click on that candle).
+  void inspectCandle(int index) {
+    final ChartData? d = _data;
+    if (d == null || index < 0 || index >= d.length) {
+      _log('inspect candle $index ignored (bars=${d?.length ?? 0})');
+      return;
+    }
+    if (_inspectedIndex == index) return;
+    _inspectedIndex = index;
+    _log('candle inspected: bar $index (${formatUtc(d.candles[index].time)})');
+    notifyListeners();
+  }
+
+  /// Closes the candle info panel; [reason] is only logged.
+  void clearInspection({String reason = ''}) {
+    final int? i = _inspectedIndex;
+    if (i == null) return;
+    _inspectedIndex = null;
+    _log('candle panel closed (bar $i${reason.isEmpty ? '' : ', $reason'})');
+    notifyListeners();
   }
 
   /// Selects a setup (marker click or table row). With [jump] the chart

@@ -162,6 +162,24 @@ void main() {
     expect(src.calls.where((String s) => s.startsWith('rates')), hasLength(1));
   });
 
+  test('inspectedIndex: inspect / clear; out-of-range ignored; every load resets it', () async {
+    await c.init();
+    expect(c.inspectedIndex, isNull);
+    c.inspectCandle(5);
+    expect(c.inspectedIndex, 5);
+    c.inspectCandle(c.data!.length);
+    expect(c.inspectedIndex, 5, reason: 'invalid index ignored');
+    c.clearInspection();
+    expect(c.inspectedIndex, isNull);
+
+    c.inspectCandle(7);
+    await c.load();
+    expect(c.inspectedIndex, isNull);
+    c.inspectCandle(7);
+    await c.setTimeframe(ChartTimeframe.h4);
+    expect(c.inspectedIndex, isNull);
+  });
+
   test('data info loads meta + gaps', () async {
     await c.init();
     await c.refreshDataInfo();

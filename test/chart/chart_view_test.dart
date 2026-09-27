@@ -10,6 +10,7 @@ import 'package:alpha_trader/chart/widgets/chart_canvas.dart';
 import 'package:alpha_trader/theme/theme.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -53,7 +54,14 @@ Offset _at(WidgetTester tester, int index, double price) {
   return origin + Offset(s.viewport!.xOf(index), s.priceScale!.yOf(price));
 }
 
+const ValueKey<String> _panelKey = ValueKey<String>('candle-info-panel');
 const ValueKey<String> _loadKey = ValueKey<String>('chart-load');
+
+/// Clicks the column of bar [index] at its close (no setup marker there).
+Future<void> _tapCandle(WidgetTester tester, ChartData d, int index) async {
+  await tester.tapAt(_at(tester, index, d.candles[index].close));
+  await tester.pumpAndSettle();
+}
 
 /// Lets the fake source's futures complete after a button tap.
 Future<void> _settleLoad(WidgetTester tester) async {
@@ -96,29 +104,130 @@ void main() {
     expect(_canvas(tester).viewport!.startIndex, v0.startIndex);
   });
 
-  testWidgets('hover shows server time, UTC and channel values of that bar', (WidgetTester tester) async {
+  testWidgets('candle panel: hidden after load; a click on a candle shows that bar (Data Window rows)',
+      (WidgetTester tester) async {
     final FakeChartDataSource src = FakeChartDataSource(h1Count: 1200);
     final ChartController c = await _pump(tester, src);
+    expect(find.byKey(_panelKey), findsNothing, reason: 'no panel by default');
+    expect(find.text('آخرین کندل بازه'), findsNothing);
+
+    // Hovering alone no longer opens it (the crosshair still follows the mouse).
     final ChartData d = c.data!;
     final int i = d.length - 30;
     final TestGesture g = await tester.createGesture(kind: PointerDeviceKind.mouse);
-    final Offset pos = _at(tester, i, d.candles[i].close);
-    await g.addPointer(location: pos + const Offset(0, 30));
-    await g.moveTo(pos);
+    await g.addPointer(location: _at(tester, i, d.candles[i].close) + const Offset(0, 30));
+    await g.moveTo(_at(tester, i, d.candles[i].close));
     await tester.pump();
+    expect(find.byKey(_panelKey), findsNothing);
+    await g.removePointer();
+
+    await _tapCandle(tester, d, i);
+    expect(c.inspectedIndex, i);
+    expect(find.byKey(_panelKey), findsOneWidget);
+    expect(find.text('کندل انتخاب‌شده'), findsOneWidget);
     final Candle bar = d.candles[i];
-    expect(find.text('کندل زیر نشانگر'), findsOneWidget);
     expect(find.text(bar.serverTime!), findsOneWidget);
-    expect(find.text(formatMt5Time(bar.time)), findsWidgets); // panel + crosshair label is painted, not text
+    expect(find.text(formatMt5Time(bar.time)), findsWidgets); // UTC row (+ «کانال کندل H4» on an H4 open)
     expect(bar.serverTime, isNot(formatMt5Time(bar.time)));
-    expect(find.text(formatChartPrice(bar.open, 2)), findsWidgets);
+    expect(find.text(formatLocal(bar.time)), findsWidgets);
+    for (final double price in <double>[bar.open, bar.high, bar.low, bar.close]) {
+      expect(find.text(formatChartPrice(price, 2)), findsWidgets);
+    }
+    expect(find.text('${bar.tickVolume}'), findsWidgets);
+    expect(find.text('${bar.spread}'), findsWidgets);
     final ChannelPoint p = d.channel[i]!;
     expect(find.text(formatChartPrice(p.upper, 2)), findsOneWidget);
     expect(find.text(formatChartPrice(p.mid, 2)), findsOneWidget);
     expect(find.text(formatChartPrice(p.lower, 2)), findsOneWidget);
-    expect(find.text('ATR H1'), findsOneWidget);
+    for (final String label in <String>[
+      'زمان سرور',
+      'زمان UTC',
+      'زمان محلی',
+      'Open',
+      'High',
+      'Low',
+      'Close',
+      'حجم تیک',
+      'اسپرد (پوینت)',
+      'خط بالا',
+      'خط میانی',
+      'خط پایین',
+      'شیب (هر کندل H4)',
+      'جهت کانال',
+      'ATR H1',
+      'ATR H4',
+    ]) {
+      expect(find.descendant(of: find.byKey(_panelKey), matching: find.text(label)), findsOneWidget, reason: label);
+    }
     expect(find.text(formatChartPrice(p.atrH4, 2)), findsOneWidget);
-    await g.removePointer();
+
+    // Another candle switches the panel to it.
+    final int j = d.length - 40;
+    await _tapCandle(tester, d, j);
+    expect(c.inspectedIndex, j);
+    expect(find.byKey(_panelKey), findsOneWidget);
+    expect(find.text(d.candles[j].serverTime!), findsOneWidget);
+    expect(find.text(bar.serverTime!), findsNothing);
+
+    // A reload closes it.
+    await tester.tap(find.byKey(_loadKey));
+    await _settleLoad(tester);
+    expect(c.inspectedIndex, isNull);
+    expect(find.byKey(_panelKey), findsNothing);
+  });
+
+  testWidgets('candle panel closes with Esc, the close button, a click outside and a click beyond the bars',
+      (WidgetTester tester) async {
+    final FakeChartDataSource src = FakeChartDataSource(h1Count: 1200);
+    final ChartController c = await _pump(tester, src);
+    final ChartData d = c.data!;
+    final int i = d.length - 30;
+
+    await _tapCandle(tester, d, i);
+    expect(find.byKey(_panelKey), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(find.byKey(_panelKey), findsNothing, reason: 'Esc');
+
+    await _tapCandle(tester, d, i);
+    final Finder close = find.byKey(const ValueKey<String>('candle-info-close'));
+    expect(find.byTooltip('بستن'), findsOneWidget);
+    await tester.tap(close);
+    await tester.pumpAndSettle();
+    expect(find.byKey(_panelKey), findsNothing, reason: 'close button');
+    expect(c.inspectedIndex, isNull);
+
+    // A click inside the panel keeps it open (not click-through).
+    await _tapCandle(tester, d, i);
+    await tester.tap(find.text('کندل انتخاب‌شده'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(_panelKey), findsOneWidget, reason: 'click inside the panel');
+    expect(c.inspectedIndex, i);
+
+    // Elsewhere in the page (the status line).
+    await tester.tap(find.textContaining('زمان‌های محور'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(_panelKey), findsNothing, reason: 'click outside the chart');
+
+    // On the price axis (inside the chart, no bar there).
+    await _tapCandle(tester, d, i);
+    final ChartCanvasState s = _canvas(tester);
+    final Rect plot = s.layout!.plot;
+    await tester.tapAt(tester.getTopLeft(find.byType(ChartCanvas)) + Offset(plot.right + 10, plot.center.dy));
+    await tester.pumpAndSettle();
+    expect(find.byKey(_panelKey), findsNothing, reason: 'click on the axis');
+
+    // Empty space beyond the newest bar (after panning the data left).
+    await _tapCandle(tester, d, i);
+    await tester.drag(find.byType(ChartCanvas), const Offset(-400, 0));
+    await tester.pumpAndSettle();
+    expect(find.byKey(_panelKey), findsOneWidget, reason: 'a pan keeps the panel');
+    final ChartViewport v = _canvas(tester).viewport!;
+    final double beyond = v.xOf(d.length - 1) + 5 * v.barWidth;
+    expect(v.barAt(beyond), isNull);
+    await tester.tapAt(tester.getTopLeft(find.byType(ChartCanvas)) + Offset(beyond, plot.center.dy));
+    await tester.pumpAndSettle();
+    expect(find.byKey(_panelKey), findsNothing, reason: 'click beyond the data');
   });
 
   testWidgets('clicking a setup marker opens its details', (WidgetTester tester) async {
@@ -134,6 +243,9 @@ void main() {
     expect(c.selectedSetupId, m.item.id);
     expect(find.text(m.item.reasonFa), findsOneWidget);
     expect(find.text('این فقط پیشنهاد است؛ برنامه هیچ سفارشی ثبت نمی‌کند.'), findsOneWidget);
+    // The marker has priority: its candle's info panel does not open.
+    expect(c.inspectedIndex, isNull);
+    expect(find.byKey(_panelKey), findsNothing);
   });
 
   testWidgets('update button: label, dirty highlight after a range change, cleared by the load',

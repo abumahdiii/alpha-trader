@@ -233,9 +233,18 @@ void main() {
     expect(setups.queryParameters['to'], '2026-09-23T00:00:00.000Z');
     expect(http.sent('GET /chart/channel').last.queryParameters['timeframe'], 'H1');
 
-    // Setup table lists the engine's setup; the candle panel shows digits=2 prices.
+    // Setup table lists the engine's setup.
     expect(find.byKey(const ValueKey<String>('setup-row-XAUUSD.x:40:8e223612f12a')), findsOneWidget);
-    expect(find.text('2648.00'), findsWidgets); // close of the last bar (2601 + 47)
+    // The candle panel is closed until a candle is clicked; then it shows digits=2 prices.
+    const ValueKey<String> panel = ValueKey<String>('candle-info-panel');
+    expect(find.byKey(panel), findsNothing);
+    final ChartCanvasState canvas = tester.state<ChartCanvasState>(find.byType(ChartCanvas));
+    await tester.tapAt(tester.getTopLeft(find.byType(ChartCanvas)) +
+        Offset(canvas.viewport!.xOf(_bars - 1), canvas.priceScale!.yOf(2648.0)));
+    await settle(tester);
+    expect(find.byKey(panel), findsOneWidget);
+    expect(
+        find.descendant(of: find.byKey(panel), matching: find.text('2648.00')), findsWidgets); // last close (2601 + 47)
     expect(find.textContaining('پارامترها: نسخه 4'), findsOneWidget);
     await h.dispose(tester);
   });
