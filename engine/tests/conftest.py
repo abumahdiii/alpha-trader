@@ -95,7 +95,9 @@ def _isolate_global_state() -> Iterator[None]:
 def make_settings(tmp_path: Path) -> Callable[..., Settings]:
     """Factory: ``make_settings("KEY=value\\n...", environ={...})`` -> Settings from a tmp fake .env.
 
-    ``environ`` stands in for the OS environment (default: empty), so tests are hermetic.
+    ``environ`` stands in for the OS environment (default: empty), so tests are hermetic. The data dir
+    defaults to ``tmp_path / "data"`` (not ``<repo>/data``): an app started by a test (lifespan) opens
+    its SQLite database there, never in the user's real data directory.
     """
 
     def _make(env_text: str = "", environ: dict[str, str] | None = None) -> Settings:
@@ -103,6 +105,8 @@ def make_settings(tmp_path: Path) -> Callable[..., Settings]:
         env_file.write_text(env_text, encoding="utf-8")
         # Autoconnect off unless a test opts in explicitly (via env_text or environ).
         base = {} if "ENGINE_MT5_AUTOCONNECT" in env_text else {"ENGINE_MT5_AUTOCONNECT": "false"}
+        if "ALPHA_TRADER_DATA_DIR" not in env_text:
+            base["ALPHA_TRADER_DATA_DIR"] = str(tmp_path / "data")
         return load_settings(env_file=env_file, environ={**base, **(environ or {})})
 
     return _make
