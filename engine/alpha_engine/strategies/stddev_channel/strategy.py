@@ -139,10 +139,8 @@ class StdDevChannelStrategy(Strategy):
         time are used. The result at bar ``t`` equals ``evaluate`` on ``h1[:t+1]`` and
         ``slice_closed_bars(h4, 4h, open_t + 1h)`` with ``has_open_trade=False`` (tests/test_no_lookahead.py).
 
-        Float caveat: ``rolling_regression_channel`` uses a BLAS matrix-vector product whose rounding
-        depends on the matrix shape, so channel values here and in ``evaluate`` (shorter history) can
-        differ by ~1 ulp. Setups, prices, SL/TP and texts are identical; only channel floats in ``extra``
-        may differ in the last bit (a decision could flip only on an exact float tie).
+        Exact: ``rolling_regression_channel`` is bit-identical on a prefix and on the full history (no
+        BLAS products), so every field -- channel floats in ``extra`` included -- equals ``evaluate``.
         """
         p, clean = resolve_params(params)
         if len(h1) == 0:

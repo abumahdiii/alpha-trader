@@ -142,12 +142,11 @@ def test_values_unchanged_when_future_bars_are_appended_or_altered() -> None:
     close = random_walk(3000, 1900.0, 2.0, seed=5)
     base = rolling_regression_channel(close[:1000], n=100).to_numpy()
     longer = rolling_regression_channel(close, n=100).to_numpy()
-    np.testing.assert_array_equal(np.isnan(base), np.isnan(longer[:1000]))
-    np.testing.assert_allclose(longer[:1000], base, rtol=1e-13, atol=0)
+    np.testing.assert_array_equal(longer[:1000], base)  # bit-identical, NaN warm-up included
     tampered = close.copy()
     tampered[1000:] = 1e6  # garbage future
     altered = rolling_regression_channel(tampered, n=100).to_numpy()
-    np.testing.assert_allclose(altered[:1000], base, rtol=1e-13, atol=0)
+    np.testing.assert_array_equal(altered[:1000], base)
     assert not np.allclose(altered[1000], longer[1000])
 
 
@@ -156,7 +155,29 @@ def test_value_at_t_depends_only_on_last_n_closes() -> None:
     ch = rolling_regression_channel(close, n=50).to_numpy()
     for t in (49, 250, 499):
         alone = rolling_regression_channel(close[t - 49:t + 1], n=50).to_numpy()[-1]
-        np.testing.assert_allclose(ch[t], alone, rtol=1e-13, atol=0)
+        np.testing.assert_array_equal(ch[t], alone)
+
+
+@pytest.mark.parametrize(("n", "ddof"), [(100, 0), (100, 1), (37, 0)])
+def test_prefix_and_full_history_are_bit_identical(n: int, ddof: int) -> None:
+    """Determinism fix: no BLAS product, so a bar's channel does not depend on how many bars follow it."""
+    close = random_walk(3000, 2000.0, 1.7, seed=21)
+    full = rolling_regression_channel(close, n=n, k=2.0, ddof=ddof).to_numpy()
+    for length in (n, n + 1, 101, 257, 1000, 1999, 2998, 3000):
+        prefix = rolling_regression_channel(close[:length], n=n, k=2.0, ddof=ddof).to_numpy()
+        # assert_array_equal treats NaN == NaN and compares floats exactly (no tolerance).
+        np.testing.assert_array_equal(prefix, full[:length], err_msg=f"prefix length {length}")
+        assert prefix.tobytes() == full[:length].tobytes()  # bit for bit, incl. the sign of zero
+
+
+def test_chunk_boundaries_do_not_change_bits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rows are reduced independently: splitting the windows into many small chunks changes nothing."""
+    from alpha_engine.indicators import regression_channel as rc
+
+    close = random_walk(3000, 80.0, 0.3, seed=22)
+    reference = rolling_regression_channel(close, n=100).to_numpy()
+    monkeypatch.setattr(rc, "_CHUNK_ELEMENTS", 100 * 7)  # 7 windows per chunk
+    assert rolling_regression_channel(close, n=100).to_numpy().tobytes() == reference.tobytes()
 
 
 # --- speed ---------------------------------------------------------------------------------------
