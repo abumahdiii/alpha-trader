@@ -11,29 +11,36 @@ import '../chart_painter.dart';
 import '../chart_viewport.dart';
 
 /// Interactive candlestick canvas: owns the viewport (it depends on the
-/// pixel width), turns wheel / drag / pinch into zoom and pan, reports the
-/// hovered bar and setup-marker clicks. Always left-to-right (time axis),
-/// even inside the RTL app.
+/// pixel width), turns wheel / drag / pinch into zoom and pan, draws the
+/// crosshair under the mouse and reports clicks: a setup marker first, else
+/// the candle under the click, else an empty-area click. Always
+/// left-to-right (time axis), even inside the RTL app.
 class ChartCanvas extends StatefulWidget {
   const ChartCanvas({
     super.key,
     required this.data,
     required this.viewRequest,
-    required this.hoverIndex,
     this.selectedSetupId,
     this.highlightIndex,
     this.onSetupTap,
+    this.onCandleTap,
+    this.onEmptyTap,
   });
 
   final ChartData data;
   final ChartViewRequest viewRequest;
-
-  /// Written with the bar under the mouse (null when outside) — the info
-  /// panel listens to it without rebuilding the chart.
-  final ValueNotifier<int?> hoverIndex;
   final String? selectedSetupId;
   final int? highlightIndex;
+
+  /// A click on a setup marker (has priority over [onCandleTap]).
   final ValueChanged<SetupMark>? onSetupTap;
+
+  /// A click on the column of bar `index` (not on a marker).
+  final ValueChanged<int>? onCandleTap;
+
+  /// A click on the chart that hits neither a marker nor a bar (beyond the
+  /// data, or on the price / time axis).
+  final VoidCallback? onEmptyTap;
 
   @override
   State<ChartCanvas> createState() => ChartCanvasState();
@@ -102,11 +109,7 @@ class ChartCanvasState extends State<ChartCanvas> {
     if (next != v) setState(() => _viewport = next);
   }
 
-  void _setHover(Offset? p, ChartLayout layout) {
-    _hover.value = p;
-    final ChartViewport? v = _viewport;
-    widget.hoverIndex.value = (p == null || v == null || !layout.inPlot(p)) ? null : v.barAt(p.dx);
-  }
+  void _setHover(Offset? p) => _hover.value = p;
 
   void _onPointerSignal(PointerSignalEvent event, ChartLayout layout) {
     if (event is! PointerScrollEvent) return;
@@ -129,11 +132,26 @@ class ChartCanvasState extends State<ChartCanvas> {
 
   void _onTapUp(TapUpDetails d, ChartLayout layout, PriceScale scale) {
     final ChartViewport? v = _viewport;
-    if (v == null || !layout.inPlot(d.localPosition)) return;
-    final SetupMark? hit = hitTestSetup(widget.data, v, scale, d.localPosition);
+    if (v == null) return;
+    final Offset p = d.localPosition;
+    if (!layout.inPlot(p)) {
+      devLog('[Chart] tap outside the plot (axis) -> empty');
+      widget.onEmptyTap?.call();
+      return;
+    }
+    final SetupMark? hit = hitTestSetup(widget.data, v, scale, p);
     if (hit != null) {
-      devLog('[Chart] marker tap -> ${hit.item.id}');
+      devLog('[Chart] tap -> setup marker ${hit.item.id} (marker has priority over the candle)');
       widget.onSetupTap?.call(hit);
+      return;
+    }
+    final int? bar = v.barAt(p.dx);
+    if (bar != null) {
+      devLog('[Chart] tap -> candle $bar');
+      widget.onCandleTap?.call(bar);
+    } else {
+      devLog('[Chart] tap -> no bar under x=${p.dx.toStringAsFixed(1)} -> empty');
+      widget.onEmptyTap?.call();
     }
   }
 
@@ -160,8 +178,8 @@ class ChartCanvasState extends State<ChartCanvas> {
           onPointerSignal: (PointerSignalEvent e) => _onPointerSignal(e, layout),
           child: MouseRegion(
             cursor: SystemMouseCursors.precise,
-            onHover: (PointerHoverEvent e) => _setHover(e.localPosition, layout),
-            onExit: (_) => _setHover(null, layout),
+            onHover: (PointerHoverEvent e) => _setHover(e.localPosition),
+            onExit: (_) => _setHover(null),
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTapUp: (TapUpDetails d) => _onTapUp(d, layout, scale),
@@ -176,7 +194,7 @@ class ChartCanvasState extends State<ChartCanvas> {
                   }
                   return next;
                 });
-                _setHover(d.localFocalPoint, layout);
+                _setHover(d.localFocalPoint);
               },
               child: Stack(
                 fit: StackFit.expand,

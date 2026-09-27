@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:alpha_trader/chart/chart_controller.dart';
+import 'package:alpha_trader/chart/chart_data.dart';
 import 'package:alpha_trader/services/engine_api.dart';
 import 'package:alpha_trader/models/chart_models.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -106,6 +107,77 @@ void main() {
     expect(c.data!.covers(old), isTrue);
     expect(c.data!.candles[c.viewRequest.focusIndex!].time, old);
     expect(c.highlightIndex, c.viewRequest.focusIndex);
+  });
+
+  test('rangeDirty: set by a range change, cleared when the load starts; auto-loads never leave it dirty', () async {
+    expect(c.rangeDirty, isFalse, reason: 'nothing loaded yet');
+    await c.init();
+    expect(c.rangeDirty, isFalse);
+
+    c.setRange(from: c.from!.subtract(const Duration(days: 3)));
+    expect(c.rangeDirty, isTrue);
+    final Future<void> pending = c.load();
+    expect(c.rangeDirty, isFalse, reason: 'snapshot taken when load() starts');
+    await pending;
+    expect(c.rangeDirty, isFalse);
+
+    // Back to the loaded value = clean again, without a load.
+    final DateTime loadedTo = c.to!;
+    c.setRange(to: loadedTo.subtract(const Duration(days: 1)));
+    expect(c.rangeDirty, isTrue);
+    c.setRange(to: loadedTo);
+    expect(c.rangeDirty, isFalse);
+
+    // jumpToTime outside the bars reloads around the time by itself.
+    final List<bool> seen = <bool>[];
+    c.addListener(() => seen.add(c.rangeDirty));
+    await c.jumpToTime(src.bars('XAUUSD.x', ChartTimeframe.h1)[40].time);
+    expect(c.rangeDirty, isFalse);
+    // setSymbol / setTimeframe: default range + load, no highlight meanwhile.
+    await c.setSymbol('BRNUSD.x');
+    expect(c.rangeDirty, isFalse);
+    await c.setTimeframe(ChartTimeframe.h4);
+    expect(c.rangeDirty, isFalse);
+    expect(seen, isNot(contains(true)), reason: 'no dirty flicker during automatic loads');
+  });
+
+  test('rangeErrorFa: start after end is kept by setRange but refused by load (no request)', () async {
+    await c.init();
+    final DateTime to = c.to!;
+    c.setRange(from: to.add(const Duration(hours: 1)));
+    expect(c.from, to.add(const Duration(hours: 1)));
+    expect(c.rangeErrorFa, kRangeOrderErrorFa);
+    src.calls.clear();
+    final ChartData? before = c.data;
+    await c.load();
+    expect(src.calls, isEmpty);
+    expect(c.state, ChartLoadState.ready);
+    expect(c.data, same(before));
+
+    c.setRange(from: to);
+    expect(c.rangeErrorFa, isNull, reason: 'from == to is allowed');
+    c.setRange(from: to.subtract(const Duration(days: 2)));
+    expect(c.rangeErrorFa, isNull);
+    await c.load();
+    expect(src.calls.where((String s) => s.startsWith('rates')), hasLength(1));
+  });
+
+  test('inspectedIndex: inspect / clear; out-of-range ignored; every load resets it', () async {
+    await c.init();
+    expect(c.inspectedIndex, isNull);
+    c.inspectCandle(5);
+    expect(c.inspectedIndex, 5);
+    c.inspectCandle(c.data!.length);
+    expect(c.inspectedIndex, 5, reason: 'invalid index ignored');
+    c.clearInspection();
+    expect(c.inspectedIndex, isNull);
+
+    c.inspectCandle(7);
+    await c.load();
+    expect(c.inspectedIndex, isNull);
+    c.inspectCandle(7);
+    await c.setTimeframe(ChartTimeframe.h4);
+    expect(c.inspectedIndex, isNull);
   });
 
   test('data info loads meta + gaps', () async {

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../models/market_data.dart';
 import '../theme/app_semantic_colors.dart';
@@ -12,7 +13,8 @@ import 'widgets/data_info_panel.dart';
 import 'widgets/setup_widgets.dart';
 
 /// The whole chart page body: toolbar, candlestick canvas with the candle
-/// info panel, and a side panel with the setups table and the data info.
+/// info panel (opened by a click on a candle), and a side panel with the
+/// setups table and the data info.
 /// Everything is read from [controller]; nothing is computed here.
 class ChartView extends StatefulWidget {
   const ChartView({super.key, required this.controller});
@@ -23,13 +25,23 @@ class ChartView extends StatefulWidget {
   State<ChartView> createState() => _ChartViewState();
 }
 
+/// The canvas and the candle panel form one tap region: a click on either
+/// is routed by the canvas / panel itself; any other click closes the panel.
+const Object _kCandlePanelTapGroup = #chartCandlePanel;
+
 class _ChartViewState extends State<ChartView> {
-  final ValueNotifier<int?> _hoverIndex = ValueNotifier<int?>(null);
+  final FocusNode _chartFocus = FocusNode(debugLabel: 'chart-area', skipTraversal: true);
 
   @override
   void dispose() {
-    _hoverIndex.dispose();
+    _chartFocus.dispose();
     super.dispose();
+  }
+
+  void _onCandleTap(int index) {
+    widget.controller.inspectCandle(index);
+    // Esc closes the panel only while the chart area has the focus.
+    _chartFocus.requestFocus();
   }
 
   Future<void> _openSetup(SetupMark m) async {
@@ -71,28 +83,50 @@ class _ChartViewState extends State<ChartView> {
   Widget _chartArea(BuildContext context, ChartController c) {
     final ChartData? data = c.data;
     final bool showData = data != null && !data.isEmpty && c.state != ChartLoadState.error;
-    return Stack(
-      fit: StackFit.expand,
-      children: <Widget>[
-        if (showData)
-          ChartCanvas(
-            key: const ValueKey<String>('chart-canvas'),
-            data: data,
-            viewRequest: c.viewRequest,
-            hoverIndex: _hoverIndex,
-            selectedSetupId: c.selectedSetupId,
-            highlightIndex: c.highlightIndex,
-            onSetupTap: _openSetup,
-          ),
-        if (showData)
-          // Physically top-left: the newest bars and the price axis are on the right.
-          Positioned(
-            top: 8,
-            left: 8,
-            child: IgnorePointer(child: CandleInfoPanel(data: data, hoverIndex: _hoverIndex)),
-          ),
-        if (!showData) _StateMessage(controller: c),
-      ],
+    final int? inspected = c.inspectedIndex;
+    final bool showPanel = showData && inspected != null && inspected < data.length;
+    return CallbackShortcuts(
+      bindings: <ShortcutActivator, VoidCallback>{
+        const SingleActivator(LogicalKeyboardKey.escape): () => c.clearInspection(reason: 'Esc'),
+      },
+      child: Focus(
+        focusNode: _chartFocus,
+        child: Stack(
+          fit: StackFit.expand,
+          children: <Widget>[
+            if (showData)
+              TapRegion(
+                groupId: _kCandlePanelTapGroup,
+                child: ChartCanvas(
+                  key: const ValueKey<String>('chart-canvas'),
+                  data: data,
+                  viewRequest: c.viewRequest,
+                  selectedSetupId: c.selectedSetupId,
+                  highlightIndex: c.highlightIndex,
+                  onSetupTap: _openSetup,
+                  onCandleTap: _onCandleTap,
+                  onEmptyTap: () => c.clearInspection(reason: 'empty chart tap'),
+                ),
+              ),
+            if (showPanel)
+              // Physically top-left: the newest bars and the price axis are on the right.
+              Positioned(
+                top: 8,
+                left: 8,
+                child: TapRegion(
+                  groupId: _kCandlePanelTapGroup,
+                  onTapOutside: (_) => c.clearInspection(reason: 'tap outside the chart'),
+                  child: CandleInfoPanel(
+                    data: data,
+                    index: inspected,
+                    onClose: () => c.clearInspection(reason: 'close button'),
+                  ),
+                ),
+              ),
+            if (!showData) _StateMessage(controller: c),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -167,6 +201,12 @@ class _ChartToolbar extends StatelessWidget {
   Widget build(BuildContext context) {
     final ChartController c = controller;
     final bool busy = c.isLoading;
+    final String? rangeError = c.rangeErrorFa;
+    // Highlight only an actionable button (an invalid range disables it).
+    final bool dirty = c.rangeDirty && rangeError == null;
+    final VoidCallback? onLoad = busy || c.symbol == null || rangeError != null ? null : c.load;
+    const Icon loadIcon = Icon(Icons.refresh, size: 18);
+    const Text loadLabel = Text('به‌روزرسانی نمودار');
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       child: Wrap(
@@ -205,12 +245,33 @@ class _ChartToolbar extends StatelessWidget {
             icon: const Icon(Icons.event, size: 18),
             label: Text('تا ${c.to == null ? '—' : formatDate(c.to!)}'),
           ),
-          ElevatedButton.icon(
-            key: const ValueKey<String>('chart-load'),
-            onPressed: busy || c.symbol == null ? null : c.load,
-            icon: const Icon(Icons.download, size: 18),
-            label: const Text('بارگذاری'),
-          ),
+          if (dirty)
+            Tooltip(
+              key: const ValueKey<String>('chart-range-dirty'),
+              message: 'بازه تغییر کرده؛ برای دیدن نمودار جدید به‌روزرسانی کنید',
+              child: Badge(
+                smallSize: 8,
+                child: FilledButton.icon(
+                  key: const ValueKey<String>('chart-load'),
+                  onPressed: onLoad,
+                  icon: loadIcon,
+                  label: loadLabel,
+                ),
+              ),
+            )
+          else
+            ElevatedButton.icon(
+              key: const ValueKey<String>('chart-load'),
+              onPressed: onLoad,
+              icon: loadIcon,
+              label: loadLabel,
+            ),
+          if (rangeError != null)
+            Text(
+              rangeError,
+              key: const ValueKey<String>('chart-range-error'),
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: context.appColors.error),
+            ),
           IconButton(
             key: const ValueKey<String>('chart-reset-zoom'),
             tooltip: 'بازنشانی زوم (آخرین کندل‌ها)',
@@ -218,7 +279,8 @@ class _ChartToolbar extends StatelessWidget {
             icon: const Icon(Icons.fit_screen),
           ),
           Tooltip(
-            message: 'چرخ ماوس: زوم روی نشانگر — Shift + چرخ یا کشیدن: جابه‌جایی — کلیک روی فلش: جزئیات ستاپ',
+            message: 'چرخ ماوس: زوم روی نشانگر — Shift + چرخ یا کشیدن: جابه‌جایی — کلیک روی فلش: جزئیات ستاپ — '
+                'کلیک روی کندل: اطلاعات کندل (Esc: بستن)',
             child: Icon(Icons.help_outline, size: 20, color: context.appColors.mutedText),
           ),
         ],
