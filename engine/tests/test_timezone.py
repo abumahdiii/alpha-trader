@@ -121,9 +121,56 @@ def test_fit_recovers_planted_model(planted: OffsetModel) -> None:
     raw = generate_symbol("XAUUSD.x", offset_model=planted)[Timeframe.H1].raw
     fit = fit_offset_model(raw["time"], now_utc=datetime(2025, 5, 5, tzinfo=timezone.utc))
     assert fit.inferred == planted and fit.effective == planted and fit.source == "fit"
-    # 10 weeks -> 9 closes + 9 opens + ... ; the Good Friday week cannot close on Friday 17:00 NY
-    assert fit.weeks == 11 and fit.checks == 20 and fit.matched == 19
-    assert fit.match_ratio == 0.95 and not fit.low_confidence
+    # 11 week segments -> 10 weekly closes (the Good Friday week closes Thursday 17:00 NY, accepted) and
+    # 39 recurring daily breaks (40 Mon-Thu minus the Good-Friday-eve Thursday; the 5 planted data holes
+    # are one-off slots, so they are not break checks). Primary = close + break; open = tie-break only.
+    assert fit.weeks == 11 and fit.checks == 49 and fit.matched == 49
+    assert fit.match_ratio == 1.0 and not fit.low_confidence
+    anchors = {a.name: (a.role, a.matched, a.checks) for a in fit.anchors}
+    assert anchors == {"weekly_close": ("primary", 10, 10), "daily_break": ("primary", 39, 39),
+                       "weekly_open": ("tie_break", 10, 10)}
+
+
+def _fixed_utc_open_times(planted: OffsetModel) -> np.ndarray:
+    """The fixture as a broker that reopens at 23:00 UTC all year (like the live broker's gold).
+
+    Drops every 22:00Z bar Sunday..Thursday: in US summer that is the Sunday open bar (the week now
+    opens 23:00Z = 19:00 New York) and the first bar after the 17:00 NY daily break (2-bar break).
+    """
+    series = generate_symbol("XAUUSD.x", offset_model=planted)[Timeframe.H1]
+    utc = pd.DatetimeIndex(series.utc["time"])
+    drop = np.asarray((utc.hour == 22) & np.isin(utc.weekday, (6, 0, 1, 2, 3)))
+    return series.raw["time"][~drop]
+
+
+@pytest.mark.parametrize("planted", [OffsetModel.us_dst(2), OffsetModel.fixed(3), OffsetModel.eu_dst(2)])
+def test_fit_with_fixed_utc_open_broker(planted: OffsetModel) -> None:
+    fit = fit_offset_model(_fixed_utc_open_times(planted), now_utc=datetime(2025, 5, 5, tzinfo=timezone.utc))
+    assert fit.inferred == planted and not fit.low_confidence
+    anchors = {a.name: a for a in fit.anchors}
+    assert (anchors["weekly_close"].matched, anchors["weekly_close"].checks) == (10, 10)
+    assert (anchors["daily_break"].matched, anchors["daily_break"].checks) == (39, 39)
+    # only the one full US-winter week (opening 2025-03-02) still opens at 18:00 NY; under the old
+    # close+open score this was 10/20 = 50% confidence, now open is just the tie-breaker
+    assert anchors["weekly_open"].role == "tie_break"
+    assert (anchors["weekly_open"].matched, anchors["weekly_open"].checks) == (1, 10)
+    assert fit.match_ratio == 1.0
+
+
+def test_daily_break_at_another_local_time_does_not_vote() -> None:
+    # Move the us_dst(+2) fixture's daily break from 00:00 server (17:00 NY) to 10:00 server: only a
+    # model that the weekly closes reject (us_dst(-12)) would put it on 17:00 NY, so the anchor is unused.
+    s = np.asarray(generate_symbol("XAUUSD.x")[Timeframe.H1].raw["time"], dtype="int64")
+    one_bar_holes = s[:-1][np.diff(s) == 7200] + 3600
+    s = np.union1d(s, one_bar_holes)
+    server_wd = ((s // 86400) + 3) % 7
+    s = s[~(((s % 86400) // 3600 == 10) & (server_wd <= 3))]
+    fit = fit_offset_model(s, now_utc=datetime(2025, 5, 5, tzinfo=timezone.utc))
+    assert fit.inferred == OffsetModel.us_dst(2)
+    anchors = {a.name: a for a in fit.anchors}
+    assert anchors["daily_break"].role == "unused" and anchors["daily_break"].matched == 0
+    assert anchors["daily_break"].checks >= 39
+    assert fit.checks == 10 and fit.matched == 10  # primary = weekly close only
 
 
 def test_fit_us_vs_eu_needs_the_march_window() -> None:
@@ -159,6 +206,7 @@ def test_fit_logs_under_dev_mode(make_settings) -> None:
     logging_setup.configure_logging(make_settings("DEV_MODE=true\n"), stream=stream, force=True)
     fit_offset_model(generate_symbol("XAUUSD.x")[Timeframe.H1].raw["time"])
     assert "offset fit: effective=us_dst(+2)" in stream.getvalue()
+    assert "offset fit anchors: [('weekly_close', 'primary', 10, 10, 1.0)" in stream.getvalue()
 
 
 def test_conversion_of_fixture_matches_utc_frame(synthetic) -> None:
