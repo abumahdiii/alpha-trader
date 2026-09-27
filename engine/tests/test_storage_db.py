@@ -252,7 +252,8 @@ def test_stored_params_invalid_under_new_schema_raises(conn: EngineConnection) -
 
 def test_account_settings_defaults_not_persisted_until_update(conn: EngineConnection) -> None:
     repo = AccountSettingsRepo(conn)
-    assert repo.get() == AccountSettings(balance=1000.0, risk_pct=1.0, leverage=100, rr=2.0)
+    # Defaults (balance 2500 since user decision 2026-09-27; 1 % risk of 2500 = 25.00 USD).
+    assert repo.get() == AccountSettings(balance=2500.0, risk_pct=1.0, leverage=100, rr=2.0)
     assert conn.execute("SELECT COUNT(*) FROM account_settings").fetchone()[0] == 0
 
 
@@ -260,7 +261,7 @@ def test_account_settings_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "alpha.db"
     conn = open_db(path)
     new = AccountSettingsRepo(conn).update({"risk_pct": 0.5, "leverage": 200})
-    assert new == AccountSettings(balance=1000.0, risk_pct=0.5, leverage=200, rr=2.0)
+    assert new == AccountSettings(balance=2500.0, risk_pct=0.5, leverage=200, rr=2.0)  # balance not given -> default
     new = AccountSettingsRepo(conn).update({"balance": 2500.25})
     assert new.risk_pct == 0.5 and new.balance == 2500.25
     conn.close()

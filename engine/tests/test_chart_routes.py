@@ -48,6 +48,8 @@ STRATEGY = StdDevChannelStrategy()
 H1 = timedelta(hours=1)
 FAR = {"from": "2000-01-01T00:00:00Z", "to": "2100-01-01T00:00:00Z"}  # the whole cache
 CHANNEL_FIELDS = ("mid", "upper", "lower", "slope", "sigma", "atr_h4")
+# Explicit account for the hand-verified setup arithmetic (independent of the AccountSettings defaults).
+WORKED_ACCOUNT = {"balance": 1000.0, "risk_pct": 1.0, "leverage": 100, "rr": 2.0}
 
 
 def _is_persian(text: str | None) -> bool:
@@ -78,6 +80,10 @@ class Env:
 
     def account(self) -> AccountSettings:
         return AccountSettings.model_validate(self.client.get("/settings").json())
+
+    def use_account(self, values: dict[str, Any]) -> None:
+        response = self.client.put("/settings", json=values)
+        assert response.status_code == 200 and response.json() == values, response.text
 
     def channel(self, symbol: str = GOLD, **query: Any) -> dict:
         response = self.client.get("/chart/channel", params={"symbol": symbol, **query})
@@ -321,6 +327,7 @@ def test_chart_cache_is_bounded_lru() -> None:
 # ------------------------------------------------------------------------------------------ /chart/setups
 @pytest.mark.parametrize("symbol", [GOLD, BRENT])
 def test_setups_equal_direct_full_scan(env: Env, symbol: str) -> None:
+    env.use_account(WORKED_ACCOUNT)  # route and direct scan (env.account()) both read this stored account
     body = env.setups(symbol, **FAR)
     h1, _ = env.frames(symbol)
     expected = expected_items(env, symbol)
@@ -329,7 +336,7 @@ def test_setups_equal_direct_full_scan(env: Env, symbol: str) -> None:
         assert_item_matches(got, exp, h1)
     assert body["status_counts"] == {s: sum(e["status"] == s for e in expected)
                                      for s in ("accepted", "rejected", "pending_entry")}
-    assert body["account"] == {"balance": 1000.0, "risk_pct": 1.0, "leverage": 100, "rr": 2.0}
+    assert body["account"] == WORKED_ACCOUNT == env.account().model_dump()
     assert body["params_version"] == 1 and body["params_hash"] == params_hash(SCHEMA.defaults())
     assert body["symbol_spec"]["name"] == symbol and _is_persian(body["note_fa"])
     ids = [s["id"] for s in body["setups"]]
@@ -337,7 +344,9 @@ def test_setups_equal_direct_full_scan(env: Env, symbol: str) -> None:
 
 
 def test_setups_accepted_levels_and_volume_arithmetic(env: Env) -> None:
+    env.use_account(WORKED_ACCOUNT)  # balance 1000, risk 1 % -> 10.00 USD per trade, leverage 100
     body = env.setups(**FAR)
+    assert body["account"] == WORKED_ACCOUNT
     accepted = [s for s in body["setups"] if s["status"] == "accepted"]
     assert accepted
     for s in accepted:

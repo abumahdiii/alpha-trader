@@ -137,7 +137,7 @@ target and gap counts.
 | `GET /strategies` | `[{name, title_fa, version, params_version, params, params_hash, params_saved_utc, param_schema: [{name, type, default, min, max, choices, step, label_fa, description_fa}], params_errors_fa}]` |
 | `GET /strategies/{name}` | one item as above; 404 `strategy_not_found` |
 | `PUT /strategies/{name}` | body `{"params": {...}}`, FULL replacement (missing keys take defaults) -> item + `created_new_version`; 422 `invalid_body` / `invalid_params` (Persian `errors_fa`, includes cross-field rules such as "at least one confirmation pattern") |
-| `GET /settings` | `{balance, risk_pct, leverage, rr}` (defaults `1000, 1.0, 100, 2.0` until the first update) |
+| `GET /settings` | `{balance, risk_pct, leverage, rr}` (defaults `2500, 1.0, 100, 2.0` until the first update -- balance 2500 since 2026-09-27; 1 % of 2500 = 25.00 USD risked, rr 2 -> 50.00 USD target) |
 | `PUT /settings` | partial update, e.g. `{"risk_pct": 0.5}` -> new settings; 422 `invalid_settings` with Persian `errors_fa`. Bounds: `0 < balance <= 1e9`, `0 < risk_pct <= 10`, `1 <= leverage <= 1000` (integer), `0.1 <= rr <= 20` |
 
 Errors: `{"detail": {"code", "message_fa", "errors_fa": [...]}}`.
@@ -146,7 +146,9 @@ For callers inside the engine: `alpha_engine.strategy.context.build_context(symb
 the `StrategyContext` from the active params and the stored account settings, keeping only H4 bars closed at
 the decision time (and, with `now_utc`, only closed H1 bars); `alpha_engine.risk.size_from_spec(candidate or
 (entry, sl), account, spec)` sizes a suggestion with a cached/live `SymbolSpec` (gold SL 5.00 -> 0.02 lots,
-margin 40; brent SL 0.50 -> 0.02 lots, margin 16 with balance 1000, risk 1 %, leverage 100).
+margin 40; brent SL 0.50 -> 0.02 lots, margin 16 with an explicit balance 1000, risk 1 %, leverage 100.
+With the default balance 2500: risk 25.00 -> gold 25 / 500 = 0.05 lots, margin 0.05 * 100 * 2000 / 100 = 100;
+brent 25 / (0.50 * 1000) = 0.05 lots, margin 0.05 * 1000 * 80 / 100 = 40).
 
 ### Channel check tool (cache only, no MT5)
 
@@ -232,7 +234,9 @@ Worked example (the item above; balance 1000, risk 1 %, leverage 100, rr 2; gold
 tick 1.0/0.01): SL = low 2063.81 - ATR_H1 4.632355634525692 * 0.2 = 2062.8835288730947; entry = open of
 13:00 = 2064.37; distance 1.486471126905144; TP = 2064.37 + 2 * 1.486471 = 2067.34294225381; risk 10.00 /
 (1.486471 * 100) = 0.0672734 lots -> floor to 0.01 step = 0.06; actual risk 0.06 * 148.6471 = 8.9188;
-margin 0.06 * 100 * 2064.37 / 100 = 123.8622.
+margin 0.06 * 100 * 2064.37 / 100 = 123.8622. (Balance 1000 is set explicitly here; with the default balance 2500
+the same setup gives risk 25.00 / 148.6471 = 0.168184 -> 0.16 lots, actual risk 0.16 * 148.6471 = 23.7835,
+margin 0.16 * 100 * 2064.37 / 100 = 330.2992, `risk_amount: 25.0`.)
 
 ## Backtests (phase 4, cache only, never MT5)
 

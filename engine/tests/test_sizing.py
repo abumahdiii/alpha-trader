@@ -153,7 +153,9 @@ def test_zero_distance_and_min_above_max_rejected() -> None:
 
 
 def test_size_for_account_uses_account_settings() -> None:
-    r = size_for_account(AccountSettings(), entry=2000.0, stop_loss=1995.0, tick_value=1.0, tick_size=0.01,
+    # Explicit account equal to GOLD/COMMON (balance 1000, risk 1 %, leverage 100), independent of the defaults.
+    account = AccountSettings(balance=1000.0, risk_pct=1.0, leverage=100)
+    r = size_for_account(account, entry=2000.0, stop_loss=1995.0, tick_value=1.0, tick_size=0.01,
                          volume_min=0.01, volume_step=0.01, volume_max=100.0, contract_size=100.0)
     assert r == size_position(entry=2000.0, stop_loss=1995.0, **GOLD)
     r2 = size_for_account(AccountSettings(balance=5000, risk_pct=2.0, leverage=50), entry=2000.0,

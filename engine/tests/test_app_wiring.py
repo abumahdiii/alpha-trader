@@ -25,7 +25,7 @@ from alpha_engine.strategy.registry import default_registry
 
 TOP_KEYS = {"status", "service", "version", "pid", "dev_mode", "time_utc", "mt5"}
 DB_UNAVAILABLE_FA = "پایگاه داده engine در دسترس نیست."
-SETTINGS_DEFAULTS = {"balance": 1000.0, "risk_pct": 1.0, "leverage": 100, "rr": 2.0}
+SETTINGS_DEFAULTS = {"balance": 2500.0, "risk_pct": 1.0, "leverage": 100, "rr": 2.0}  # AccountSettings() defaults (balance 2500 since 2026-09-27)
 
 
 def _is_persian(text: str) -> bool:
