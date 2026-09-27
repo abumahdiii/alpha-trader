@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../core/date_format.dart';
 import '../core/dev_mode.dart';
 import '../models/engine_health.dart';
 import '../providers/engine_status_provider.dart';
@@ -31,14 +32,7 @@ class EngineStatusIndicator extends StatelessWidget {
     };
 
     final Mt5Status mt5 = engine.mt5;
-    final (String mt5Label, Color mt5Color) = switch (mt5.state) {
-      Mt5State.connected => ('متصل', colors.success),
-      Mt5State.disconnected => ('قطع', colors.warning),
-      Mt5State.error => ('خطا', colors.error),
-      Mt5State.accountMismatch => ('حساب نامطابق', colors.error),
-      Mt5State.notInitialized => ('راه‌اندازی نشده', colors.mutedText),
-      Mt5State.unknown => ('نامشخص', colors.mutedText),
-    };
+    final (String mt5Label, Color mt5Color) = mt5Appearance(mt5.state, colors);
 
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -78,6 +72,34 @@ class EngineStatusIndicator extends StatelessWidget {
     );
   }
 
+  /// Short Persian label and dot color of an MT5 state (also used by the
+  /// settings page's connection block).
+  static (String, Color) mt5Appearance(Mt5State state, AppSemanticColors colors) =>
+      switch (state) {
+        Mt5State.connected => ('متصل', colors.success),
+        Mt5State.disconnected => ('قطع', colors.warning),
+        Mt5State.error => ('خطا', colors.error),
+        Mt5State.accountMismatch => ('حساب نامطابق', colors.error),
+        Mt5State.notInitialized => ('راه‌اندازی نشده', colors.mutedText),
+        Mt5State.unknown => ('نامشخص', colors.mutedText),
+      };
+
+  /// One Persian sentence describing an MT5 state.
+  static String mt5Description(Mt5State state) => switch (state) {
+        Mt5State.connected => 'به ترمینال متاتریدر ۵ متصل است (فقط خواندنی).',
+        Mt5State.disconnected => 'اتصال به ترمینال متاتریدر ۵ قطع است.',
+        Mt5State.error => 'خطا در ارتباط با ترمینال متاتریدر ۵.',
+        Mt5State.accountMismatch =>
+          'حساب لاگین‌شده در ترمینال با حساب مورد انتظار یکی نیست.',
+        Mt5State.notInitialized =>
+          'موتور هنوز به ترمینال متاتریدر ۵ وصل نشده است.',
+        Mt5State.unknown => 'وضعیت ترمینال متاتریدر ۵ نامشخص است.',
+      };
+
+  /// Shown instead of any MT5 detail while the engine is not running.
+  static const String mt5UnknownWhileEngineDown =
+      'وضعیت متاتریدر تا فعال شدن موتور نامشخص است.';
+
   /// Tooltip of the engine item (public for tests).
   static String engineTooltip(EngineStatusProvider engine) {
     final EngineHealth? h = engine.health;
@@ -101,40 +123,22 @@ class EngineStatusIndicator extends StatelessWidget {
       if (h?.pid != null) 'شناسه پروسس: ${h!.pid}',
       if (h?.devMode == true) 'حالت توسعه (DEV_MODE) فعال است',
       if (h?.timeUtc != null)
-        'آخرین پاسخ (به وقت محلی): ${_formatLocal(h!.timeUtc!)}',
+        'آخرین پاسخ (به وقت محلی): ${formatLocalDateTime(h!.timeUtc!)}',
       'برای «$restartLabel» کلیک کنید.',
     ];
     return lines.join('\n');
   }
 
   static String _mt5Tooltip(EngineStatusProvider engine, Mt5Status mt5) {
-    if (engine.state != EngineState.running) {
-      return 'وضعیت متاتریدر تا فعال شدن موتور نامشخص است.';
-    }
+    if (engine.state != EngineState.running) return mt5UnknownWhileEngineDown;
     final List<String> lines = [
-      switch (mt5.state) {
-        Mt5State.connected => 'به ترمینال متاتریدر ۵ متصل است (فقط خواندنی).',
-        Mt5State.disconnected => 'اتصال به ترمینال متاتریدر ۵ قطع است.',
-        Mt5State.error => 'خطا در ارتباط با ترمینال متاتریدر ۵.',
-        Mt5State.accountMismatch =>
-          'حساب لاگین‌شده در ترمینال با حساب مورد انتظار یکی نیست.',
-        Mt5State.notInitialized =>
-          'موتور هنوز به ترمینال متاتریدر ۵ وصل نشده است.',
-        Mt5State.unknown => 'وضعیت ترمینال متاتریدر ۵ نامشخص است.',
-      },
+      mt5Description(mt5.state),
       if (mt5.server != null) 'سرور: ${mt5.server}',
       if (mt5.loginMasked != null) 'حساب: ${mt5.loginMasked}',
       if (mt5.tradeMode != null) 'نوع حساب: ${mt5.tradeMode}',
       if (mt5.message != null) 'پیام: ${mt5.message}',
     ];
     return lines.join('\n');
-  }
-
-  /// Gregorian, local time (the engine sends UTC).
-  static String _formatLocal(DateTime utc) {
-    final DateTime t = utc.toLocal();
-    String two(int v) => v.toString().padLeft(2, '0');
-    return '${t.year}-${two(t.month)}-${two(t.day)} ${two(t.hour)}:${two(t.minute)}:${two(t.second)}';
   }
 }
 
