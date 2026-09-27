@@ -36,7 +36,8 @@ class Win32Window {
   // |Show| is called. Returns true if the window was created successfully.
   bool Create(const std::wstring& title, const Point& origin, const Size& size);
 
-  // Show the current window. Returns true if the window was successfully shown.
+  // Show the current window. Keeps a window that is already visible or
+  // maximized as it is. Returns true if the window was successfully shown.
   bool Show();
 
   // Release OS resources associated with window.
