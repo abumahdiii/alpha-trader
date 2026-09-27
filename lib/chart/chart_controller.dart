@@ -5,9 +5,11 @@ import 'package:flutter/foundation.dart';
 import '../core/app_logger.dart';
 import '../core/dev_mode.dart';
 import 'chart_data.dart';
+import '../models/market_data.dart';
+import '../services/engine_api.dart';
 import 'chart_data_source.dart';
 import 'chart_format.dart';
-import 'chart_models.dart';
+import '../models/chart_models.dart';
 
 enum ChartLoadState { idle, loading, ready, empty, error }
 
@@ -68,6 +70,9 @@ String? updateErrorExplanationFa(String? code) => switch (code) {
       _ => null,
     };
 
+/// The engine process is not reachable (not started, crashed, port closed).
+bool isEngineUnreachable(EngineApiException e) => e.kind == EngineApiErrorKind.connection;
+
 const String kEngineUnavailableFa =
     'موتور تحلیل در دسترس نیست. صبر کنید تا نشانگر موتور «فعال» شود و دوباره تلاش کنید.';
 const String kEmptyRangeFa = 'در این بازه هیچ کندلی در کش نیست. بازه دیگری انتخاب کنید یا داده را به‌روز کنید.';
@@ -86,7 +91,7 @@ class ChartController extends ChangeNotifier {
   static const Duration defaultWindow = Duration(days: 30);
   static const Duration _h1 = Duration(hours: 1);
 
-  List<ChartSymbol> _symbols = const <ChartSymbol>[];
+  List<SymbolItem> _symbols = const <SymbolItem>[];
   String? _symbol;
   ChartTimeframe _timeframe = ChartTimeframe.h1;
   DateTime? _from;
@@ -109,7 +114,7 @@ class ChartController extends ChangeNotifier {
   int _metaSerial = 0;
   bool _disposed = false;
 
-  List<ChartSymbol> get symbols => _symbols;
+  List<SymbolItem> get symbols => _symbols;
   String? get symbol => _symbol;
   ChartTimeframe get timeframe => _timeframe;
 
@@ -136,8 +141,8 @@ class ChartController extends ChangeNotifier {
   bool get isLoading => _state == ChartLoadState.loading;
 
   int? get digits {
-    for (final ChartSymbol s in _symbols) {
-      if (s.symbol == _symbol) return s.digits;
+    for (final SymbolItem s in _symbols) {
+      if (s.symbol == _symbol) return s.spec?.digits;
     }
     return null;
   }
@@ -149,10 +154,10 @@ class ChartController extends ChangeNotifier {
     final int serial = ++_loadSerial;
     _setState(ChartLoadState.loading);
     try {
-      final List<ChartSymbol> list = await _source.symbols();
+      final List<SymbolItem> list = await _source.symbols();
       if (_stale(serial, 'symbols')) return;
       _symbols = list;
-      _log('symbols: ${list.map((ChartSymbol s) => s.symbol).join(', ')}');
+      _log('symbols: ${list.map((SymbolItem s) => s.symbol).join(', ')}');
       if (list.isEmpty) {
         _setState(ChartLoadState.empty, message: 'هیچ نمادی در engine تعریف نشده است.');
         return;
@@ -297,8 +302,8 @@ class ChartController extends ChangeNotifier {
 
   void _fail(Object e, String what) {
     _log('$what failed: $e');
-    if (e is ChartDataException) {
-      _engineUnavailable = e.kind == ChartErrorKind.engineUnavailable;
+    if (e is EngineApiException) {
+      _engineUnavailable = isEngineUnreachable(e);
       _setState(ChartLoadState.error, message: _engineUnavailable ? kEngineUnavailableFa : e.messageFa);
     } else {
       _engineUnavailable = false;
@@ -389,9 +394,8 @@ class ChartController extends ChangeNotifier {
     } catch (e) {
       if (serial != _infoSerial || _disposed) return;
       _log('data info failed: $e');
-      _dataInfoError = e is ChartDataException
-          ? (e.kind == ChartErrorKind.engineUnavailable ? kEngineUnavailableFa : e.messageFa)
-          : kUnexpectedErrorFa;
+      _dataInfoError =
+          e is EngineApiException ? (isEngineUnreachable(e) ? kEngineUnavailableFa : e.messageFa) : kUnexpectedErrorFa;
     } finally {
       if (serial == _infoSerial && !_disposed) {
         _dataInfoLoading = false;
@@ -417,10 +421,10 @@ class ChartController extends ChangeNotifier {
     } catch (e) {
       if (_disposed) return;
       _log('update failed: $e');
-      if (e is ChartDataException) {
+      if (e is EngineApiException) {
         _updateOutcome = UpdateOutcome(
           ok: false,
-          messageFa: e.kind == ChartErrorKind.engineUnavailable ? kEngineUnavailableFa : e.messageFa,
+          messageFa: isEngineUnreachable(e) ? kEngineUnavailableFa : e.messageFa,
           explanationFa: updateErrorExplanationFa(e.code),
           errorsFa: e.errorsFa,
         );

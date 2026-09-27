@@ -16,13 +16,13 @@ FakeEngineHttp _http() => FakeEngineHttp({
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
-  testWidgets('home is the shell: app title and the chart placeholder', (tester) async {
+  testWidgets('home is the shell: app title and the chart page', (tester) async {
     final EngineHarness h = EngineHarness(http: _http());
     await tester.pumpWidget(h.wrap(const ShellScreen()));
     await tester.pumpAndSettle();
 
     expect(find.text('Alpha Trader'), findsOneWidget);
-    expect(find.text(ChartScreen.underConstruction), findsOneWidget);
+    expect(find.byType(ChartScreen), findsOneWidget);
     await h.dispose(tester);
   });
 

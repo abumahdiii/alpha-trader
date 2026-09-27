@@ -3,7 +3,8 @@ import 'package:flutter/material.dart';
 import '../../theme/app_semantic_colors.dart';
 import '../chart_controller.dart';
 import '../chart_format.dart';
-import '../chart_models.dart';
+import '../../models/chart_models.dart';
+import '../../models/market_data.dart';
 
 /// «اطلاعات داده»: cache metadata of the selected series, the full gap list
 /// (tap -> jump to the gap on the chart) and «به‌روزرسانی از MT5».

@@ -7,7 +7,9 @@ import 'dart:math' as math;
 
 import 'package:alpha_trader/chart/chart_data_source.dart';
 import 'package:alpha_trader/chart/chart_format.dart';
-import 'package:alpha_trader/chart/chart_models.dart';
+import 'package:alpha_trader/models/chart_models.dart';
+import 'package:alpha_trader/models/market_data.dart';
+import 'package:alpha_trader/services/engine_api.dart';
 
 /// Synthetic open times from [start] every [step], skipping the weekend.
 List<DateTime> fxTimes(DateTime start, Duration step, int count) {
@@ -108,8 +110,8 @@ class FakeChartDataSource implements ChartDataSource {
   final int? digits;
 
   /// Thrown by rates/channel/setups/meta/gaps when set.
-  ChartDataException? error;
-  ChartDataException? updateError;
+  EngineApiException? error;
+  EngineApiException? updateError;
   RatesUpdateResult? updateResult;
 
   /// Per-symbol gate: rates() waits for it (to test stale responses).
@@ -185,22 +187,22 @@ class FakeChartDataSource implements ChartDataSource {
       (from == null || !t.isBefore(from)) && (to == null || !t.isAfter(to));
 
   void _maybeThrow() {
-    final ChartDataException? e = error;
+    final EngineApiException? e = error;
     if (e != null) throw e;
   }
 
   @override
-  Future<List<ChartSymbol>> symbols() async {
+  Future<List<SymbolItem>> symbols() async {
     calls.add('symbols');
     _maybeThrow();
-    return <ChartSymbol>[
+    return <SymbolItem>[
       for (final String s in symbolNames)
-        ChartSymbol(
+        SymbolItem(
           symbol: s,
-          source: 'cache',
+          source: SymbolSource.cache,
           spec: digits == null
               ? null
-              : ChartSymbolSpec(
+              : SymbolSpec(
                   name: s,
                   digits: digits!,
                   point: 0.01,
@@ -333,7 +335,7 @@ class FakeChartDataSource implements ChartDataSource {
   @override
   Future<RatesUpdateResult> update(String symbol) async {
     calls.add('update $symbol');
-    final ChartDataException? e = updateError;
+    final EngineApiException? e = updateError;
     if (e != null) throw e;
     return updateResult ??
         RatesUpdateResult(symbol: symbol, updated: const <TimeframeUpdate>[], messageFa: 'کش $symbol به‌روز شد.');

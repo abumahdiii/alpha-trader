@@ -4,7 +4,7 @@
 
 import 'dart:convert';
 
-import 'package:alpha_trader/chart/chart_models.dart';
+import 'package:alpha_trader/models/chart_models.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 const String _params = '"params": {"n": 100, "k": 2.0, "sigma_ddof": 0, "projection_mode": "bar_count"}';
@@ -138,15 +138,7 @@ void main() {
     expect(p.sizingWarningsFa, <String>['هشدار']);
   });
 
-  test('rates meta, gaps, update and symbols', () {
-    final RatesMeta m = RatesMeta.fromJson(jsonDecode('''{"symbol": "XAUUSD.x", "timeframe": "H1",
-      "cached": true, "rows": 31012, "first_bar_utc": "2021-09-27T00:00:00Z",
-      "last_bar_utc": "2026-09-27T09:00:00Z", "first_available_utc": null, "requested_start_utc": null,
-      "history_short": false, "offset_model": "fixed(0)", "source": "mt5", "fetched_at_utc": null}'''));
-    expect(m.rows, 31012);
-    expect(m.lastBarUtc, DateTime.utc(2026, 9, 27, 9));
-    expect(m.firstAvailableUtc, isNull);
-
+  test('gaps and update', () {
     final GapsResult g = GapsResult.fromJson(jsonDecode('''{"symbol": "XAUUSD.x", "timeframe": "H1",
       "cached": false, "rows": 0, "first_bar_utc": null, "last_bar_utc": null, "offset_model": null,
       "count": 0, "gaps": [], "gap_counts": {"weekend": 0, "holiday": 0, "session_break": 0, "missing": 0},
@@ -158,17 +150,12 @@ void main() {
       "updated": [{"timeframe": "H1", "bars_added": 3, "rows": 31012, "first_bar_utc": "2021-09-27T00:00:00Z",
       "last_bar_utc": "2026-09-27T09:00:00Z", "fetched": 5}], "message_fa": "کش به‌روز شد"}'''));
     expect(u.updated.single.barsAdded, 3);
-
-    final List<ChartSymbol> syms = ChartSymbol.listFromSymbolsResponse(jsonDecode('''{"mt5_state": "connected",
-      "symbols": [{"symbol": "XAUUSD.x", "source": "cache", "spec": null, "fetched_at_utc": null,
-      "error": null}]}'''));
-    expect(syms.single.digits, isNull);
   });
 
   test('contract drift is a FormatException naming the key', () {
     expect(
       () => Candle.fromJson(<String, Object?>{'time': '2025-01-01T00:00:00Z'}),
-      throwsA(isA<FormatException>().having((FormatException e) => e.message, 'message', contains('"open"'))),
+      throwsA(isA<FormatException>().having((FormatException e) => e.message, 'message', contains('bar.open'))),
     );
     expect(() => SetupStatus.parse('filled'), throwsFormatException);
     expect(() => ChannelDirection.parse('sideways'), throwsFormatException);

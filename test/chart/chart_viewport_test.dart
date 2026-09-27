@@ -1,5 +1,5 @@
 import 'package:alpha_trader/chart/chart_data.dart';
-import 'package:alpha_trader/chart/chart_models.dart';
+import 'package:alpha_trader/models/chart_models.dart';
 import 'package:alpha_trader/chart/chart_viewport.dart';
 import 'package:flutter_test/flutter_test.dart';
 

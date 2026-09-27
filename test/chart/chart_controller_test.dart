@@ -1,8 +1,8 @@
 import 'dart:async';
 
 import 'package:alpha_trader/chart/chart_controller.dart';
-import 'package:alpha_trader/chart/chart_data_source.dart';
-import 'package:alpha_trader/chart/chart_models.dart';
+import 'package:alpha_trader/services/engine_api.dart';
+import 'package:alpha_trader/models/chart_models.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fake_chart_data_source.dart';
@@ -57,7 +57,7 @@ void main() {
 
   test('engine error -> error state with the engine Persian message', () async {
     await c.init();
-    src.error = const ChartDataException(ChartErrorKind.http, 'پارامترهای ذخیره‌شده معتبر نیستند.',
+    src.error = const EngineApiException(EngineApiErrorKind.badStatus, 'پارامترهای ذخیره‌شده معتبر نیستند.',
         statusCode: 409, code: 'stored_params_invalid');
     await c.load();
     expect(c.state, ChartLoadState.error);
@@ -66,7 +66,7 @@ void main() {
   });
 
   test('engine not running -> error flagged engineUnavailable', () async {
-    src.error = const ChartDataException(ChartErrorKind.engineUnavailable, 'x');
+    src.error = const EngineApiException(EngineApiErrorKind.connection, 'اتصال به موتور برقرار نشد.');
     await c.init();
     expect(c.state, ChartLoadState.error);
     expect(c.engineUnavailable, isTrue);
@@ -125,14 +125,15 @@ void main() {
     expect(src.calls.any((String s) => s.startsWith('rates')), isTrue);
 
     for (final String code in <String>['no_cache', 'not_incremental', 'offset_model_changed']) {
-      src.updateError = ChartDataException(ChartErrorKind.http, 'پیام engine $code', statusCode: 409, code: code);
+      src.updateError =
+          EngineApiException(EngineApiErrorKind.badStatus, 'پیام engine $code', statusCode: 409, code: code);
       await c.updateFromMt5();
       expect(c.updateOutcome!.ok, isFalse);
       expect(c.updateOutcome!.messageFa, 'پیام engine $code');
       expect(c.updateOutcome!.explanationFa, updateErrorExplanationFa(code));
       expect(c.updateOutcome!.explanationFa, isNotNull);
     }
-    src.updateError = const ChartDataException(ChartErrorKind.http, 'اتصال به MT5 برقرار نیست',
+    src.updateError = const EngineApiException(EngineApiErrorKind.badStatus, 'اتصال به MT5 برقرار نیست',
         statusCode: 503, code: 'mt5_unavailable');
     await c.updateFromMt5();
     expect(c.updateOutcome!.explanationFa, contains('MT5'));

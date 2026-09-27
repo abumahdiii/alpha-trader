@@ -21,7 +21,7 @@ import 'package:flutter/material.dart';
 import '../theme/app_semantic_colors.dart';
 import 'chart_data.dart';
 import 'chart_format.dart';
-import 'chart_models.dart';
+import '../models/chart_models.dart';
 import 'chart_viewport.dart';
 
 /// Colours and reusable paints of the chart, built once per theme.

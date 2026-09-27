@@ -11,7 +11,7 @@ import 'dart:ui' show Offset, Rect, Size;
 import 'package:flutter/foundation.dart';
 
 import 'chart_data.dart';
-import 'chart_models.dart';
+import '../models/chart_models.dart';
 
 /// Inclusive range of bar indices.
 @immutable

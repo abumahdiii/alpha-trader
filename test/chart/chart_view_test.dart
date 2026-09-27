@@ -1,8 +1,8 @@
 import 'package:alpha_trader/chart/chart_controller.dart';
 import 'package:alpha_trader/chart/chart_data.dart';
-import 'package:alpha_trader/chart/chart_data_source.dart';
+import 'package:alpha_trader/services/engine_api.dart';
 import 'package:alpha_trader/chart/chart_format.dart';
-import 'package:alpha_trader/chart/chart_models.dart';
+import 'package:alpha_trader/models/chart_models.dart';
 import 'package:alpha_trader/chart/chart_painter.dart';
 import 'package:alpha_trader/chart/chart_view.dart';
 import 'package:alpha_trader/chart/chart_viewport.dart';
@@ -163,7 +163,7 @@ void main() {
 
   testWidgets('update button: 409 shows the engine message and the explanation', (WidgetTester tester) async {
     final FakeChartDataSource src = FakeChartDataSource(h1Count: 600)
-      ..updateError = const ChartDataException(ChartErrorKind.http, 'کش داده آزمایشی است.',
+      ..updateError = const EngineApiException(EngineApiErrorKind.badStatus, 'کش داده آزمایشی است.',
           statusCode: 409, code: 'not_incremental');
     await _pump(tester, src);
     await tester.tap(find.text('اطلاعات داده'));
@@ -177,7 +177,7 @@ void main() {
 
   testWidgets('empty and error states', (WidgetTester tester) async {
     final FakeChartDataSource src = FakeChartDataSource(h1Count: 300)
-      ..error = const ChartDataException(ChartErrorKind.engineUnavailable, 'x');
+      ..error = const EngineApiException(EngineApiErrorKind.connection, 'اتصال به موتور برقرار نشد.');
     final ChartController c = await _pump(tester, src);
     expect(find.text(kEngineUnavailableFa), findsOneWidget);
     expect(find.text('تلاش دوباره'), findsOneWidget);

@@ -33,7 +33,7 @@ void main() {
     }
     expect(find.text(ShellScreen.comingSoon), findsNWidgets(2));
     expect(rail.selectedIndex, 0);
-    expect(find.text(ChartScreen.underConstruction), findsOneWidget);
+    expect(find.byType(ChartScreen), findsOneWidget);
     await h.dispose(tester);
   });
 

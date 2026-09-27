@@ -7,6 +7,7 @@ import 'package:dio/dio.dart';
 import '../core/app_logger.dart';
 import '../core/dev_mode.dart';
 import '../models/account_settings.dart';
+import '../models/chart_models.dart';
 import '../models/market_data.dart';
 import '../models/strategy.dart';
 
@@ -172,6 +173,84 @@ class EngineApi {
         timeout: timeout,
         parse: RatesMeta.fromJson,
       );
+
+  /// `GET /rates?symbol&timeframe&from&to` -- cached bars of a window (the
+  /// engine may first append closed bars from MT5, hence the slow budget).
+  Future<RatesResult> getRates({
+    required String symbol,
+    required String timeframe,
+    DateTime? from,
+    DateTime? to,
+    Duration? timeout,
+  }) =>
+      _call(
+        'GET',
+        '/rates',
+        query: {'symbol': symbol, 'timeframe': timeframe, ..._range(from, to)},
+        timeout: timeout ?? slowCallTimeout,
+        parse: RatesResult.fromJson,
+      );
+
+  /// `GET /rates/gaps?symbol&timeframe` -- every gap of the whole cached series.
+  Future<GapsResult> getRatesGaps({required String symbol, required String timeframe, Duration? timeout}) => _call(
+        'GET',
+        '/rates/gaps',
+        query: {'symbol': symbol, 'timeframe': timeframe},
+        timeout: timeout,
+        parse: GapsResult.fromJson,
+      );
+
+  /// `POST /rates/update` -- incremental, read-only MT5 fetch into the cache
+  /// ([timeframe] null = H1 and H4). 409 `no_cache` / `not_incremental` /
+  /// `offset_model_changed`, 503 `mt5_unavailable` / `update_failed`.
+  Future<RatesUpdateResult> postRatesUpdate({required String symbol, String? timeframe, Duration? timeout}) => _call(
+        'POST',
+        '/rates/update',
+        body: {'symbol': symbol, if (timeframe != null) 'timeframe': timeframe},
+        timeout: timeout ?? slowCallTimeout,
+        parse: RatesUpdateResult.fromJson,
+      );
+
+  // --------------------------------------------------------------------- chart
+
+  /// `GET /chart/channel?symbol&timeframe&from&to` -- the strategy's channel
+  /// lines per bar (cache only; first call computes the full history).
+  Future<ChannelResult> getChartChannel({
+    required String symbol,
+    required String timeframe,
+    DateTime? from,
+    DateTime? to,
+    Duration? timeout,
+  }) =>
+      _call(
+        'GET',
+        '/chart/channel',
+        query: {'symbol': symbol, 'timeframe': timeframe, ..._range(from, to)},
+        timeout: timeout ?? slowCallTimeout,
+        parse: ChannelResult.fromJson,
+      );
+
+  /// `GET /chart/setups?symbol&from&to` -- scanned setups by decision time.
+  /// Always pass a window: the full-history list is heavy.
+  Future<SetupsResult> getChartSetups({
+    required String symbol,
+    DateTime? from,
+    DateTime? to,
+    Duration? timeout,
+  }) =>
+      _call(
+        'GET',
+        '/chart/setups',
+        query: {'symbol': symbol, ..._range(from, to)},
+        timeout: timeout ?? slowCallTimeout,
+        parse: SetupsResult.fromJson,
+      );
+
+  /// `from`/`to` query parameters as ISO-8601 UTC (`...Z`).
+  static Map<String, Object> _range(DateTime? from, DateTime? to) => {
+        if (from != null) 'from': from.toUtc().toIso8601String(),
+        if (to != null) 'to': to.toUtc().toIso8601String(),
+      };
 
   // ------------------------------------------------------------------ settings
 

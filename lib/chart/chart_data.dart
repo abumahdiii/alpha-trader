@@ -1,7 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../core/dev_mode.dart';
-import 'chart_models.dart';
+import '../models/chart_models.dart';
 
 /// A setup placed on the loaded bars: [barIndex] = its confirmation bar,
 /// [entryIndex] = the bar it would be filled at (null while pending).

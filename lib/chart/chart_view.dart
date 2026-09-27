@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 
+import '../models/market_data.dart';
 import '../theme/app_semantic_colors.dart';
 import 'chart_controller.dart';
 import 'chart_data.dart';
 import 'chart_format.dart';
-import 'chart_models.dart';
+import '../models/chart_models.dart';
 import 'widgets/candle_info_panel.dart';
 import 'widgets/chart_canvas.dart';
 import 'widgets/data_info_panel.dart';
@@ -178,7 +179,7 @@ class _ChartToolbar extends StatelessWidget {
             value: c.symbol,
             hint: const Text('نماد'),
             items: <DropdownMenuItem<String>>[
-              for (final ChartSymbol s in c.symbols)
+              for (final SymbolItem s in c.symbols)
                 DropdownMenuItem<String>(value: s.symbol, child: Text(s.symbol, textDirection: TextDirection.ltr)),
             ],
             onChanged: (String? s) {

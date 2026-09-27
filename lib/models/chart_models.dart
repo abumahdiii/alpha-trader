@@ -1,4 +1,7 @@
-// Typed mirrors of the engine's chart / market-data responses.
+// Typed mirrors of the engine's chart / market-data responses used by the
+// candlestick chart (`/rates`, `/rates/gaps`, `/rates/update`,
+// `/chart/channel`, `/chart/setups`). `/symbols` and `/rates/meta` live in
+// market_data.dart.
 //
 // Each class names the pydantic model it mirrors (engine/alpha_engine/...).
 // Field names map 1:1 (snake_case -> camelCase); `T | None` in Python is a
@@ -7,7 +10,34 @@
 
 import 'package:flutter/foundation.dart';
 
-import 'json_read.dart';
+import 'json_reader.dart';
+import 'market_data.dart';
+
+/// Required ISO-8601 UTC timestamp.
+DateTime _utc(JsonReader r, String key) {
+  final DateTime? t = r.utcOrNull(key);
+  if (t == null) throw FormatException('${r.what}.$key is missing (expected an ISO-8601 UTC timestamp)');
+  return t;
+}
+
+/// `dict[str, int]` (gap_counts, status_counts).
+Map<String, int> _intMap(JsonReader r, String key) {
+  final JsonReader o = r.object(key);
+  final Object? raw = r.raw(key);
+  return Map<String, int>.unmodifiable(<String, int>{
+    for (final Object? k in (raw as Map).keys) '$k': o.integer('$k'),
+  });
+}
+
+/// A free-form JSON object kept as-is (params, indicators; values may be null).
+Map<String, Object?> _rawMap(JsonReader r, String key) {
+  r.object(key); // type check
+  return Map<String, Object?>.unmodifiable((r.raw(key) as Map).map((Object? k, Object? v) => MapEntry('$k', v)));
+}
+
+/// `list[str]`, strictly (JsonReader.strings is lenient on null).
+List<String> _strings(JsonReader r, String key) => List<String>.unmodifiable(r.list(key).map((Object? e) =>
+    e is String ? e : throw FormatException('${r.what}.$key must be a list of strings, got ${e.runtimeType}')));
 
 /// `H1` / `H4` — the only timeframes the chart routes accept.
 enum ChartTimeframe {
@@ -59,20 +89,19 @@ class Candle {
 
   bool get isBull => close >= open;
 
-  factory Candle.fromJson(Object? json) {
-    final Map<String, Object?> m = jsonObject(json, 'bar');
-    return Candle(
-      time: reqUtc(m, 'time'),
-      serverTime: optString(m, 'server_time'),
-      open: reqDouble(m, 'open'),
-      high: reqDouble(m, 'high'),
-      low: reqDouble(m, 'low'),
-      close: reqDouble(m, 'close'),
-      tickVolume: reqInt(m, 'tick_volume'),
-      spread: reqInt(m, 'spread'),
-      realVolume: reqInt(m, 'real_volume'),
-    );
-  }
+  factory Candle.fromJson(Object? json) => Candle.read(JsonReader(json, 'bar'));
+
+  factory Candle.read(JsonReader r) => Candle(
+        time: _utc(r, 'time'),
+        serverTime: r.strOrNull('server_time'),
+        open: r.number('open'),
+        high: r.number('high'),
+        low: r.number('low'),
+        close: r.number('close'),
+        tickVolume: r.integer('tick_volume'),
+        spread: r.integer('spread'),
+        realVolume: r.integer('real_volume'),
+      );
 }
 
 /// Kinds of `data.gaps.GapKind` (data/gaps.py:62).
@@ -118,17 +147,14 @@ class Gap {
   final int missingBars;
   final double durationHours;
 
-  factory Gap.fromJson(Object? json) {
-    final Map<String, Object?> m = jsonObject(json, 'gap');
-    return Gap(
-      kind: GapKind.parse(reqString(m, 'kind')),
-      after: reqUtc(m, 'after'),
-      before: reqUtc(m, 'before'),
-      start: reqUtc(m, 'start'),
-      missingBars: reqInt(m, 'missing_bars'),
-      durationHours: reqDouble(m, 'duration_hours'),
-    );
-  }
+  factory Gap.read(JsonReader r) => Gap(
+        kind: GapKind.parse(r.str('kind')),
+        after: _utc(r, 'after'),
+        before: _utc(r, 'before'),
+        start: _utc(r, 'start'),
+        missingBars: r.integer('missing_bars'),
+        durationHours: r.number('duration_hours'),
+      );
 }
 
 /// `GET /rates`. Mirrors `RatesResponse` (routes/rates.py:52-66); `from` is
@@ -168,72 +194,20 @@ class RatesResult {
   final String? message;
 
   factory RatesResult.fromJson(Object? json) {
-    final Map<String, Object?> m = jsonObject(json, 'rates');
+    final JsonReader r = JsonReader(json, 'rates');
     return RatesResult(
-      symbol: reqString(m, 'symbol'),
-      timeframe: reqString(m, 'timeframe'),
-      from: reqString(m, 'from'),
-      to: reqString(m, 'to'),
-      source: reqString(m, 'source'),
-      stale: reqBool(m, 'stale'),
-      offsetModel: optString(m, 'offset_model'),
-      count: reqInt(m, 'count'),
-      bars: reqList(m, 'bars', Candle.fromJson),
-      gaps: reqList(m, 'gaps', Gap.fromJson),
-      gapCounts: reqIntMap(m, 'gap_counts'),
-      message: optString(m, 'message'),
-    );
-  }
-}
-
-/// `GET /rates/meta`. Mirrors `RatesMetaResponse` (routes/rates.py:69-83).
-@immutable
-class RatesMeta {
-  const RatesMeta({
-    required this.symbol,
-    required this.timeframe,
-    required this.cached,
-    required this.rows,
-    this.firstBarUtc,
-    this.lastBarUtc,
-    this.firstAvailableUtc,
-    this.requestedStartUtc,
-    this.historyShort,
-    this.offsetModel,
-    this.source,
-    this.fetchedAtUtc,
-  });
-
-  final String symbol;
-  final String timeframe;
-  final bool cached;
-  final int rows;
-  final DateTime? firstBarUtc;
-  final DateTime? lastBarUtc;
-  final DateTime? firstAvailableUtc;
-  final DateTime? requestedStartUtc;
-  final bool? historyShort;
-  final String? offsetModel;
-
-  /// `mt5` or `seed` (test data).
-  final String? source;
-  final DateTime? fetchedAtUtc;
-
-  factory RatesMeta.fromJson(Object? json) {
-    final Map<String, Object?> m = jsonObject(json, 'rates meta');
-    return RatesMeta(
-      symbol: reqString(m, 'symbol'),
-      timeframe: reqString(m, 'timeframe'),
-      cached: reqBool(m, 'cached'),
-      rows: reqInt(m, 'rows'),
-      firstBarUtc: optUtc(m, 'first_bar_utc'),
-      lastBarUtc: optUtc(m, 'last_bar_utc'),
-      firstAvailableUtc: optUtc(m, 'first_available_utc'),
-      requestedStartUtc: optUtc(m, 'requested_start_utc'),
-      historyShort: optBool(m, 'history_short'),
-      offsetModel: optString(m, 'offset_model'),
-      source: optString(m, 'source'),
-      fetchedAtUtc: optUtc(m, 'fetched_at_utc'),
+      symbol: r.str('symbol'),
+      timeframe: r.str('timeframe'),
+      from: r.str('from'),
+      to: r.str('to'),
+      source: r.str('source'),
+      stale: r.boolean('stale'),
+      offsetModel: r.strOrNull('offset_model'),
+      count: r.integer('count'),
+      bars: r.objects('bars', Candle.read),
+      gaps: r.objects('gaps', Gap.read),
+      gapCounts: _intMap(r, 'gap_counts'),
+      message: r.strOrNull('message'),
     );
   }
 }
@@ -270,20 +244,20 @@ class GapsResult {
   final List<String> sessionBreakSlots;
 
   factory GapsResult.fromJson(Object? json) {
-    final Map<String, Object?> m = jsonObject(json, 'rates gaps');
+    final JsonReader r = JsonReader(json, 'rates_gaps');
     return GapsResult(
-      symbol: reqString(m, 'symbol'),
-      timeframe: reqString(m, 'timeframe'),
-      cached: reqBool(m, 'cached'),
-      rows: reqInt(m, 'rows'),
-      firstBarUtc: optUtc(m, 'first_bar_utc'),
-      lastBarUtc: optUtc(m, 'last_bar_utc'),
-      offsetModel: optString(m, 'offset_model'),
-      count: reqInt(m, 'count'),
-      gaps: reqList(m, 'gaps', Gap.fromJson),
-      gapCounts: reqIntMap(m, 'gap_counts'),
-      missingBarsTotal: reqInt(m, 'missing_bars_total'),
-      sessionBreakSlots: reqStringList(m, 'session_break_slots'),
+      symbol: r.str('symbol'),
+      timeframe: r.str('timeframe'),
+      cached: r.boolean('cached'),
+      rows: r.integer('rows'),
+      firstBarUtc: r.utcOrNull('first_bar_utc'),
+      lastBarUtc: r.utcOrNull('last_bar_utc'),
+      offsetModel: r.strOrNull('offset_model'),
+      count: r.integer('count'),
+      gaps: r.objects('gaps', Gap.read),
+      gapCounts: _intMap(r, 'gap_counts'),
+      missingBarsTotal: r.integer('missing_bars_total'),
+      sessionBreakSlots: _strings(r, 'session_break_slots'),
     );
   }
 }
@@ -308,17 +282,14 @@ class TimeframeUpdate {
   final DateTime? lastBarUtc;
   final int fetched;
 
-  factory TimeframeUpdate.fromJson(Object? json) {
-    final Map<String, Object?> m = jsonObject(json, 'timeframe update');
-    return TimeframeUpdate(
-      timeframe: reqString(m, 'timeframe'),
-      barsAdded: reqInt(m, 'bars_added'),
-      rows: reqInt(m, 'rows'),
-      firstBarUtc: optUtc(m, 'first_bar_utc'),
-      lastBarUtc: optUtc(m, 'last_bar_utc'),
-      fetched: reqInt(m, 'fetched'),
-    );
-  }
+  factory TimeframeUpdate.read(JsonReader r) => TimeframeUpdate(
+        timeframe: r.str('timeframe'),
+        barsAdded: r.integer('bars_added'),
+        rows: r.integer('rows'),
+        firstBarUtc: r.utcOrNull('first_bar_utc'),
+        lastBarUtc: r.utcOrNull('last_bar_utc'),
+        fetched: r.integer('fetched'),
+      );
 }
 
 /// `POST /rates/update`. Mirrors `RatesUpdateResponse` (routes/rates.py:276-281).
@@ -331,99 +302,13 @@ class RatesUpdateResult {
   final String messageFa;
 
   factory RatesUpdateResult.fromJson(Object? json) {
-    final Map<String, Object?> m = jsonObject(json, 'rates update');
+    final JsonReader r = JsonReader(json, 'rates_update');
     return RatesUpdateResult(
-      symbol: reqString(m, 'symbol'),
-      updated: reqList(m, 'updated', TimeframeUpdate.fromJson),
-      messageFa: reqString(m, 'message_fa'),
+      symbol: r.str('symbol'),
+      updated: r.objects('updated', TimeframeUpdate.read),
+      messageFa: r.str('message_fa'),
     );
   }
-}
-
-// ------------------------------------------------------------------ /symbols
-
-/// Contract data. Mirrors `SymbolSpec` (data/symbols.py:32-54; the engine
-/// model ignores extra keys, so does this one).
-@immutable
-class ChartSymbolSpec {
-  const ChartSymbolSpec({
-    required this.name,
-    required this.digits,
-    required this.point,
-    required this.tradeContractSize,
-    required this.tradeTickValue,
-    required this.tradeTickSize,
-    required this.volumeMin,
-    required this.volumeStep,
-    required this.volumeMax,
-    required this.currencyProfit,
-    required this.currencyBase,
-    this.description = '',
-  });
-
-  final String name;
-  final int digits;
-  final double point;
-  final double tradeContractSize;
-  final double tradeTickValue;
-  final double tradeTickSize;
-  final double volumeMin;
-  final double volumeStep;
-  final double volumeMax;
-  final String currencyProfit;
-  final String currencyBase;
-  final String description;
-
-  factory ChartSymbolSpec.fromJson(Object? json) {
-    final Map<String, Object?> m = jsonObject(json, 'symbol spec');
-    return ChartSymbolSpec(
-      name: reqString(m, 'name'),
-      digits: reqInt(m, 'digits'),
-      point: reqDouble(m, 'point'),
-      tradeContractSize: reqDouble(m, 'trade_contract_size'),
-      tradeTickValue: reqDouble(m, 'trade_tick_value'),
-      tradeTickSize: reqDouble(m, 'trade_tick_size'),
-      volumeMin: reqDouble(m, 'volume_min'),
-      volumeStep: reqDouble(m, 'volume_step'),
-      volumeMax: reqDouble(m, 'volume_max'),
-      currencyProfit: reqString(m, 'currency_profit'),
-      currencyBase: reqString(m, 'currency_base'),
-      description: optString(m, 'description') ?? '',
-    );
-  }
-}
-
-/// One configured symbol. Mirrors `SymbolItem` (routes/symbols.py:19-26).
-@immutable
-class ChartSymbol {
-  const ChartSymbol({required this.symbol, required this.source, this.spec, this.fetchedAtUtc, this.error});
-
-  final String symbol;
-
-  /// `mt5` | `cache` | `none`.
-  final String source;
-  final ChartSymbolSpec? spec;
-  final String? fetchedAtUtc;
-  final String? error;
-
-  /// Price precision for display; null until a spec was cached once.
-  int? get digits => spec?.digits;
-
-  factory ChartSymbol.fromJson(Object? json) {
-    final Map<String, Object?> m = jsonObject(json, 'symbol item');
-    final Object? spec = m['spec'];
-    return ChartSymbol(
-      symbol: reqString(m, 'symbol'),
-      source: reqString(m, 'source'),
-      spec: spec == null ? null : ChartSymbolSpec.fromJson(spec),
-      fetchedAtUtc: optString(m, 'fetched_at_utc'),
-      error: optString(m, 'error'),
-    );
-  }
-
-  /// `GET /symbols` -> `SymbolsResponse.symbols` (routes/symbols.py:29-33).
-  static List<ChartSymbol> listFromSymbolsResponse(Object? json) =>
-      reqList(jsonObject(json, 'symbols'), 'symbols', ChartSymbol.fromJson);
 }
 
 // ------------------------------------------------------------------ /chart
@@ -496,24 +381,21 @@ class ChannelPoint {
   /// All three lines present (valid points always have them; defensive).
   bool get drawable => valid && mid != null && upper != null && lower != null;
 
-  factory ChannelPoint.fromJson(Object? json) {
-    final Map<String, Object?> m = jsonObject(json, 'channel point');
-    return ChannelPoint(
-      time: reqUtc(m, 'time'),
-      valid: reqBool(m, 'valid'),
-      mid: optDouble(m, 'mid'),
-      upper: optDouble(m, 'upper'),
-      lower: optDouble(m, 'lower'),
-      slope: optDouble(m, 'slope'),
-      sigma: optDouble(m, 'sigma'),
-      isFlat: optBool(m, 'is_flat'),
-      direction: ChannelDirection.parse(optString(m, 'direction')),
-      atrH1: optDouble(m, 'atr_h1'),
-      atrH4: optDouble(m, 'atr_h4'),
-      h4Open: optUtc(m, 'h4_open'),
-      barsAhead: optDouble(m, 'bars_ahead'),
-    );
-  }
+  factory ChannelPoint.read(JsonReader r) => ChannelPoint(
+        time: _utc(r, 'time'),
+        valid: r.boolean('valid'),
+        mid: r.numberOrNull('mid'),
+        upper: r.numberOrNull('upper'),
+        lower: r.numberOrNull('lower'),
+        slope: r.numberOrNull('slope'),
+        sigma: r.numberOrNull('sigma'),
+        isFlat: r.boolOrNull('is_flat'),
+        direction: ChannelDirection.parse(r.strOrNull('direction')),
+        atrH1: r.numberOrNull('atr_h1'),
+        atrH4: r.numberOrNull('atr_h4'),
+        h4Open: r.utcOrNull('h4_open'),
+        barsAhead: r.numberOrNull('bars_ahead'),
+      );
 }
 
 /// Strategy provenance shared by both chart responses. Mirrors
@@ -534,12 +416,12 @@ class StrategyProvenance {
   final String paramsHash;
   final Map<String, Object?> params;
 
-  factory StrategyProvenance.fromMap(Map<String, Object?> m) => StrategyProvenance(
-        strategy: reqString(m, 'strategy'),
-        strategyVersion: reqInt(m, 'strategy_version'),
-        paramsVersion: reqInt(m, 'params_version'),
-        paramsHash: reqString(m, 'params_hash'),
-        params: reqRawMap(m, 'params'),
+  factory StrategyProvenance.read(JsonReader r) => StrategyProvenance(
+        strategy: r.str('strategy'),
+        strategyVersion: r.integer('strategy_version'),
+        paramsVersion: r.integer('params_version'),
+        paramsHash: r.str('params_hash'),
+        params: _rawMap(r, 'params'),
       );
 }
 
@@ -569,17 +451,17 @@ class ChannelResult {
   final String? messageFa;
 
   factory ChannelResult.fromJson(Object? json) {
-    final Map<String, Object?> m = jsonObject(json, 'channel');
+    final JsonReader r = JsonReader(json, 'channel');
     return ChannelResult(
-      symbol: reqString(m, 'symbol'),
-      provenance: StrategyProvenance.fromMap(m),
-      timeframe: ChartTimeframe.parse(reqString(m, 'timeframe')),
-      from: optUtc(m, 'from'),
-      to: optUtc(m, 'to'),
-      count: reqInt(m, 'count'),
-      validCount: reqInt(m, 'valid_count'),
-      points: reqList(m, 'points', ChannelPoint.fromJson),
-      messageFa: optString(m, 'message_fa'),
+      symbol: r.str('symbol'),
+      provenance: StrategyProvenance.read(r),
+      timeframe: ChartTimeframe.parse(r.str('timeframe')),
+      from: r.utcOrNull('from'),
+      to: r.utcOrNull('to'),
+      count: r.integer('count'),
+      validCount: r.integer('valid_count'),
+      points: r.objects('points', ChannelPoint.read),
+      messageFa: r.strOrNull('message_fa'),
     );
   }
 }
@@ -728,40 +610,37 @@ class SetupItem {
 
   String get patternTitleFa => patternTitlesFa[pattern] ?? pattern;
 
-  factory SetupItem.fromJson(Object? json) {
-    final Map<String, Object?> m = jsonObject(json, 'setup item');
-    return SetupItem(
-      id: reqString(m, 'id'),
-      symbol: reqString(m, 'symbol'),
-      status: SetupStatus.parse(reqString(m, 'status')),
-      rejectionReasonFa: optString(m, 'rejection_reason_fa'),
-      setupType: reqString(m, 'setup_type'),
-      setupTitleFa: reqString(m, 'setup_title_fa'),
-      direction: TradeSide.parse(reqString(m, 'direction')),
-      pattern: reqString(m, 'pattern'),
-      line: ChannelLine.parse(reqString(m, 'line')),
-      lineValue: optDouble(m, 'line_value'),
-      channelDirection: optString(m, 'channel_direction'),
-      confirmationBarTime: reqUtc(m, 'confirmation_bar_time'),
-      decisionTime: reqUtc(m, 'decision_time'),
-      entryTime: optUtc(m, 'entry_time'),
-      entry: optDouble(m, 'entry'),
-      stopLoss: reqDouble(m, 'stop_loss'),
-      takeProfit: optDouble(m, 'take_profit'),
-      rr: reqDouble(m, 'rr'),
-      riskDistance: optDouble(m, 'risk_distance'),
-      referencePrice: reqDouble(m, 'reference_price'),
-      indicativeTakeProfit: reqDouble(m, 'indicative_take_profit'),
-      volume: optDouble(m, 'volume'),
-      actualRisk: optDouble(m, 'actual_risk'),
-      margin: optDouble(m, 'margin'),
-      riskAmount: optDouble(m, 'risk_amount'),
-      volumeNoteFa: optString(m, 'volume_note_fa'),
-      sizingWarningsFa: reqStringList(m, 'sizing_warnings_fa'),
-      reasonFa: reqString(m, 'reason_fa'),
-      indicators: reqRawMap(m, 'indicators'),
-    );
-  }
+  factory SetupItem.read(JsonReader r) => SetupItem(
+        id: r.str('id'),
+        symbol: r.str('symbol'),
+        status: SetupStatus.parse(r.str('status')),
+        rejectionReasonFa: r.strOrNull('rejection_reason_fa'),
+        setupType: r.str('setup_type'),
+        setupTitleFa: r.str('setup_title_fa'),
+        direction: TradeSide.parse(r.str('direction')),
+        pattern: r.str('pattern'),
+        line: ChannelLine.parse(r.str('line')),
+        lineValue: r.numberOrNull('line_value'),
+        channelDirection: r.strOrNull('channel_direction'),
+        confirmationBarTime: _utc(r, 'confirmation_bar_time'),
+        decisionTime: _utc(r, 'decision_time'),
+        entryTime: r.utcOrNull('entry_time'),
+        entry: r.numberOrNull('entry'),
+        stopLoss: r.number('stop_loss'),
+        takeProfit: r.numberOrNull('take_profit'),
+        rr: r.number('rr'),
+        riskDistance: r.numberOrNull('risk_distance'),
+        referencePrice: r.number('reference_price'),
+        indicativeTakeProfit: r.number('indicative_take_profit'),
+        volume: r.numberOrNull('volume'),
+        actualRisk: r.numberOrNull('actual_risk'),
+        margin: r.numberOrNull('margin'),
+        riskAmount: r.numberOrNull('risk_amount'),
+        volumeNoteFa: r.strOrNull('volume_note_fa'),
+        sizingWarningsFa: _strings(r, 'sizing_warnings_fa'),
+        reasonFa: r.str('reason_fa'),
+        indicators: _rawMap(r, 'indicators'),
+      );
 }
 
 /// Account settings used for sizing. Mirrors `AccountSettings`
@@ -775,15 +654,12 @@ class ChartAccount {
   final int leverage;
   final double rr;
 
-  factory ChartAccount.fromJson(Object? json) {
-    final Map<String, Object?> m = jsonObject(json, 'account');
-    return ChartAccount(
-      balance: reqDouble(m, 'balance'),
-      riskPct: reqDouble(m, 'risk_pct'),
-      leverage: reqInt(m, 'leverage'),
-      rr: reqDouble(m, 'rr'),
-    );
-  }
+  factory ChartAccount.read(JsonReader r) => ChartAccount(
+        balance: r.number('balance'),
+        riskPct: r.number('risk_pct'),
+        leverage: r.integer('leverage'),
+        rr: r.number('rr'),
+      );
 }
 
 /// `GET /chart/setups`. Mirrors `SetupsResponse` (routes/chart.py:165-176).
@@ -808,7 +684,7 @@ class SetupsResult {
   final DateTime? from;
   final DateTime? to;
   final ChartAccount account;
-  final ChartSymbolSpec? symbolSpec;
+  final SymbolSpec? symbolSpec;
   final int count;
   final Map<String, int> statusCounts;
   final List<SetupItem> setups;
@@ -816,20 +692,20 @@ class SetupsResult {
   final String? messageFa;
 
   factory SetupsResult.fromJson(Object? json) {
-    final Map<String, Object?> m = jsonObject(json, 'setups');
-    final Object? spec = m['symbol_spec'];
+    final JsonReader r = JsonReader(json, 'setups');
+    final JsonReader? spec = r.objectOrNull('symbol_spec');
     return SetupsResult(
-      symbol: reqString(m, 'symbol'),
-      provenance: StrategyProvenance.fromMap(m),
-      from: optUtc(m, 'from'),
-      to: optUtc(m, 'to'),
-      account: ChartAccount.fromJson(m['account']),
-      symbolSpec: spec == null ? null : ChartSymbolSpec.fromJson(spec),
-      count: reqInt(m, 'count'),
-      statusCounts: reqIntMap(m, 'status_counts'),
-      setups: reqList(m, 'setups', SetupItem.fromJson),
-      noteFa: reqString(m, 'note_fa'),
-      messageFa: optString(m, 'message_fa'),
+      symbol: r.str('symbol'),
+      provenance: StrategyProvenance.read(r),
+      from: r.utcOrNull('from'),
+      to: r.utcOrNull('to'),
+      account: ChartAccount.read(r.object('account')),
+      symbolSpec: spec == null ? null : SymbolSpec.fromJson(spec),
+      count: r.integer('count'),
+      statusCounts: _intMap(r, 'status_counts'),
+      setups: r.objects('setups', SetupItem.read),
+      noteFa: r.str('note_fa'),
+      messageFa: r.strOrNull('message_fa'),
     );
   }
 }

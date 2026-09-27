@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import '../../theme/app_semantic_colors.dart';
 import '../chart_data.dart';
 import '../chart_format.dart';
-import '../chart_models.dart';
+import '../../models/chart_models.dart';
 
 /// Values of the hovered bar (or the newest bar), laid out for a
 /// side-by-side check against MT5's Data Window: server time AND UTC, OHLC

@@ -5,7 +5,7 @@ import '../../theme/app_semantic_colors.dart';
 import '../../widgets/scrollable_dialog.dart';
 import '../chart_data.dart';
 import '../chart_format.dart';
-import '../chart_models.dart';
+import '../../models/chart_models.dart';
 
 /// Colour of a setup status (same meaning as on the chart).
 Color setupStatusColor(BuildContext context, SetupStatus s) {
