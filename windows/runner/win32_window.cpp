@@ -150,6 +150,17 @@ bool Win32Window::Create(const std::wstring& title,
 }
 
 bool Win32Window::Show() {
+  // Called once, after Flutter's first frame. Dart (window_manager) owns the
+  // window placement, so never undo what it already did: SW_SHOWNORMAL on a
+  // maximized window RESTORES it, which is how a maximize requested from
+  // main.dart used to be lost (IsZoomed=false, title bar off-screen).
+  if (IsZoomed(window_handle_)) {
+    ShowWindow(window_handle_, SW_SHOWMAXIMIZED);
+    return true;
+  }
+  if (IsWindowVisible(window_handle_)) {
+    return true;
+  }
   return ShowWindow(window_handle_, SW_SHOWNORMAL);
 }
 
