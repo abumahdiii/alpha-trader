@@ -227,8 +227,8 @@ def simulate_window(
     weekend_holds = 0
 
     if dev:
-        logger.debug("bt window %d %s..%s: bars %d..%d (%d) balance=%.2f risk=%.2f%% lev=%d rr=%g commission=%g/lot/side "
-                     "vpu=%g point=%g", wi, window.start.isoformat(), window.end.isoformat(), i0, i1, i1 - i0, balance,
+        logger.debug("bt window %d %s..%s: bars %d..%d (%d) balance=%.2f risk=%.2f%% lev=%d rr=%g "
+                     "commission=%g/lot/side vpu=%g point=%g", wi, window.start.isoformat(), window.end.isoformat(), i0, i1, i1 - i0, balance,
                      account.risk_pct, account.leverage, account.rr, per_side, vpu, spec.point)
 
     def skip(cand: SignalCandidate, reason: SkipReason, detail: str | None, reason_fa: str | None = None) -> None:
