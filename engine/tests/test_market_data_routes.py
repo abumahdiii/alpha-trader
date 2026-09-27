@@ -140,8 +140,10 @@ def test_rates_fetches_then_serves_cache(env, synthetic) -> None:
     expected = synthetic[("XAUUSD.x", Timeframe.H1)].utc
     window = expected[(expected["time"] >= "2025-03-10") & (expected["time"] <= "2025-03-15")]
     assert body["count"] == len(window) == len(body["bars"])
-    assert body["bars"][0] == {"time": "2025-03-10T00:00:00Z", **{k: window.iloc[0][k] for k in
-                               ("open", "high", "low", "close", "tick_volume", "spread", "real_volume")}}
+    # server_time: us_dst(+2) during US DST (from 2025-03-09) = UTC + 3h, in MT5's Data Window format
+    assert body["bars"][0] == {"time": "2025-03-10T00:00:00Z", "server_time": "2025.03.10 03:00",
+                               **{k: window.iloc[0][k] for k in
+                                  ("open", "high", "low", "close", "tick_volume", "spread", "real_volume")}}
     assert body["gap_counts"]["session_break"] == 4 and body["gap_counts"]["weekend"] == 1
     assert {g["kind"] for g in body["gaps"]} <= {"weekend", "holiday", "session_break", "missing"}
     # second request inside the cached range: served from cache, no MT5 call
@@ -223,3 +225,164 @@ def test_cache_dir_is_isolated(env, tmp_path) -> None:
     e = env()
     e["service"].update("XAUUSD.x", "H1", start=datetime(2025, 4, 1, tzinfo=timezone.utc))
     assert OhlcvCache(tmp_path / "data").read_meta("XAUUSD.x", "H1") is not None
+
+
+# --- server_time -----------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("tf", [Timeframe.H1, Timeframe.H4])
+def test_rates_server_time_equals_broker_clock(env, synthetic, tmp_path, tf) -> None:
+    """server_time comes from the cached offset model and equals the raw server-clock epochs MT5 returned."""
+    e = env(connected=False, when=datetime(2025, 6, 1, 12, tzinfo=timezone.utc))
+    seed_cache(tmp_path / "data", repo_data_dir=tmp_path / "elsewhere")
+    body = e["client"].get("/rates", params={"symbol": "XAUUSD.x", "timeframe": tf.value,
+                                             "from": "2025-02-20T00:00:00Z", "to": "2025-05-10T00:00:00Z"}).json()
+    series = synthetic[("XAUUSD.x", tf)]
+    raw_server = pd.to_datetime(series.raw["time"], unit="s").strftime("%Y.%m.%d %H:%M").tolist()
+    assert len(body["bars"]) == len(raw_server) == len(series.utc)
+    assert [b["server_time"] for b in body["bars"]] == raw_server
+    first = body["bars"][0]
+    assert (first["time"], first["server_time"]) == (("2025-02-24T00:00:00Z", "2025.02.24 02:00") if tf is Timeframe.H1
+                                                    else ("2025-02-24T02:00:00Z", "2025.02.24 04:00"))
+    assert "copy_rates_range" not in e["fake"].names()
+
+
+def test_server_times_helper() -> None:
+    from alpha_engine.routes.rates import server_times
+
+    times = pd.Series(pd.to_datetime(["2025-01-05T23:00Z", "2025-07-06T22:00Z"], utc=True))
+    assert server_times(times, "us_dst(+2)") == ["2025.01.06 01:00", "2025.07.07 01:00"]
+    assert server_times(times, "fixed(0)") == ["2025.01.05 23:00", "2025.07.06 22:00"]
+    assert server_times(times, None) == [None, None]
+    assert server_times(times, "garbage") == [None, None]
+    assert server_times(times.iloc[:0], "fixed(0)") == []
+
+
+# --- GET /rates/gaps -------------------------------------------------------------------------------
+
+def test_rates_gaps_full_history_from_cache_only(env, synthetic, tmp_path) -> None:
+    from alpha_engine.data.gaps import find_gaps
+
+    e = env(connected=False)
+    seed_cache(tmp_path / "data", repo_data_dir=tmp_path / "elsewhere")
+    body = e["client"].get("/rates/gaps", params={"symbol": "XAUUSD.x", "timeframe": "H1"}).json()
+    frame = synthetic[("XAUUSD.x", Timeframe.H1)].utc
+    report = find_gaps(frame, Timeframe.H1)
+    assert set(body) == {"symbol", "timeframe", "cached", "rows", "first_bar_utc", "last_bar_utc", "offset_model",
+                         "count", "gaps", "gap_counts", "missing_bars_total", "session_break_slots"}
+    assert body["cached"] is True and body["rows"] == len(frame) and body["offset_model"] == "us_dst(+2)"
+    assert body["gaps"] == [g.model_dump() for g in report.gaps] and body["count"] == len(report.gaps)
+    assert body["gap_counts"] == report.counts and sum(body["gap_counts"].values()) == body["count"]
+    assert body["missing_bars_total"] == report.missing_bars_total
+    assert body["session_break_slots"] == report.session_break_slots
+    assert body["gap_counts"]["weekend"] >= 9 and body["gap_counts"]["missing"] >= 3  # planted holes
+    assert body["first_bar_utc"] == "2025-02-24T00:00:00Z"
+    assert e["fake"].calls == []  # never touches MT5 (not even initialize)
+
+
+def test_rates_gaps_no_cache_and_validation(env) -> None:
+    e = env(connected=False)
+    body = e["client"].get("/rates/gaps", params={"symbol": "BRNUSD.x", "timeframe": "H4"}).json()
+    assert body["cached"] is False and body["gaps"] == [] and body["count"] == 0
+    assert body["gap_counts"] == {"weekend": 0, "holiday": 0, "session_break": 0, "missing": 0}
+    assert e["client"].get("/rates/gaps", params={"symbol": "EURUSD", "timeframe": "H1"}).status_code == 404
+    assert e["client"].get("/rates/gaps", params={"symbol": "XAUUSD.x", "timeframe": "M1"}).status_code == 422
+
+
+# --- POST /rates/update ----------------------------------------------------------------------------
+
+def _persian(text: str) -> bool:
+    return any("؀" <= ch <= "ۿ" for ch in text)
+
+
+def _cache_first_part(e, synthetic, tfs=("H1", "H4")) -> dict:
+    """MT5-sourced cache up to 2025-03-20 12:00, then the clock moves to 2025-05-05 00:30."""
+    e["clock"].when = datetime(2025, 3, 20, 12, 0, tzinfo=timezone.utc)
+    for tf in tfs:
+        e["service"].update("XAUUSD.x", tf, start=datetime(2025, 2, 24, tzinfo=timezone.utc))
+    before = {tf: e["service"].cache.read("XAUUSD.x", tf)[0] for tf in tfs}
+    e["clock"].when = datetime(2025, 5, 5, 0, 30, tzinfo=timezone.utc)
+    return before
+
+
+def test_rates_update_appends_only(env, synthetic) -> None:
+    e = env()
+    before = _cache_first_part(e, synthetic, ("H1",))
+    calls = len(e["fake"].rate_calls())
+    r = e["client"].post("/rates/update", json={"symbol": "XAUUSD.x", "timeframe": "h1"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    (h1,) = body["updated"]
+    frame, meta = e["service"].cache.read("XAUUSD.x", "H1")
+    expected = synthetic[("XAUUSD.x", Timeframe.H1)].utc
+    assert h1["timeframe"] == "H1" and h1["bars_added"] == len(expected) - len(before["H1"]) > 0
+    assert h1["rows"] == len(frame) == len(expected) and h1["last_bar_utc"] == meta.last_bar_utc
+    assert h1["first_bar_utc"] == "2025-02-24T00:00:00Z"
+    pd.testing.assert_frame_equal(frame, expected)
+    pd.testing.assert_frame_equal(frame.iloc[: len(before["H1"])], before["H1"])  # old history kept
+    new_calls = e["fake"].rate_calls()[calls:]
+    last_old = pd.Timestamp(before["H1"]["time"].iloc[-1]) - pd.Timedelta(hours=2)  # incremental: last - 2 bars
+    assert new_calls[0][2] == int(last_old.timestamp()) + 3 * 3600 - 86400
+    assert meta.requested_start_utc == "2025-02-24T00:00:00Z"  # no backfill
+    assert _persian(body["message_fa"]) and "H1" in body["message_fa"]
+    # read-only: only connection/info/rates functions of the fake terminal were used
+    assert set(e["fake"].names()) <= {"initialize", "version", "account_info", "symbol_info", "symbol_select",
+                                      "symbol_info_tick", "copy_rates_range", "copy_rates_from_pos", "last_error"}
+
+
+def test_rates_update_both_timeframes_by_default(env, synthetic) -> None:
+    e = env()
+    _cache_first_part(e, synthetic)
+    body = e["client"].post("/rates/update", json={"symbol": "XAUUSD.x"}).json()
+    assert [u["timeframe"] for u in body["updated"]] == ["H1", "H4"]
+    assert all(u["bars_added"] > 0 for u in body["updated"])
+    for tf in ("H1", "H4"):
+        pd.testing.assert_frame_equal(e["service"].cache.read("XAUUSD.x", tf)[0],
+                                      synthetic[("XAUUSD.x", Timeframe.parse(tf))].utc)
+
+
+def test_rates_update_503_when_mt5_unavailable(env, synthetic) -> None:
+    e = env()
+    before = _cache_first_part(e, synthetic, ("H1",))
+    e["adapter"].shutdown()  # disconnected; the on-demand reconnect is throttled
+    calls = len(e["fake"].rate_calls())
+    r = e["client"].post("/rates/update", json={"symbol": "XAUUSD.x", "timeframe": "H1"})
+    assert r.status_code == 503
+    detail = r.json()["detail"]
+    assert detail["code"] == "mt5_unavailable" and _persian(detail["message_fa"])
+    assert len(e["fake"].rate_calls()) == calls
+    pd.testing.assert_frame_equal(e["service"].cache.read("XAUUSD.x", "H1")[0], before["H1"])
+
+
+@pytest.mark.parametrize(("setup", "status", "code"), [
+    ("none", 409, "no_cache"),
+    ("seed", 409, "not_incremental"),
+])
+def test_rates_update_refuses_non_incremental(env, tmp_path, setup, status, code) -> None:
+    e = env()
+    if setup == "seed":
+        seed_cache(tmp_path / "data", repo_data_dir=tmp_path / "elsewhere")
+    r = e["client"].post("/rates/update", json={"symbol": "XAUUSD.x", "timeframe": "H1"})
+    assert r.status_code == status and r.json()["detail"]["code"] == code
+    assert _persian(r.json()["detail"]["message_fa"]) and e["fake"].rate_calls() == []
+
+
+def test_rates_update_refuses_offset_model_change(env, synthetic) -> None:
+    e = env()
+    before = _cache_first_part(e, synthetic, ("H1",))
+    o = env(extra_env="MT5_SERVER_UTC_OFFSET=3\n")  # same data dir, different broker offset model
+    r = o["client"].post("/rates/update", json={"symbol": "XAUUSD.x", "timeframe": "H1"})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "offset_model_changed"
+    assert o["fake"].rate_calls() == []
+    pd.testing.assert_frame_equal(o["service"].cache.read("XAUUSD.x", "H1")[0], before["H1"])
+
+
+@pytest.mark.parametrize(("payload", "status"), [
+    ({"symbol": "EURUSD"}, 404),
+    ({"symbol": "../x"}, 422),
+    ({"symbol": "XAUUSD.x", "timeframe": "M5"}, 422),
+    ({"timeframe": "H1"}, 422),
+    ({"symbol": "XAUUSD.x", "extra": 1}, 422),
+])
+def test_rates_update_validation(env, payload, status) -> None:
+    r = env(connected=False)["client"].post("/rates/update", json=payload)
+    assert r.status_code == status

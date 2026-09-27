@@ -5,14 +5,14 @@
 ============  =========  ======================================
 field         default    bounds
 ============  =========  ======================================
-balance       1000.0     0 < balance <= 1e9 (account currency, USD)
+balance       2500.0     0 < balance <= 1e9 (account currency, USD)
 risk_pct      1.0        0 < risk_pct <= 10 (percent of balance risked per trade)
 leverage      100        1 <= leverage <= 1000, integer (1:100)
 rr            2.0        0.1 <= rr <= 20 (take-profit distance / stop distance)
 ============  =========  ======================================
 
-Worked example with the defaults: risking 1.0 % of 1000.0 USD = 10.00 USD per trade; with rr = 2.0
-a winning trade targets 20.00 USD.
+Worked example with the defaults: risking 1.0 % of 2500.0 USD = 25.00 USD per trade; with rr = 2.0
+a winning trade targets 50.00 USD. (Default balance raised from 1000 to 2500 by user decision 2026-09-27.)
 
 Booleans are rejected for every field (``True`` is not a leverage of 1), as are NaN/inf. The same
 bounds are also CHECK constraints in the database (defense in depth).
@@ -51,7 +51,7 @@ class AccountSettings(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
-    balance: float = Field(default=1000.0, gt=0, le=BALANCE_MAX)
+    balance: float = Field(default=2500.0, gt=0, le=BALANCE_MAX)
     risk_pct: float = Field(default=1.0, gt=0, le=RISK_PCT_MAX)
     leverage: int = Field(default=100, ge=LEVERAGE_MIN, le=LEVERAGE_MAX)
     rr: float = Field(default=2.0, ge=RR_MIN, le=RR_MAX)

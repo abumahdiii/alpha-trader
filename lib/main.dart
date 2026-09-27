@@ -9,9 +9,11 @@ import 'package:window_manager/window_manager.dart';
 
 import 'core/app_logger.dart';
 import 'core/dev_mode.dart';
+import 'core/main_window.dart';
 import 'core/single_instance_guard.dart';
+import 'providers/engine_api_provider.dart';
 import 'providers/engine_status_provider.dart';
-import 'screens/home_screen.dart';
+import 'screens/shell_screen.dart';
 import 'services/engine_process.dart';
 import 'theme/theme.dart';
 import 'theme/theme_provider.dart';
@@ -44,43 +46,11 @@ Future<void> main() async {
     await windowManager.ensureInitialized();
     if (Platform.isWindows) {
       // Maximized, deliberately NOT full screen: full screen strips the title
-      // bar and its minimize/restore/close buttons. The options below are the
-      // restore-down size and position.
-      const WindowOptions windowOptions = WindowOptions(
-        size: Size(1280, 800),
-        center: true,
-        minimumSize: Size(1000, 700),
-        title: 'Alpha Trader',
-      );
-
-      // maximize() MUST live inside the readiness callback:
-      // waitUntilReadyToShow() calls unmaximize() while applying the options
-      // above, so an earlier maximize() would simply be undone. The callback
-      // is not awaited by the package, hence the completer.
-      final Completer<void> windowReady = Completer<void>();
-      try {
-        await windowManager.waitUntilReadyToShow(windowOptions, () async {
-          try {
-            await windowManager.maximize();
-            await windowManager.show();
-          } catch (e, s) {
-            // A window-chrome failure must never stop the app from starting.
-            devLog('[Window] maximize/show failed: $e');
-            devLog('Stack trace:\n$s');
-          } finally {
-            if (!windowReady.isCompleted) windowReady.complete();
-          }
-        });
-        // Hard guarantee that startup never hangs on a wedged platform
-        // channel: worst case the window is simply not maximized.
-        await windowReady.future.timeout(
-          const Duration(seconds: 5),
-          onTimeout: () => devLog('[Window] maximize/show timed out -- continuing startup'),
-        );
-      } catch (e, s) {
-        devLog('[Window] waitUntilReadyToShow failed: $e');
-        devLog('Stack trace:\n$s');
-      }
+      // bar and its minimize/restore/close buttons. The window stays hidden
+      // here; only its restore-down rect (clamped to the primary monitor's
+      // work area) and minimum size are set. The maximize itself happens
+      // after the runner has shown the window -- see main_window.dart.
+      await prepareMainWindow();
 
       // Intercept the native close button so shutdown work (stopping the
       // Python engine, flushing the diagnostic log) can finish before the
@@ -106,6 +76,10 @@ Future<void> main() async {
             create: (context) => ThemeProvider(initialThemeMode: initialThemeMode),
           ),
           ChangeNotifierProvider<EngineStatusProvider>.value(value: engineStatus),
+          // Data API for the pages; non-null only while the engine runs.
+          ChangeNotifierProvider<EngineApiProvider>(
+            create: (_) => EngineApiProvider(engine: engineStatus),
+          ),
         ],
         child: const AlphaTraderApp(),
       ),
@@ -116,7 +90,10 @@ Future<void> main() async {
     // responsive meanwhile. start() reports failures through its own state.
     // Non-Windows hosts (tests, CI) spawn nothing.
     if (Platform.isWindows) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => unawaited(engineStatus.start()));
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(maximizeMainWindowWhenShown());
+        unawaited(engineStatus.start());
+      });
     }
   }, (Object error, StackTrace stack) {
     devLog('runZonedGuarded caught uncaught error: $error');
@@ -190,7 +167,7 @@ class _AlphaTraderAppState extends State<AlphaTraderApp> with WindowListener {
       ],
       supportedLocales: const [Locale('fa', 'IR'), Locale('en', 'US')],
       locale: const Locale('fa', 'IR'),
-      home: const HomeScreen(),
+      home: const ShellScreen(),
     );
   }
 }
