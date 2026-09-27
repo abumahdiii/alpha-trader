@@ -1,6 +1,34 @@
 import 'package:flutter/material.dart';
 
+import '../theme/app_semantic_colors.dart';
 import 'top_notice_stack.dart';
+
+/// Green "done" toast in the theme's success colors.
+void showSuccessToast(BuildContext context, {required String title, String subtitle = ''}) {
+  final AppSemanticColors colors = context.appColors;
+  showCustomToast(
+    context: context,
+    title: title,
+    subtitle: subtitle,
+    backgroundColor: colors.successContainer,
+    foregroundColor: colors.onSuccessContainer,
+    duration: const Duration(seconds: 3),
+  );
+}
+
+/// Red "failed" toast in the theme's error colors.
+void showErrorToast(BuildContext context, {required String title, String subtitle = ''}) {
+  final AppSemanticColors colors = context.appColors;
+  showCustomToast(
+    context: context,
+    title: title,
+    subtitle: subtitle,
+    backgroundColor: colors.error,
+    foregroundColor: colors.onError,
+    icon: Icons.error_outline,
+    duration: const Duration(seconds: 4),
+  );
+}
 
 Future showCustomToast({
   required BuildContext context,
