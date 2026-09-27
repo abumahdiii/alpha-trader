@@ -4,18 +4,20 @@
 * ``PUT /settings`` -- partial update, e.g. ``{"risk_pct": 0.5}``; returns the new settings.
   Unknown fields, nulls, booleans, non-numbers and out-of-range values -> 422 with Persian messages.
 
-Error shape and the ``request.app.state.db`` dependency match ``routes/strategies.py``.
+Error shape matches ``routes/strategies.py``; the ``request.app.state.db`` dependency is the shared
+``routes.get_db``.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException
 
 from ..logging_setup import get_logger, is_dev_mode
 from ..storage.account_settings import AccountSettings, AccountSettingsRepo, AccountSettingsValidationError
 from ..storage.db import EngineConnection
+from . import get_db
 
 logger = get_logger(__name__)
 
@@ -26,13 +28,6 @@ def _error(status: int, code: str, message_fa: str, errors_fa: list[str] | None 
     return HTTPException(
         status_code=status, detail={"code": code, "message_fa": message_fa, "errors_fa": errors_fa or []}
     )
-
-
-def get_db(request: Request) -> EngineConnection:
-    db = getattr(request.app.state, "db", None)
-    if db is None:
-        raise _error(503, "db_unavailable", "پایگاه داده engine در دسترس نیست.")
-    return db
 
 
 def get_settings_repo(db: EngineConnection = Depends(get_db)) -> AccountSettingsRepo:
