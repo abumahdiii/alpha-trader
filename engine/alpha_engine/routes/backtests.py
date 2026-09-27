@@ -30,7 +30,7 @@ from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 from ..backtest.history import HistoryUnavailable
 from ..backtest.jobs import BacktestJobs, JobsClosed, first_valid_index, prepare_history
-from ..backtest.models import PROVISIONAL_LABEL_FA, SEED_MAX, CostModel, RunConfig
+from ..backtest.models import HISTORICAL_SPREAD_LABEL_FA, PROVISIONAL_LABEL_FA, SEED_MAX, CostModel, RunConfig
 from ..backtest.periods import PeriodError, earliest_start, manual_window, random_windows, warmup_h4_bars
 from ..backtest.results import EQUITY_STORAGE_RULE
 from ..logging_setup import get_logger, is_dev_mode
@@ -61,6 +61,7 @@ FIELD_LABELS_FA: dict[str, str] = {
     "window_months": "طول هر پنجره (ماه)",
     "seed": "seed",
     "commission_per_lot_per_side": "کمیسیون هر لات در هر طرف",
+    "fallback_spread_points": "اسپرد جایگزین (پوینت)",
 }
 MANUAL_ONLY = ("from_", "to")
 RANDOM_ONLY = ("windows_count", "window_months", "seed")
@@ -80,15 +81,18 @@ class BacktestRequest(BaseModel):
     window_months: int | None = Field(default=None, ge=1, le=60)
     seed: int | None = Field(default=None, ge=0, le=SEED_MAX)
     commission_per_lot_per_side: float | None = Field(default=None, ge=0.0, le=1000.0)
+    # spread (points) for bars without an earlier broker spread: omitted = auto (median observed), 0 = zero cost
+    fallback_spread_points: int | None = Field(default=None, ge=0, le=100_000)
 
-    @field_validator("windows_count", "window_months", "seed", "commission_per_lot_per_side", mode="before")
+    @field_validator("windows_count", "window_months", "seed", "commission_per_lot_per_side", "fallback_spread_points",
+                     mode="before")
     @classmethod
     def _no_bool(cls, value: Any) -> Any:
         if isinstance(value, bool):
             raise ValueError("boolean is not a number")
         return value
 
-    @field_validator("windows_count", "window_months", "seed", mode="before")
+    @field_validator("windows_count", "window_months", "seed", "fallback_spread_points", mode="before")
     @classmethod
     def _whole(cls, value: Any) -> Any:
         if isinstance(value, float):
@@ -158,6 +162,7 @@ class WindowOut(BaseModel):
     zero_spread_bars_filled: int
     zero_spread_bars_unfilled: int
     weekend_holds: int
+    spread_fallback_bars: int
     stopped_reason: str | None
     equity_points_full: int
     equity_points_stored: int
@@ -172,6 +177,7 @@ class RunDetail(RunSummary):
     plan: dict[str, Any] | None
     fingerprint: dict[str, Any] | None
     result_meta: dict[str, Any] | None
+    spread_fallback: dict[str, Any] | None
     metrics_kind: Literal["single_window", "random_aggregate"] | None
     metrics: dict[str, Any] | None
     distribution: dict[str, Any] | None
@@ -256,7 +262,7 @@ def _errors_fa(exc: ValidationError) -> list[str]:
             messages.append(f"{label} باید یک متن معتبر (۱ تا ۳۲ نویسه) باشد.")
         elif kind == "model_type" or kind == "dict_type":
             messages.append("بدنه درخواست باید یک شیء JSON باشد.")
-        elif kind.startswith("int") or field in ("windows_count", "window_months", "seed"):
+        elif kind.startswith("int") or field in ("windows_count", "window_months", "seed", "fallback_spread_points"):
             messages.append(f"{label} باید عدد صحیح باشد.")
         elif kind.startswith("float") or kind == "finite_number" or field == "commission_per_lot_per_side":
             messages.append(f"{label} باید یک عدد معتبر باشد.")
@@ -280,7 +286,9 @@ def _history_error(exc: HistoryUnavailable) -> Exception:
 
 
 def _run_labels(cost: CostModel, provisional: bool) -> list[str]:
-    labels = list(cost.labels_fa())
+    """Labels known at submit time. The spread label depends on the data actually simulated (historical /
+    fallback / zero cost, ``models.spread_label_fa``) and is added when the run is done."""
+    labels = [x for x in cost.labels_fa() if x != HISTORICAL_SPREAD_LABEL_FA]
     if provisional:
         labels.insert(0, PROVISIONAL_LABEL_FA)
     return labels
@@ -327,7 +335,8 @@ def submit_backtest(
     account = AccountSettingsRepo(db).get()
     settings = request.app.state.settings
     provisional = not bool(getattr(settings, "alpha_data_check_confirmed", False))
-    cost = CostModel(commission_per_lot_per_side=body.commission_per_lot_per_side or 0.0)
+    cost = CostModel(commission_per_lot_per_side=body.commission_per_lot_per_side or 0.0,
+                     fallback_spread_points=body.fallback_spread_points)
     config = RunConfig(
         symbol=name, mode=body.mode, start=start, end=end,
         windows_count=body.windows_count if body.windows_count is not None else 20,
@@ -449,6 +458,7 @@ def get_backtest(run_id: int, request: Request, db: EngineConnection = Depends(g
             "first_bar_time": api_time(w["first_bar_utc"]), "last_bar_time": api_time(w["last_bar_utc"]),
             "zero_spread_bars_filled": w["zero_spread_bars_filled"],
             "zero_spread_bars_unfilled": w["zero_spread_bars_unfilled"], "weekend_holds": w["weekend_holds"],
+            "spread_fallback_bars": w["spread_fallback_bars"],
             "stopped_reason": w["stopped_reason"], "equity_points_full": w["equity_points_full"],
             "equity_points_stored": w["equity_points_stored"], "metrics": w["metrics"],
         })
@@ -459,7 +469,8 @@ def get_backtest(run_id: int, request: Request, db: EngineConnection = Depends(g
         **_summary(row),
         "labels_fa": row["labels"], "provisional_label_fa": PROVISIONAL_LABEL_FA if row["provisional"] else None,
         "request": row["request"], "config": row["config"], "plan": row["plan"], "fingerprint": row["fingerprint"],
-        "result_meta": meta, "metrics_kind": meta.get("metrics_kind") if meta else None, "metrics": row["metrics"],
+        "result_meta": meta, "spread_fallback": meta.get("spread_fallback") if meta else None,
+        "metrics_kind": meta.get("metrics_kind") if meta else None, "metrics": row["metrics"],
         "distribution": row["distribution"], "windows": windows, "equity_storage_rule": EQUITY_STORAGE_RULE,
         "timings": row["timings"], "live": live,
     }

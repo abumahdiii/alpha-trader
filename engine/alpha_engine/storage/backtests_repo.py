@@ -151,7 +151,8 @@ class BacktestsRepo:
                 len(w.trades), len(w.skipped), w.candidates, w.bars,
                 None if w.first_bar_time is None else format_utc(w.first_bar_time),
                 None if w.last_bar_time is None else format_utc(w.last_bar_time),
-                w.zero_spread_bars_filled, w.zero_spread_bars_unfilled, w.weekend_holds, w.stopped_reason,
+                w.zero_spread_bars_filled, w.zero_spread_bars_unfilled, w.weekend_holds, w.spread_fallback_bars,
+                w.stopped_reason,
                 len(w.equity), len(wo.equity_stored), _dumps(wo.metrics.to_dict()),
                 _dumps([s.model_dump(mode="json") for s in w.skipped]),
             ))
@@ -171,14 +172,16 @@ class BacktestsRepo:
             "total_trades": result.total_trades,
             "total_skipped": result.total_skipped,
             "metrics_kind": output.metrics_kind,
+            "spread_fallback": result.spread_fallback.model_dump(mode="json"),
         }
         with self._conn.transaction():
             self._conn.executemany(
                 "INSERT INTO backtest_windows (run_id, window_index, start_utc, end_utc, initial_balance,"
                 " final_balance, trade_count, skipped_count, candidates, bars, first_bar_utc, last_bar_utc,"
-                " zero_spread_bars_filled, zero_spread_bars_unfilled, weekend_holds, stopped_reason,"
+                " zero_spread_bars_filled, zero_spread_bars_unfilled, weekend_holds, spread_fallback_bars,"
+                " stopped_reason,"
                 " equity_points_full, equity_points_stored, metrics_json, skipped_json)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", window_rows)
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", window_rows)
             self._conn.executemany(
                 "INSERT INTO backtest_trades (run_id, window_index, trade_index, direction, setup_type, entry_time,"
                 " exit_time, entry, stop_loss, take_profit, volume, exit_price, exit_reason, net_pnl, r_multiple,"

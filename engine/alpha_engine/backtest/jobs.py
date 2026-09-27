@@ -54,7 +54,15 @@ from ..storage.backtests_repo import ACTIVE_STATUSES, INTERRUPTED_FA, TERMINAL_S
 from ..storage.db import EngineConnection
 from ..strategies.stddev_channel import StdDevChannelStrategy, resolve_params
 from ..strategies.stddev_channel.setups import compute_channel_bars
-from .history import HistoryData, HistoryUnavailable, ScanResult, build_bar_arrays, load_history, scan_full_history
+from .history import (
+    HistoryData,
+    HistoryUnavailable,
+    ScanResult,
+    build_bar_arrays,
+    load_history,
+    scan_full_history,
+    with_fallback_spread,
+)
 from .models import RunConfig
 from .periods import PeriodError
 from .results import build_run_output
@@ -138,6 +146,14 @@ def first_valid_index(prepared: PreparedHistory, params: dict[str, Any], params_
 
     value, _ = (lru or _NoCache()).get_or_compute(("bt_first_valid", prepared.key, params_hash), compute)
     return value
+
+
+def bars_for(prepared: PreparedHistory, config: RunConfig) -> BarArrays:
+    """The prepared (auto-fallback) bar arrays, or a copy with the user's fallback spread (see costs.py)."""
+    requested = config.cost_model.fallback_spread_points
+    if requested is None:
+        return prepared.bars
+    return with_fallback_spread(prepared.bars, prepared.history.h1, prepared.history.spec, requested)
 
 
 def full_scan(prepared: PreparedHistory, config: RunConfig, lru: LruLike | None = None) -> ScanResult:
@@ -388,8 +404,8 @@ class BacktestJobs:
             self._check_cancel(job)
             self._set_phase(job, "simulating")
             t = time.perf_counter()
-            result = run_backtest(job.config, prepared.history, scan, bars=prepared.bars, progress_cb=on_progress,
-                                  cancel_event=job.cancel_event)
+            result = run_backtest(job.config, prepared.history, scan, bars=bars_for(prepared, job.config),
+                                  progress_cb=on_progress, cancel_event=job.cancel_event)
             timings["simulate_s"] = time.perf_counter() - t
             self._set_phase(job, "saving")
             t = time.perf_counter()
@@ -444,6 +460,7 @@ __all__ = [
     "JobState",
     "JobsClosed",
     "PreparedHistory",
+    "bars_for",
     "first_valid_index",
     "full_scan",
     "prepare_history",

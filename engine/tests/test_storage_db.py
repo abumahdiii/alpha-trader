@@ -349,7 +349,7 @@ def test_backtest_children_cascade_and_no_fk_to_strategy_tables(conn: EngineConn
     conn.execute("INSERT INTO backtest_runs (id, created_utc, status, symbol, mode, strategy_name, strategy_version,"
                  " params_hash, provisional, request_json, config_json, labels_json) VALUES"
                  " (7, ?, 'done', 'XAUUSD.x', 'manual', 'stddev_channel', 1, ?, 1, '{}', '{}', '[]')", (now, "c" * 64))
-    conn.execute("INSERT INTO backtest_windows VALUES (7, 0, ?, ?, 1000, 1010, 1, 0, 1, 10, NULL, NULL, 0, 0, 0,"
+    conn.execute("INSERT INTO backtest_windows VALUES (7, 0, ?, ?, 1000, 1010, 1, 0, 1, 10, NULL, NULL, 0, 0, 0, 0,"
                  " NULL, 10, 3, '{}', '[]')", (now, now))
     conn.execute("INSERT INTO backtest_trades VALUES (7, 0, 0, 'buy', 'bounce_lower', ?, ?, 1, 0.5, 2, 0.1, 2, 'tp',"
                  " 10, 1.0, '{}')", (now, now))

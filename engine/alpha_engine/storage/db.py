@@ -132,6 +132,7 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
             zero_spread_bars_filled   INTEGER NOT NULL,
             zero_spread_bars_unfilled INTEGER NOT NULL,
             weekend_holds             INTEGER NOT NULL,
+            spread_fallback_bars      INTEGER NOT NULL,
             stopped_reason            TEXT,
             equity_points_full        INTEGER NOT NULL,
             equity_points_stored      INTEGER NOT NULL,

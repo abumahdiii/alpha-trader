@@ -111,6 +111,25 @@ def test_routers_are_mounted(settings: Settings) -> None:
     assert {"get", "put"} <= set(paths["/strategies/{name}"]) and {"get", "put"} <= set(paths["/settings"])
     assert set(paths["/rates/update"]) == {"post"} and set(paths["/rates/gaps"]) == {"get"}
     assert set(paths["/chart/channel"]) == {"get"} and set(paths["/chart/setups"]) == {"get"}
+    assert set(paths["/backtests"]) == {"get", "post"} and set(paths["/backtests/{run_id}"]) == {"get", "delete"}
+    for sub in ("trades", "equity", "skipped"):
+        assert set(paths[f"/backtests/{{run_id}}/{sub}"]) == {"get"}
+    assert set(paths["/backtests/{run_id}/cancel"]) == {"post"}
+
+
+def test_backtest_websocket_route_is_registered(settings: Settings) -> None:
+    client = TestClient(create_app(settings), client=("127.0.0.1", 50000))  # no lifespan: no DB/jobs
+    with client.websocket_connect("/ws/backtests/1") as ws:
+        assert ws.receive_json()["code"] == "db_unavailable"
+
+
+def test_backtest_jobs_live_inside_the_lifespan(settings: Settings) -> None:
+    app = create_app(settings)
+    assert app.state.backtest_jobs is None
+    with TestClient(app, client=("127.0.0.1", 50000)):
+        jobs = app.state.backtest_jobs
+        assert jobs is not None and not jobs.closing
+    assert app.state.backtest_jobs is None and jobs.closing  # shut down before the database was closed
 
 
 # --- /strategies ---------------------------------------------------------------------------------------

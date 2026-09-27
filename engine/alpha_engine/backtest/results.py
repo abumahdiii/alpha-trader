@@ -44,8 +44,8 @@ window is the subsequence of those points (values unchanged) that are
    so the stored curve shows the true maximum drawdown.
 
 Consequences: recomputing Sharpe from the stored points gives exactly the stored Sharpe (rule 2), and the
-max absolute drawdown of the stored points equals the stored ``max_drawdown_abs`` (rule 4); intrabar-free
-intraday wiggles between those points are dropped. The metrics themselves are never recomputed from the
+max absolute drawdown of the stored points equals the stored ``max_drawdown_abs`` (rule 4); intraday
+wiggles between those points are dropped. The metrics themselves are never recomputed from the
 stored curve.
 
 Worked example (one day; first point 00:00 = 1000 (initial), H1 closes 01:00..05:00 with equity 1010,
