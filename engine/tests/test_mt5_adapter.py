@@ -194,7 +194,9 @@ def test_metatrader5_imported_lazily_only_in_adapter() -> None:
             assert not any(n.split(".")[0] == "MetaTrader5" for n in names), path
 
 
-def test_real_package_is_blocked_in_default_test_runs(make_settings) -> None:
+def test_real_package_is_blocked_in_default_test_runs(make_settings, request) -> None:
+    if request.config.getoption("--run-mt5"):
+        pytest.skip("with --run-mt5 the real package is importable; never call it from this test")
     import MetaTrader5  # conftest installed a blocker (no --run-mt5)
 
     with pytest.raises(RuntimeError, match="without --run-mt5"):

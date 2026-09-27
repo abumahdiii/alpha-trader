@@ -76,7 +76,7 @@ def run(
     try:
         # Series outside ENGINE_SYMBOLS are allowed here (explicit --symbols), so widen the service view.
         wide = settings.model_copy(update={"engine_symbols": tuple(dict.fromkeys([*settings.engine_symbols, *symbols]))})
-        service = MarketDataService.create(wide, adapter)
+        service = MarketDataService.create(wide, adapter, clock=adapter.clock)
         try:
             fit = service.refit_offset(years=args.years)
             print(f"offset: effective={fit.effective_label} source={fit.source} inferred={fit.inferred_label} "

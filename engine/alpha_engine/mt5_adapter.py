@@ -158,6 +158,11 @@ class Mt5Adapter:
             return self._status.model_copy()
 
     @property
+    def clock(self) -> Callable[[], datetime]:
+        """The adapter's notion of "now" (UTC); shared with the service so both agree."""
+        return self._clock
+
+    @property
     def connected(self) -> bool:
         return self.status().state == "connected"
 
