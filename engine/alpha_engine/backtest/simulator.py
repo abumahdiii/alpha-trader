@@ -17,7 +17,7 @@ Per in-window bar ``i``, in this order:
    * **gap through the stop** (skipped, ``gap_through_stop``): the bar opens at/through the SL on the side
      the stop would be executed on -- buy: bid open ``open_i <= SL`` (this includes ask open <= SL);
      sell: ask open ``open_i + spr_i >= SL``. Such a trade would be stopped at once;
-   * levels ``resolve_trade_levels(candidate, fill)`` (TP = fill +/- rr * |fill - SL|); a ValueError
+   * levels ``candidate.resolve_levels(fill)`` (TP = fill +/- rr * |fill - SL|); a ValueError
      (e.g. TP <= 0) -> skipped ``invalid_levels``;
    * volume ``risk.sizing.size_position`` with the MOMENTARY realized balance, ``risk_pct`` and
      ``leverage`` of the run and the symbol spec (floor to ``volume_step``); rejected -> skipped
@@ -210,9 +210,6 @@ class OpenPosition:
     warnings: list[str]
     sizing: SizingResult | None = None
     spread_source: SpreadSource = "historical"
-
-
-_Open = OpenPosition  # pre-phase-5 name
 
 
 @dataclass(frozen=True)

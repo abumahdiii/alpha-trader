@@ -5,7 +5,8 @@ compares the FULL result (``model_dump(mode="json")``, floats bit for bit) with 
 ``tests/fixtures/golden/<case>.json``. The snapshots were written BEFORE the phase-5 extraction of the
 simulator helpers, so a behaviour change anywhere in the fill / exit / pnl / skip logic fails here.
 
-Cases (together they cover every exit and skip reason of ``backtest/models.py``):
+Cases (together they cover every exit and skip reason of ``backtest/models.py`` except ``invalid_levels``,
+which needs an absurd price scale and is checked in tests/test_setup_outcomes.py):
 
 * ``seed_*``: the synthetic seed cache (weekends, holidays, session breaks, planted missing bars, a
   high-spread day, a price gap) through ``run_backtest``: manual full period with commission, seeded

@@ -266,6 +266,21 @@ def test_statuses_follow_the_simulator_rules() -> None:
     assert o.status == "pending_entry" and o.rejection.reason is SkipReason.ENTRY_OUTSIDE_WINDOW
 
 
+def test_invalid_levels_rejected_like_the_simulator() -> None:
+    """Sell, rr 4, reference 10.00, SL 12.00 (indicative TP 10 - 4 * 2 = 2.00 > 0); the entry bar opens at 9.00 ->
+    TP = 9.00 - 4 * 3.00 = -3.00 <= 0 -> invalid levels, in the backtest and in the independent outcome."""
+    h1 = frame([(10.20, 10.50, 9.90, 10.00, 0), (9.00, 9.10, 8.90, 9.00, 0), (9.00, 9.10, 8.90, 9.00, 0)])
+    c = cand(h1, 0, "sell", 12.00, rr=4.0)
+    bars = build_bar_arrays(h1, SPEC, 0)
+    o = simulate_setup(bars, c, 0, spec=SPEC, account=ACCOUNT.model_copy(update={"rr": 4.0}), cost_model=NO_COST)
+    assert o.status == "rejected" and o.rejection.reason is SkipReason.INVALID_LEVELS and o.rejection.fill == 9.00
+    window = Window(index=0, start=h1["time"].iloc[0].to_pydatetime(),
+                    end=(h1["time"].iloc[-1] + pd.Timedelta(hours=1)).to_pydatetime())
+    res = simulate_window(bars, window, scan_provider({0: c}), spec=SPEC, account=ACCOUNT, cost_model=NO_COST)
+    assert not res.trades and res.skipped[0].reason is SkipReason.INVALID_LEVELS
+    assert res.skipped[0].reason_fa == o.rejection.reason_fa and res.skipped[0].detail == o.rejection.detail
+
+
 def test_entry_uses_the_fallback_spread_and_weekend_entry() -> None:
     """No broker spread yet: fallback 34 pts -> ask = 2000.00 + 0.34; after a weekend the entry is Sunday's open."""
     h1 = frame([(2001, 2002, 1999, 2000.5, 0), (2000.00, 2001.00, 1999.00, 2000.00, 0),
