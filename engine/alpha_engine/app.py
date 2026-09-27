@@ -5,8 +5,13 @@ Routes in this skeleton:
 * ``GET /health``   -- liveness + MT5 connection status (always HTTP 200 while the process is up).
 * ``POST /shutdown`` -- graceful stop, accepted only from the local machine.
 
-MT5 status comes from a seam, ``app.state.mt5_status_provider: Callable[[], Mt5Status]``. The MT5
-adapter (a later task) plugs itself in there; this module never imports ``MetaTrader5``.
+MT5 status comes from a seam, ``app.state.mt5_status_provider: Callable[[], Mt5Status]``. The factory
+creates an :class:`~alpha_engine.mt5_adapter.Mt5Adapter` (which imports ``MetaTrader5`` lazily, never
+here) and plugs ``adapter.status`` in there. On startup (lifespan) it starts a background, non-blocking
+connect when ``ENGINE_MT5_AUTOCONNECT`` is true; on shutdown it calls ``adapter.shutdown()``.
+
+Market-data routes (``GET /symbols``, ``GET /rates``, ``GET /rates/meta``) live in
+:mod:`alpha_engine.routes` and use ``app.state.market_data``.
 
 ``app`` is provided lazily (PEP 562 module ``__getattr__``) so that importing this module does not load
 settings / the ``.env`` as a side effect; ``from alpha_engine.app import app`` and
@@ -17,7 +22,8 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -102,14 +108,44 @@ def _request_exit(server: Any) -> None:
 def create_app(
     settings: Settings | None = None,
     mt5_status_provider: Mt5StatusProvider | None = None,
+    mt5_adapter: Any | None = None,
+    market_data: Any | None = None,
 ) -> FastAPI:
     settings = settings if settings is not None else get_settings()
     configure_logging(settings, force=True)
 
-    app = FastAPI(title="Alpha Trader Engine", version=__version__)
+    # Local imports: these modules import Mt5Status from here.
+    from .market_data import MarketDataService
+    from .mt5_adapter import Mt5Adapter
+    from .routes import rates as rates_routes
+    from .routes import symbols as symbols_routes
+
+    adapter = mt5_adapter if mt5_adapter is not None else Mt5Adapter(settings)
+    service = market_data if market_data is not None else MarketDataService.create(settings, adapter)
+
+    @asynccontextmanager
+    async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
+        if settings.engine_mt5_autoconnect:
+            if is_dev_mode():
+                logger.debug("startup: connecting to MT5 in the background")
+            adapter.connect_in_background()
+        elif is_dev_mode():
+            logger.debug("startup: MT5 autoconnect disabled")
+        try:
+            yield
+        finally:
+            if is_dev_mode():
+                logger.debug("shutdown: closing MT5 connection")
+            adapter.shutdown()
+
+    app = FastAPI(title="Alpha Trader Engine", version=__version__, lifespan=lifespan)
     app.state.settings = settings
-    app.state.mt5_status_provider = mt5_status_provider or default_mt5_status_provider
+    app.state.mt5_adapter = adapter
+    app.state.market_data = service
+    app.state.mt5_status_provider = mt5_status_provider or adapter.status
     app.state.server = None  # set by __main__ to the uvicorn.Server handle
+    app.include_router(symbols_routes.router)
+    app.include_router(rates_routes.router)
 
     @app.middleware("http")
     async def dev_request_log(

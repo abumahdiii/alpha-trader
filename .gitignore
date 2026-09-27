@@ -47,6 +47,8 @@ __pycache__/
 
 # Local data, secrets, build outputs
 data/
+# ...but the engine's market-data *code* package is source, not user data
+!engine/alpha_engine/data/
 .env
 .env.*
 !.env.example

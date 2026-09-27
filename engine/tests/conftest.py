@@ -13,6 +13,7 @@ import os
 import shutil
 import sys
 import tempfile
+import types
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -26,10 +27,12 @@ _SANDBOX = Path(tempfile.mkdtemp(prefix="alpha_engine_tests_"))
 _FAKE_ENV = _SANDBOX / "fake.env"
 _FAKE_ENV.write_text("", encoding="utf-8")
 for _var in ("MT5_TERMINAL_PATH", "MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER", "MT5_SERVER_UTC_OFFSET",
-             "ENGINE_PORT", "DEV_MODE"):
+             "ENGINE_PORT", "DEV_MODE", "ENGINE_SYMBOLS"):
     os.environ.pop(_var, None)
 os.environ["ALPHA_TRADER_ENV_FILE"] = str(_FAKE_ENV)
 os.environ["ALPHA_TRADER_DATA_DIR"] = str(_SANDBOX / "data")
+# Never let an app built by a test start a background MT5 connection.
+os.environ["ENGINE_MT5_AUTOCONNECT"] = "false"
 
 from alpha_engine.config import Settings, load_settings, reset_settings_cache  # noqa: E402
 from alpha_engine.logging_setup import reset_logging  # noqa: E402
@@ -46,6 +49,24 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="run tests marked 'mt5' (they need a live, logged-in MetaTrader 5 terminal)",
     )
+
+
+class _BlockedMetaTrader5(types.ModuleType):
+    """Stand-in for the real package during default test runs: any use fails loudly.
+
+    Tests inject a fake mt5 module into the adapter explicitly; nothing may reach the real terminal
+    unless ``--run-mt5`` is given (then the real package is importable again).
+    """
+
+    def __getattr__(self, name: str):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        raise RuntimeError(f"MetaTrader5.{name} used in a test without --run-mt5")
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    if not config.getoption("--run-mt5"):
+        sys.modules["MetaTrader5"] = _BlockedMetaTrader5("MetaTrader5")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -80,6 +101,16 @@ def make_settings(tmp_path: Path) -> Callable[..., Settings]:
     def _make(env_text: str = "", environ: dict[str, str] | None = None) -> Settings:
         env_file = tmp_path / "fake.env"
         env_file.write_text(env_text, encoding="utf-8")
-        return load_settings(env_file=env_file, environ=environ or {})
+        # Autoconnect off unless a test opts in explicitly (via env_text or environ).
+        base = {} if "ENGINE_MT5_AUTOCONNECT" in env_text else {"ENGINE_MT5_AUTOCONNECT": "false"}
+        return load_settings(env_file=env_file, environ={**base, **(environ or {})})
 
     return _make
+
+
+@pytest.fixture(scope="session")
+def synthetic():
+    """Default deterministic synthetic dataset: {(symbol, Timeframe): SyntheticSeries}. Do not mutate."""
+    from fixtures.synthetic_ohlcv import generate_dataset
+
+    return generate_dataset()
