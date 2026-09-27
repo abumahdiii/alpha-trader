@@ -200,7 +200,7 @@ def test_repr_str_summary_never_leak(make_settings) -> None:
     assert set(summary) == {
         "mt5_terminal_path", "mt5_server", "mt5_login_masked", "mt5_password_set", "engine_port",
         "dev_mode", "mt5_server_utc_offset", "data_dir", "engine_mt5_autoconnect", "engine_symbols",
-        "env_file", "env_file_loaded",
+        "env_file", "env_file_loaded", "alpha_data_check_confirmed",
     }
 
 

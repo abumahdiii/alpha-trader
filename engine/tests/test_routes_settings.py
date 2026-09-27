@@ -14,7 +14,7 @@ from alpha_engine.routes.settings import router
 from alpha_engine.storage.account_settings import AccountSettings
 from alpha_engine.storage.db import open_db
 
-DEFAULTS = {"balance": 1000.0, "risk_pct": 1.0, "leverage": 100, "rr": 2.0}
+DEFAULTS = {"balance": 2500.0, "risk_pct": 1.0, "leverage": 100, "rr": 2.0}  # default balance 2500 since 2026-09-27
 
 
 @pytest.fixture
@@ -61,7 +61,8 @@ def test_bounds_rejected(values: dict) -> None:
 def test_defaults_and_risk_amount_worked_example() -> None:
     s = AccountSettings()
     assert s.model_dump() == DEFAULTS
-    assert s.risk_amount == 10.0  # 1000 * 1% = 10 USD risked per trade
+    assert s.risk_amount == 25.0  # 2500 * 1% = 25.00 USD risked per trade
+    assert s.risk_amount * s.rr == 50.0  # rr 2 -> a winning trade targets 25.00 * 2 = 50.00 USD
 
 
 # --- routes ----------------------------------------------------------------------------------------
@@ -77,8 +78,9 @@ def test_put_partial_update_persists(client: TestClient) -> None:
     assert response.status_code == 200
     assert response.json() == {**DEFAULTS, "risk_pct": 0.5}
     response = client.put("/settings", json={"leverage": 500, "rr": 3})
-    assert response.json() == {"balance": 1000.0, "risk_pct": 0.5, "leverage": 500, "rr": 3.0}
-    assert client.get("/settings").json() == {"balance": 1000.0, "risk_pct": 0.5, "leverage": 500, "rr": 3.0}
+    # balance was never PUT -> stays at the default 2500.0
+    assert response.json() == {"balance": 2500.0, "risk_pct": 0.5, "leverage": 500, "rr": 3.0}
+    assert client.get("/settings").json() == {"balance": 2500.0, "risk_pct": 0.5, "leverage": 500, "rr": 3.0}
 
 
 @pytest.mark.parametrize(

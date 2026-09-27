@@ -37,7 +37,9 @@ GOLD = SymbolSpec(name="XAUUSD.x", digits=2, point=0.01, trade_contract_size=100
 BRENT = SymbolSpec(name="BRNUSD.x", digits=2, point=0.01, trade_contract_size=1000.0, trade_tick_value=10.0,
                    trade_tick_size=0.01, volume_min=0.01, volume_step=0.01, volume_max=100.0,
                    currency_profit="USD", currency_base="USD", description="Oil - Brent Crude")
-DEFAULT_ACCOUNT = AccountSettings()  # balance 1000, risk 1 %, leverage 100, rr 2
+DEFAULT_ACCOUNT = AccountSettings()  # balance 2500 (since 2026-09-27), risk 1 %, leverage 100, rr 2
+# Explicit account for the hand-verified sizing worked examples (independent of the defaults).
+WORKED_ACCOUNT = AccountSettings(balance=1000.0, risk_pct=1.0, leverage=100, rr=2.0)
 
 
 def _utc(text: str) -> pd.Timestamp:
@@ -160,7 +162,7 @@ def test_build_context_guarded_log(app, make_settings) -> None:
 # --- size_from_spec with the real specs -----------------------------------------------------------------
 
 def test_gold_worked_example_with_real_spec() -> None:
-    r = size_from_spec((2000.00, 1995.00), DEFAULT_ACCOUNT, GOLD)  # SL 5.00 away
+    r = size_from_spec((2000.00, 1995.00), WORKED_ACCOUNT, GOLD)  # SL 5.00 away
     assert r.accepted and r.warnings == [] and r.reason_fa is None
     assert r.risk_amount == 10.0            # 1000 * 1 / 100
     assert r.value_per_unit == 100.0        # tick_value 1.0 / tick_size 0.01
@@ -171,7 +173,7 @@ def test_gold_worked_example_with_real_spec() -> None:
 
 
 def test_brent_worked_example_with_real_spec() -> None:
-    r = size_from_spec((80.00, 79.50), DEFAULT_ACCOUNT, BRENT)  # SL 0.50 away
+    r = size_from_spec((80.00, 79.50), WORKED_ACCOUNT, BRENT)  # SL 0.50 away
     assert r.accepted and r.warnings == []
     assert r.value_per_unit == 1000.0       # tick_value 10 / tick_size 0.01
     assert r.loss_per_lot == 500.0          # 0.50 * 1000
@@ -192,9 +194,9 @@ def _candidate(symbol: str = "XAUUSD.x") -> SignalCandidate:
 
 def test_candidate_levels_indicative_and_at_fill() -> None:
     cand = _candidate()
-    indicative = size_from_spec(cand, DEFAULT_ACCOUNT, GOLD)  # entry = reference_price 2000.00
+    indicative = size_from_spec(cand, WORKED_ACCOUNT, GOLD)  # entry = reference_price 2000.00
     assert (indicative.volume, indicative.margin) == (0.02, 40.0)
-    filled = size_from_spec(cand, DEFAULT_ACCOUNT, GOLD, entry=2001.00)  # next bar opened at 2001.00
+    filled = size_from_spec(cand, WORKED_ACCOUNT, GOLD, entry=2001.00)  # next bar opened at 2001.00
     # SL 6.00 away -> loss/lot 600 -> raw 0.016667 -> 0.01 lots; risk 6.00; margin 0.01*100*2001/100 = 20.01
     assert filled.loss_per_lot == 600.0 and filled.volume == 0.01
     assert filled.actual_risk == 6.0 and filled.margin == pytest.approx(20.01, abs=1e-12)

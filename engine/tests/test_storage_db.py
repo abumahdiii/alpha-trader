@@ -66,7 +66,8 @@ def test_pragmas_wal_and_foreign_keys(conn: EngineConnection) -> None:
 def test_tables_and_schema_version(conn: EngineConnection) -> None:
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"schema_version", "strategies", "strategy_versions", "account_settings"} <= tables
-    assert current_schema_version(conn) == SCHEMA_VERSION == 1
+    assert {"backtest_runs", "backtest_windows", "backtest_trades", "backtest_equity"} <= tables
+    assert current_schema_version(conn) == SCHEMA_VERSION == 2
 
 
 def test_migrations_idempotent(tmp_path: Path) -> None:
@@ -76,7 +77,7 @@ def test_migrations_idempotent(tmp_path: Path) -> None:
     first.execute("INSERT INTO strategies (name, created_utc) VALUES ('x', '2026-09-26T00:00:00.000000Z')")
     first.close()
     second = open_db(path)  # reopen: no re-migration, data kept
-    assert second.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 1
+    assert second.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == SCHEMA_VERSION
     assert second.execute("SELECT name FROM strategies").fetchall()[0][0] == "x"
     second.close()
 
@@ -251,7 +252,8 @@ def test_stored_params_invalid_under_new_schema_raises(conn: EngineConnection) -
 
 def test_account_settings_defaults_not_persisted_until_update(conn: EngineConnection) -> None:
     repo = AccountSettingsRepo(conn)
-    assert repo.get() == AccountSettings(balance=1000.0, risk_pct=1.0, leverage=100, rr=2.0)
+    # Defaults (balance 2500 since user decision 2026-09-27; 1 % risk of 2500 = 25.00 USD).
+    assert repo.get() == AccountSettings(balance=2500.0, risk_pct=1.0, leverage=100, rr=2.0)
     assert conn.execute("SELECT COUNT(*) FROM account_settings").fetchone()[0] == 0
 
 
@@ -259,7 +261,7 @@ def test_account_settings_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "alpha.db"
     conn = open_db(path)
     new = AccountSettingsRepo(conn).update({"risk_pct": 0.5, "leverage": 200})
-    assert new == AccountSettings(balance=1000.0, risk_pct=0.5, leverage=200, rr=2.0)
+    assert new == AccountSettings(balance=2500.0, risk_pct=0.5, leverage=200, rr=2.0)  # balance not given -> default
     new = AccountSettingsRepo(conn).update({"balance": 2500.25})
     assert new.risk_pct == 0.5 and new.balance == 2500.25
     conn.close()
@@ -293,3 +295,70 @@ def test_account_settings_db_checks_are_defense_in_depth(conn: EngineConnection)
 
 def test_migrations_table_is_append_only_registry() -> None:
     assert sorted(db_module.MIGRATIONS) == list(range(1, SCHEMA_VERSION + 1))
+
+
+# --- v2: backtest tables ------------------------------------------------------------------------
+
+BACKTEST_TABLES = ("backtest_runs", "backtest_windows", "backtest_trades", "backtest_equity")
+
+
+def _open_v1(path: Path) -> None:
+    """A database exactly as a v1 engine left it (v1 DDL only), with user data in it."""
+    raw = sqlite3.connect(str(path), isolation_level=None)
+    raw.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_utc TEXT NOT NULL)")
+    for statement in db_module.MIGRATIONS[1]:
+        raw.execute(statement)
+    raw.execute("INSERT INTO schema_version VALUES (1, '2026-09-26T00:00:00.000000Z')")
+    raw.execute("INSERT INTO strategies VALUES ('stddev_channel', '2026-09-26T00:00:00.000000Z')")
+    raw.execute("INSERT INTO strategy_versions (strategy_name, version, code_version, params_json, params_hash,"
+                " created_utc, is_active) VALUES ('stddev_channel', 1, 1, '{\"n\": 120}', ?, "
+                "'2026-09-26T00:00:00.000000Z', 1)", ("b" * 64,))
+    raw.execute("INSERT INTO account_settings VALUES (1, 5000.0, 0.5, 200, 3.0, '2026-09-26T00:00:00.000000Z')")
+    raw.close()
+
+
+def test_v1_database_upgrades_to_v2_keeping_user_data(tmp_path: Path) -> None:
+    path = tmp_path / "alpha.db"
+    _open_v1(path)
+    conn = open_db(path)
+    try:
+        assert current_schema_version(conn) == 2
+        assert [r[0] for r in conn.execute("SELECT version FROM schema_version ORDER BY version")] == [1, 2]
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert set(BACKTEST_TABLES) <= tables
+        assert AccountSettingsRepo(conn).get() == AccountSettings(balance=5000.0, risk_pct=0.5, leverage=200, rr=3.0)
+        row = conn.execute("SELECT version, params_json, params_hash, is_active FROM strategy_versions").fetchone()
+        assert tuple(row) == (1, '{"n": 120}', "b" * 64, 1)
+        assert conn.execute("SELECT COUNT(*) FROM backtest_runs").fetchone()[0] == 0
+    finally:
+        conn.close()
+    again = open_db(path)  # idempotent
+    assert current_schema_version(again) == 2 and migrate(again) == []
+    again.close()
+
+
+def test_backtest_children_cascade_and_no_fk_to_strategy_tables(conn: EngineConnection) -> None:
+    # no foreign key from the backtest tables to the strategy/account tables (tgc_startup clears them alone)
+    for table in BACKTEST_TABLES:
+        targets = {r["table"] for r in conn.execute(f"PRAGMA foreign_key_list({table})")}
+        assert targets <= {"backtest_runs"}, (table, targets)
+    for table in ("strategies", "strategy_versions", "account_settings"):
+        targets = {r["table"] for r in conn.execute(f"PRAGMA foreign_key_list({table})")}
+        assert not targets & set(BACKTEST_TABLES)
+    assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'").fetchone()[0] == 0
+    now = "2026-09-27T00:00:00.000000Z"
+    conn.execute("INSERT INTO backtest_runs (id, created_utc, status, symbol, mode, strategy_name, strategy_version,"
+                 " params_hash, provisional, request_json, config_json, labels_json) VALUES"
+                 " (7, ?, 'done', 'XAUUSD.x', 'manual', 'stddev_channel', 1, ?, 1, '{}', '{}', '[]')", (now, "c" * 64))
+    conn.execute("INSERT INTO backtest_windows VALUES (7, 0, ?, ?, 1000, 1010, 1, 0, 1, 10, NULL, NULL, 0, 0, 0, 0,"
+                 " NULL, 10, 3, '{}', '[]')", (now, now))
+    conn.execute("INSERT INTO backtest_trades VALUES (7, 0, 0, 'buy', 'bounce_lower', ?, ?, 1, 0.5, 2, 0.1, 2, 'tp',"
+                 " 10, 1.0, '{}')", (now, now))
+    conn.execute("INSERT INTO backtest_equity VALUES (7, 0, 0, ?, 1000, 1000)", (now,))
+    with pytest.raises(sqlite3.IntegrityError):  # child without a parent
+        conn.execute("INSERT INTO backtest_equity VALUES (8, 0, 0, ?, 1000, 1000)", (now,))
+    with pytest.raises(sqlite3.IntegrityError):  # status CHECK
+        conn.execute("UPDATE backtest_runs SET status = 'weird' WHERE id = 7")
+    conn.execute("DELETE FROM backtest_runs WHERE id = 7")
+    for table in BACKTEST_TABLES[1:]:
+        assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0

@@ -1,6 +1,7 @@
 # Alpha Trader engine (Python 3.12). Minimums = versions verified in engine/.venv.
 fastapi>=0.141.1
 uvicorn[standard]>=0.54.0
+websockets>=17.1  # WS /ws/backtests/{id} (also pulled in by uvicorn[standard]; pinned explicitly)
 pydantic>=2.13.5
 pandas>=3.0.6
 numpy>=2.5.3
