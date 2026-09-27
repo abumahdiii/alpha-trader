@@ -13,6 +13,7 @@ import 'core/main_window.dart';
 import 'core/single_instance_guard.dart';
 import 'providers/engine_api_provider.dart';
 import 'providers/engine_status_provider.dart';
+import 'providers/shell_navigation.dart';
 import 'screens/shell_screen.dart';
 import 'services/engine_process.dart';
 import 'theme/theme.dart';
@@ -80,6 +81,8 @@ Future<void> main() async {
           ChangeNotifierProvider<EngineApiProvider>(
             create: (_) => EngineApiProvider(engine: engineStatus),
           ),
+          // Shown shell page + cross-page requests (chart -> backtest prefill).
+          ChangeNotifierProvider<ShellNavigation>(create: (_) => ShellNavigation()),
         ],
         child: const AlphaTraderApp(),
       ),
