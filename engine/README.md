@@ -170,7 +170,7 @@ version of `stddev_channel` (`strategy.context.load_active_params`) and reuse th
 channel/ATR/setup math is re-implemented. Everything is computed on the FULL cached history and then
 filtered to `[from, to]` (Wilder ATR and the n-bar channel are path dependent), so a sub-range returns
 exactly the same numbers as the full range. Results are kept in a bounded in-process LRU
-(`app.state.chart_cache`, 8 entries) keyed by symbol, cache-file identity, params hash (and R:R for
+(`app.state.chart_cache`, 16 entries, shared with the backtest jobs) keyed by symbol, cache-file identity, params hash (and R:R for
 setups); a cache write or a params change is a new key.
 
 `from`/`to`: ISO UTC, optional. Defaults: `to` = last cached bar (setups: its close), `from` = `to - 30
@@ -183,7 +183,7 @@ empty/invalid points and a Persian `message_fa`.
 | Route | Response |
 |---|---|
 | `GET /chart/channel?symbol&timeframe=H1\|H4&from&to` (default `H1`) | `{symbol, strategy, strategy_version, params_version, params_hash, params: {n, k, sigma_ddof, projection_mode, ...all 15}, timeframe, from, to, count, valid_count, points: [{time, valid, mid, upper, lower, slope, sigma, is_flat, direction: up\|down\|flat\|none, atr_h1, atr_h4, h4_open, bars_ahead}], message_fa}` |
-| `GET /chart/setups?symbol&from&to` | `{symbol, strategy, strategy_version, params_version, params_hash, params, from, to, account: {balance, risk_pct, leverage, rr}, symbol_spec, count, status_counts: {accepted, rejected, pending_entry}, setups: [...], note_fa, message_fa}` |
+| `GET /chart/setups?symbol&from&to` | `{symbol, strategy, strategy_version, params_version, params_hash, params, from, to, account: {balance, risk_pct, leverage, rr}, symbol_spec, count, status_counts: {accepted, rejected, pending_entry}, setups: [...], note_fa, message_fa, evaluation: {...}, summary: {...}, backtest_window: {...}}` (phase 5: simulator rules, per-setup outcome and backtest flag) |
 
 **Channel points.** `H1`: one point per cached H1 bar = the channel of the last H4 bar closed at that
 bar's decision time (`h4_open`), projected `bars_ahead` H4 bars forward -- exactly the values the strategy
@@ -201,7 +201,10 @@ Worked example (synthetic fixture XAUUSD.x, defaults n = 100, k = 2, ddof = 0), 
 "up"`. The next H1 bars decided with it: `2025-05-02T20:00Z` (bars_ahead 0.75) `mid = 2076.73644 +
 0.19759 * 0.75 = 2076.8846275877586`; `2025-05-04T22:00Z` (1.0) `2076.934024242424`.
 
-**Setup items** (`scan()` over the full history, filtered by `decision_time`):
+**Setup items** (the backtest's full-history scan -- `backtest.jobs.scan_for`, the SAME cached candidate objects
+a backtest run uses -- filtered by `decision_time`). Status, entry, levels and volume follow the **backtest
+simulator's rules** (phase 5; `backtest/simulator.py` helpers through `backtest/setup_outcomes.py`), so the table
+and a backtest agree:
 
 ```
 {id: "XAUUSD.x:20250428T1200Z:8e223612f12a",   # symbol : confirmation bar open : params_hash[:12]
@@ -212,31 +215,98 @@ Worked example (synthetic fixture XAUUSD.x, defaults n = 100, k = 2, ddof = 0), 
  decision_time:         "2025-04-28T13:00:00Z",  # CLOSE of bar t (= confirmation_bar_time + 1h)
  entry_time:            "2025-04-28T13:00:00Z",  # OPEN of the next cached H1 bar t+1 (after a break or
                                                  #   weekend it is later than decision_time)
- entry: 2064.37, stop_loss: 2062.8835288730947, take_profit: 2067.34294225381, rr: 2.0,
- risk_distance: 1.486471126905144, reference_price, indicative_take_profit,
- volume: 0.06, actual_risk: 8.918826761430864, margin: 123.8622, risk_amount: 10.0,
- volume_note_fa, sizing_warnings_fa: [], reason_fa, indicators: {...SignalCandidate.extra}}
+ entry: 2064.68,                    # CHANGED in phase 5: the simulator fill (buy = ask open, sell = bid open)
+ entry_bid_open: 2064.37,           # raw (bid) open of bar t+1 = the phase-3 meaning of "entry"
+ spread_at_entry_points: 31, entry_spread_source: historical|filled|fallback|zero,
+ stop_loss: 2062.8835288730947, take_profit: 2068.27294225381, rr: 2.0, risk_distance: 1.7964711269050895,
+ reference_price, indicative_take_profit,
+ volume: 0.05, actual_risk: 8.982355634525447, margin: 103.234, risk_amount: 10.0,
+ volume_note_fa, sizing_warnings_fa: [], reason_fa, indicators: {...SignalCandidate.extra},
+ outcome: {result: tp|sl|end_of_data, exit_reason: sl|tp|sl_gap|tp_gap|end_of_period, exit_reason_fa,
+           exit_bar_time: "2025-04-28T13:00:00Z", exit_time: "2025-04-28T14:00:00Z",
+           exit_price: 2062.8835288730947, pnl_price: -1.7964711269050895, gross_pnl: -8.982355634525447,
+           commission: 0.0, net_pnl: -8.982355634525447, r_multiple: -1.0, bars_held: 1,
+           held_over_weekend: false, flags: []} | null,
+ backtest: {traded: false, reason: "position_open", reason_fa: "در بک‌تست پوزیشن دیگری باز بود ...",
+            trade_index: null, net_pnl: null} | null}
 ```
 
-- `entry` = open of bar t+1 (`levels.entry_price_for`), `take_profit` = `entry +/- rr * |entry - SL|`
-  (`levels.resolve_trade_levels`), volume/margin from `risk.size_from_spec` with the CURRENT `/settings`
-  and the cached symbol spec. Prices are not rounded (format with `symbol_spec.digits`).
-- `pending_entry`: bar t+1 is not cached yet -> `entry`, `entry_time`, `take_profit` and all sizing
-  fields are null (the indicative `reference_price`/`indicative_take_profit` are labelled as such).
-- `rejected`: bar t+1 opened beyond the stop (gap through the SL; `entry` shown, TP/volume null) or the
-  sizing rejected the trade (below `volume_min`, or margin > balance) with `SizingResult.reason_fa`.
-  Rejections are limited to these fill/sizing checks: setups the strategy drops itself (e.g. both
-  directions at once) never become candidates (see `note_fa`).
-- No cached symbol spec: `status` stays `accepted` (levels are valid), `volume`/`margin` null and
-  `volume_note_fa` explains why.
+- **Entry / levels / volume (simulator rules):** bars are bid; `ask = bid + spread * point` (a zero spread is
+  filled from the last previous non-zero spread, bars with no earlier broker spread use the auto fallback
+  spread, see Backtests). A buy fills at the ask open of bar t+1, a sell at its bid open; `take_profit = entry
+  +/- rr * |entry - SL|`; volume from `risk.sizing.size_position` on the FILL price with the CURRENT
+  `/settings` (balance, risk %, leverage) and the cached symbol spec. Prices are not rounded (format with
+  `symbol_spec.digits`).
+- `pending_entry`: bar t+1 is not cached yet -> entry/levels/sizing fields and `outcome` null.
+- `rejected` (Persian `rejection_reason_fa` = the backtest's skip reason): a `missing` gap between t and t+1
+  (`entry` null, `entry_bid_open` shown), a gap through the stop (buy: BID open <= SL; sell: ASK open >= SL;
+  `entry` = the would-be fill, TP/volume null), levels invalid at the fill, or the sizing rejected the trade
+  (below `volume_min`, or margin > balance; TP shown, volume null). Setups the strategy drops itself never
+  become candidates (see `note_fa`).
+- **`outcome`** (accepted only): the setup simulated ON ITS OWN (no "one open trade" constraint, sized with the
+  settings balance) from the entry bar on: SL before TP inside a bar, gap exits at the open, longs exit on the
+  bid, shorts on the ask. `result`: `tp` (tp, tp_gap), `sl` (sl, sl_gap), or `end_of_data` -- still open on the
+  last cached bar, closed at its close (long: bid close, short: ask close), `exit_reason: end_of_period`,
+  `exit_reason_fa` «پایان داده ...»; provisional (changes when bars are appended). `pnl_price` = price move in
+  the trade's favour, `net_pnl = gross_pnl - commission`, `r_multiple = net_pnl / actual_risk`.
+- **`backtest`**: was this setup traded by the manual backtest of this range (`backtest_window`)? `traded` with
+  the backtest trade's `trade_index` and `net_pnl` (the backtest's momentary balance), or not traded with
+  `reason`/`reason_fa`: the backtest's skip reason (`position_open` -> «در بک‌تست پوزیشن دیگری باز بود ...»,
+  `entry_outside_window`, `missing_gap`, `gap_through_stop`, `sizing_rejected`, ...), `outside_window`
+  («خارج از بازه بک‌تست»: before a clipped window start), or `not_reached` (the backtest stopped, balance
+  depleted). `null` when no window is available.
 
-Worked example (the item above; balance 1000, risk 1 %, leverage 100, rr 2; gold spec contract 100,
-tick 1.0/0.01): SL = low 2063.81 - ATR_H1 4.632355634525692 * 0.2 = 2062.8835288730947; entry = open of
-13:00 = 2064.37; distance 1.486471126905144; TP = 2064.37 + 2 * 1.486471 = 2067.34294225381; risk 10.00 /
-(1.486471 * 100) = 0.0672734 lots -> floor to 0.01 step = 0.06; actual risk 0.06 * 148.6471 = 8.9188;
-margin 0.06 * 100 * 2064.37 / 100 = 123.8622. (Balance 1000 is set explicitly here; with the default balance 2500
-the same setup gives risk 25.00 / 148.6471 = 0.168184 -> 0.16 lots, actual risk 0.16 * 148.6471 = 23.7835,
-margin 0.16 * 100 * 2064.37 / 100 = 330.2992, `risk_amount: 25.0`.)
+Top level (in addition to the fields above):
+
+```
+evaluation: {available: true, message_fa: null, basis: "independent_setups",
+             label_fa: "ارزیابی مستقل هر ستاپ، بدون قید یک معامله باز؛ با نتیجه بک‌تست فرق دارد",
+             end_of_data_label_fa, cost_model: {spread: "historical", fallback_spread_points: null,
+             commission_per_lot_per_side: 0.0, swap: "none"},
+             spread_fallback: {points: 30, source: "auto_median_observed", observed_from, observed_to, observed_bars,
+                               observed_median, fallback_bars, zero_bars, total_bars},   # bars used by the outcomes
+             labels_fa: ["موقت تا تایید چک داده", <spread label>, "کمیسیون صفر", "بدون سوآپ"]},
+summary: {total: 22, accepted: 21, rejected: 1, pending_entry: 0, closed: 21, wins: 8, losses: 13, breakeven: 0,
+          open_end_of_data: 0, win_rate: 0.38095238095238093, net_pnl: 23.700120156467165,
+          gross_profit: 125.66829809407227, gross_loss: 101.9681779376051, profit_factor: 1.2324266318749895,
+          profit_factor_infinite: false, total_r: 3.0, avg_r: 0.14285714285714285, r_count: 21, open_net_pnl: 0.0},
+backtest_window: {from: "2025-04-22T09:00:00Z", to: "2025-05-05T00:00:00Z", clipped: true, note_fa,
+                  available: true, code: null, message_fa: null, trades: 5, net_profit: -12.69148116917313}
+```
+
+- `summary`: counts over the listed setups; among the accepted, `closed` = TP/SL outcomes and
+  `open_end_of_data`. `wins/losses/breakeven` (by `net_pnl` sign, eps 1e-9), `win_rate` (fraction of closed),
+  `net_pnl`, `gross_profit`, `gross_loss`, `profit_factor` (null without losses; `profit_factor_infinite` when
+  only wins), `avg_r` come from `backtest.metrics.compute_metrics` over the CLOSED outcomes; `total_r` = sum of
+  their R; `open_net_pnl` = sum of the end-of-data P&L (never in wins/losses/PF/net_pnl). The outcomes overlap,
+  so there is no drawdown / Sharpe / balance. Empty range -> zeros and nulls.
+- `backtest_window`: what «بک‌تست همین بازه» submits to `POST /backtests` (mode manual, default costs): the bars
+  whose decisions fall in `[from, to]` = `[ceil_hour(from) - 1h, floor_hour(to))`, clipped to the earliest
+  allowed start (channel + ATR warm-up) and the end of the cache (`clipped`, Persian `note_fa`) and validated
+  with the POST's own functions. `trades`/`net_profit` = that run's result (computed with `runner.run_backtest`,
+  exactly as the job worker). A range entirely before the earliest start -> `available: false`, `code:
+  "window_too_early"` and the Persian message of the POST error; every `backtest` flag is then null.
+- **No cached symbol spec:** the phase-3 path is kept: `entry = entry_bid_open` (the spread price needs the
+  point), levels from it, no volume (`volume_note_fa`), `outcome`/`backtest` null, `evaluation.available:
+  false` with a Persian `message_fa`, `backtest_window.code: "spec_missing"`, `summary` = counts only. An
+  unexpected evaluation error never fails the request (same degraded answer, `evaluation.message_fa` says the
+  details are in the engine log).
+- Outcomes, flags and the summary depend on every account field and the cost model and are computed per request
+  (never cached; the shared history / scan / first-valid-bar LRU entries are reused). Latency on a 5-year
+  synthetic gold cache (29,751 H1 bars, 1,072 setups): default 30 days ~55 ms warm / ~1.4 s cold; the full
+  5 years ~1.1 s warm / ~2.4 s cold.
+- Known limit (inherited from `data/gaps.py`, identical in the backtest): a daily session break in the first
+  ~2 days of a new DST regime is recognised only with later data, so on a cache that ends right there the step
+  is `missing` and such an entry is rejected; with more data it becomes a `session_break`.
+
+Worked example (the item above; balance 1000, risk 1 % = 10.00, leverage 100, rr 2; gold spec contract 100,
+tick 1.0/0.01 -> 100 USD per 1.00 per lot): SL = low 2063.81 - ATR_H1 4.632355634525692 * 0.2 =
+2062.8835288730947; bar 13:00 bid open 2064.37, spread 31 points -> buy fills at the ask 2064.37 + 0.31 =
+2064.68; distance 1.7964711269; TP = 2064.68 + 2 * 1.7964711 = 2068.27294225381; risk 10.00 / (1.7964711 * 100)
+= 0.0556647 lots -> floor to the 0.01 step = 0.05; actual risk 0.05 * 179.64711 = 8.98236; margin 0.05 * 100 *
+2064.68 / 100 = 103.234. Outcome: the entry bar's low reaches the SL -> `sl` at 2062.8835288730947, pnl_price
+-1.79647, net -8.98236, R -1.0. The manual backtest of the clipped range had another trade open at that time
+(`position_open`). (Phase 3 showed `entry` 2064.37 = the bid open; that value is now `entry_bid_open`.)
 
 ## Backtests (phase 4, cache only, never MT5)
 

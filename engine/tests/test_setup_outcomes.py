@@ -176,6 +176,31 @@ def test_worked_example_end_of_data_closes_at_the_last_ask_close() -> None:
         tr.entry, tr.stop_loss, tr.take_profit, tr.volume)
 
 
+def test_worked_example_mirrors_the_real_gold_sell_of_2026_09_18() -> None:
+    """Numbers of the real reference case (gold sell, confirmation 2026-09-18 08:00 UTC; the orchestrator checks it
+    on the real cache): entry bar bid open 4391.87 -> sell fills at the bid 4391.87; SL 4401.555 (unrounded:
+    high + ATR buffer) -> distance 9.685; TP = 4391.87 - 2 * 9.685 = 4372.50; balance 2500, risk 1 % = 25.00 ->
+    volume = floor(25 / (9.685 * 100), 0.01) = floor(0.025813) = 0.02; risk = 0.02 * 968.5 = 19.37.
+    A later bar's ASK low (bid low 4372.20 + spread 0.34) = 4372.54 > TP: not yet; the next bar's ask low
+    4372.10 + 0.34 = 4372.44 <= TP -> TP at 4372.50 (sell exits on the ask);
+    pnl_price = 4391.87 - 4372.50 = 19.37; net = 19.37 * 0.02 * 100 = +38.74; R = 38.74 / 19.37 = +2.0."""
+    t0 = pd.Timestamp("2026-09-18 08:00", tz="UTC")
+    times = [t0 + pd.Timedelta(hours=h) for h in range(5)]
+    h1 = frame([(4396.00, 4399.80, 4393.50, 4394.00, 34),   # 08:00 confirmation (bearish)
+                (4391.87, 4394.00, 4385.00, 4386.00, 34),   # 09:00 entry: bid open 4391.87
+                (4386.00, 4390.00, 4378.00, 4380.00, 34),   # 10:00
+                (4380.00, 4383.00, 4372.20, 4375.00, 34),   # 11:00 ask low 4372.54 > 4372.50
+                (4375.00, 4376.00, 4372.10, 4373.00, 34)],  # 12:00 ask low 4372.44 <= TP -> exit 4372.50
+               times=times)
+    o = outcome(h1, 0, "sell", 4401.555)
+    tr = o.trade
+    assert tr.entry == 4391.87 and tr.stop_loss == 4401.555
+    assert tr.take_profit == pytest.approx(4372.50) and tr.volume == 0.02 and tr.risk_amount == pytest.approx(19.37)
+    assert tr.exit_reason is ExitReason.TP and tr.exit_bar_time == times[4].to_pydatetime()
+    assert tr.exit_price == pytest.approx(4372.50) and o.pnl_price == pytest.approx(19.37)
+    assert tr.net_pnl == pytest.approx(38.74) and tr.r_multiple == pytest.approx(2.0)
+
+
 def test_summary_worked_example() -> None:
     """Rows: +42.00 (R 2), -25.35 (R -1.014), -41.00 (R -1.952381), end of data +3.00 (R 0.12), a rejection
     and a pending entry.
