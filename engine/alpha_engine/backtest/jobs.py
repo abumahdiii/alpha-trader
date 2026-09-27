@@ -26,8 +26,10 @@ simulating band)::
 Prepared data is shared through a bounded LRU (the app's ``ChartCache`` instance): the history + bar arrays
 keyed by symbol and the identity (file id, mtime, size) of the H1/H4 Parquet files and the spec JSON; the
 first valid channel bar keyed additionally by the params hash; the full-history scan by params hash and
-R:R. A cache write is a new file identity, i.e. a new key. (The chart's own ``/chart/setups`` scan entry
-is a different object -- candidates only -- and is not reused.)
+R:R. A cache write is a new file identity, i.e. a new key. ``/chart/setups`` uses the same history, bar
+arrays and scan entries (``prepare_history`` / ``scan_for`` / ``bars_for_cost``), so the chart's setups
+and a backtest are the very same candidate objects; the chart keeps its own scan only when the symbol spec
+is missing.
 
 Errors end the run ``error`` with a code and a Persian message: ``PeriodError`` / ``HistoryUnavailable``
 keep their codes (``window_too_early``, ``data_too_short``, ``no_data``, ``spec_missing``, ...),
@@ -63,7 +65,8 @@ from .history import (
     scan_full_history,
     with_fallback_spread,
 )
-from .models import RunConfig
+from ..storage.account_settings import AccountSettings
+from .models import CostModel, RunConfig
 from .periods import PeriodError
 from .results import build_run_output
 from .runner import BacktestCancelled, RunConfigError, run_backtest
@@ -153,25 +156,38 @@ def first_valid_index(prepared: PreparedHistory, params: dict[str, Any], params_
     return value
 
 
-def bars_for(prepared: PreparedHistory, config: RunConfig) -> BarArrays:
+def bars_for_cost(prepared: PreparedHistory, cost_model: CostModel) -> BarArrays:
     """The prepared (auto-fallback) bar arrays, or a copy with the user's fallback spread (see costs.py)."""
-    requested = config.cost_model.fallback_spread_points
+    requested = cost_model.fallback_spread_points
     if requested is None:
         return prepared.bars
     return with_fallback_spread(prepared.bars, prepared.history.h1, prepared.history.spec, requested)
 
 
-def full_scan(prepared: PreparedHistory, config: RunConfig, lru: LruLike | None = None) -> ScanResult:
-    def compute() -> ScanResult:
-        return scan_full_history(StdDevChannelStrategy(), prepared.history.h1, prepared.history.h4, config.params,
-                                 config.account, symbol=config.symbol)
+def bars_for(prepared: PreparedHistory, config: RunConfig) -> BarArrays:
+    return bars_for_cost(prepared, config.cost_model)
 
-    value, hit = _lru(lru).get_or_compute(("bt_scan", prepared.key, config.params_hash, config.account.rr),
-                                                    compute)
+
+def scan_for(prepared: PreparedHistory, *, symbol: str, params: dict[str, Any], params_hash: str,
+             account: AccountSettings, lru: LruLike | None = None) -> ScanResult:
+    """Full-history scan shared by the backtest runs and ``/chart/setups`` (same LRU entry, same candidate
+    objects): keyed by the prepared data, the params hash and the R:R (the only account field a candidate
+    carries)."""
+
+    def compute() -> ScanResult:
+        return scan_full_history(StdDevChannelStrategy(), prepared.history.h1, prepared.history.h4, params,
+                                 account, symbol=symbol)
+
+    value, hit = _lru(lru).get_or_compute(("bt_scan", prepared.key, params_hash, account.rr), compute)
     if is_dev_mode():
-        logger.debug("backtest scan %s: %s (%d candidates)", config.symbol, "cache hit" if hit else "computed",
+        logger.debug("backtest scan %s: %s (%d candidates)", symbol, "cache hit" if hit else "computed",
                      len(value.candidates))
     return value
+
+
+def full_scan(prepared: PreparedHistory, config: RunConfig, lru: LruLike | None = None) -> ScanResult:
+    return scan_for(prepared, symbol=config.symbol, params=config.params, params_hash=config.params_hash,
+                    account=config.account, lru=lru)
 
 
 # ---------------------------------------------------------------------------------------------- job state
@@ -459,7 +475,9 @@ __all__ = [
     "JobsClosed",
     "PreparedHistory",
     "bars_for",
+    "bars_for_cost",
     "first_valid_index",
     "full_scan",
     "prepare_history",
+    "scan_for",
 ]
