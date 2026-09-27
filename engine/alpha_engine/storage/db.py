@@ -71,6 +71,109 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         )
         """,
     ),
+    # v2 (phase 4): backtest runs and their results (storage/backtests_repo.py). Deliberately NO foreign
+    # key from the runs to the strategy tables: the params are snapshotted into config_json, and the
+    # tgc_startup reset can clear these four tables (children first) independently of the strategies.
+    2: (
+        """
+        CREATE TABLE backtest_runs (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_utc       TEXT    NOT NULL,
+            started_utc       TEXT,
+            finished_utc      TEXT,
+            status            TEXT    NOT NULL CHECK (status IN
+                                  ('queued', 'running', 'done', 'error', 'cancelled', 'interrupted')),
+            progress          REAL    NOT NULL DEFAULT 0 CHECK (progress >= 0 AND progress <= 100),
+            error_code        TEXT,
+            error_message_fa  TEXT,
+            symbol            TEXT    NOT NULL,
+            mode              TEXT    NOT NULL CHECK (mode IN ('manual', 'random')),
+            period_start_utc  TEXT,
+            period_end_utc    TEXT,
+            windows_count     INTEGER,
+            window_months     INTEGER,
+            seed              INTEGER,
+            seed_generated    INTEGER CHECK (seed_generated IN (0, 1)),
+            strategy_name     TEXT    NOT NULL,
+            strategy_version  INTEGER NOT NULL,
+            params_version    INTEGER,
+            params_hash       TEXT    NOT NULL CHECK (length(params_hash) = 64),
+            provisional       INTEGER NOT NULL CHECK (provisional IN (0, 1)),
+            request_json      TEXT    NOT NULL,
+            config_json       TEXT    NOT NULL,
+            labels_json       TEXT    NOT NULL,
+            plan_json         TEXT,
+            fingerprint_json  TEXT,
+            result_json       TEXT,
+            metrics_json      TEXT,
+            distribution_json TEXT,
+            trade_count       INTEGER,
+            net_profit        REAL,
+            net_profit_pct    REAL,
+            elapsed_s         REAL,
+            timings_json      TEXT
+        )
+        """,
+        "CREATE INDEX ix_backtest_runs_status ON backtest_runs (status)",
+        """
+        CREATE TABLE backtest_windows (
+            run_id                    INTEGER NOT NULL REFERENCES backtest_runs(id) ON DELETE CASCADE,
+            window_index              INTEGER NOT NULL CHECK (window_index >= 0),
+            start_utc                 TEXT    NOT NULL,
+            end_utc                   TEXT    NOT NULL,
+            initial_balance           REAL    NOT NULL,
+            final_balance             REAL    NOT NULL,
+            trade_count               INTEGER NOT NULL,
+            skipped_count             INTEGER NOT NULL,
+            candidates                INTEGER NOT NULL,
+            bars                      INTEGER NOT NULL,
+            first_bar_utc             TEXT,
+            last_bar_utc              TEXT,
+            zero_spread_bars_filled   INTEGER NOT NULL,
+            zero_spread_bars_unfilled INTEGER NOT NULL,
+            weekend_holds             INTEGER NOT NULL,
+            stopped_reason            TEXT,
+            equity_points_full        INTEGER NOT NULL,
+            equity_points_stored      INTEGER NOT NULL,
+            metrics_json              TEXT    NOT NULL,
+            skipped_json              TEXT    NOT NULL,
+            PRIMARY KEY (run_id, window_index)
+        )
+        """,
+        """
+        CREATE TABLE backtest_trades (
+            run_id        INTEGER NOT NULL REFERENCES backtest_runs(id) ON DELETE CASCADE,
+            window_index  INTEGER NOT NULL,
+            trade_index   INTEGER NOT NULL,
+            direction     TEXT    NOT NULL CHECK (direction IN ('buy', 'sell')),
+            setup_type    TEXT    NOT NULL,
+            entry_time    TEXT    NOT NULL,
+            exit_time     TEXT    NOT NULL,
+            entry         REAL    NOT NULL,
+            stop_loss     REAL    NOT NULL,
+            take_profit   REAL    NOT NULL,
+            volume        REAL    NOT NULL,
+            exit_price    REAL    NOT NULL,
+            exit_reason   TEXT    NOT NULL,
+            net_pnl       REAL    NOT NULL,
+            r_multiple    REAL,
+            payload_json  TEXT    NOT NULL,
+            PRIMARY KEY (run_id, window_index, trade_index)
+        )
+        """,
+        "CREATE INDEX ix_backtest_trades_entry ON backtest_trades (run_id, entry_time)",
+        """
+        CREATE TABLE backtest_equity (
+            run_id       INTEGER NOT NULL REFERENCES backtest_runs(id) ON DELETE CASCADE,
+            window_index INTEGER NOT NULL,
+            seq          INTEGER NOT NULL,
+            time_utc     TEXT    NOT NULL,
+            balance      REAL    NOT NULL,
+            equity       REAL    NOT NULL,
+            PRIMARY KEY (run_id, window_index, seq)
+        )
+        """,
+    ),
 }
 SCHEMA_VERSION: int = max(MIGRATIONS)
 

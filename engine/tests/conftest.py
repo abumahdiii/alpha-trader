@@ -27,7 +27,7 @@ _SANDBOX = Path(tempfile.mkdtemp(prefix="alpha_engine_tests_"))
 _FAKE_ENV = _SANDBOX / "fake.env"
 _FAKE_ENV.write_text("", encoding="utf-8")
 for _var in ("MT5_TERMINAL_PATH", "MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER", "MT5_SERVER_UTC_OFFSET",
-             "ENGINE_PORT", "DEV_MODE", "ENGINE_SYMBOLS"):
+             "ENGINE_PORT", "DEV_MODE", "ENGINE_SYMBOLS", "ALPHA_DATA_CHECK_CONFIRMED"):
     os.environ.pop(_var, None)
 os.environ["ALPHA_TRADER_ENV_FILE"] = str(_FAKE_ENV)
 os.environ["ALPHA_TRADER_DATA_DIR"] = str(_SANDBOX / "data")
