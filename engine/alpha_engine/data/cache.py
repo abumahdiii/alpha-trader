@@ -154,8 +154,10 @@ class FileLock:
         while True:
             try:
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except FileExistsError:
-                if self._break_if_stale():
+            except (FileExistsError, PermissionError) as exc:
+                # Windows: a lockfile that is being deleted (or read) by someone else raises
+                # PermissionError instead of FileExistsError -- that is contention, not staleness.
+                if isinstance(exc, FileExistsError) and self._break_if_stale():
                     continue
                 if self._clock() - started >= self.timeout:
                     raise CacheLockTimeout(
@@ -224,10 +226,23 @@ class FileLock:
     def release(self) -> None:
         if self._token is None:
             return
-        owner = self._read_owner()
-        if owner and owner.get("token") == self._token:
-            with contextlib.suppress(FileNotFoundError):
-                os.remove(self.path)
+        # Windows: while a waiter has the file open for reading, both the read and the delete can fail
+        # transiently with a sharing violation; retry briefly so a lock is never leaked.
+        for _ in range(200):
+            owner = self._read_owner()
+            if owner is None or (owner and owner.get("token") != self._token):
+                break  # gone, or not ours (broken as stale and re-taken): leave it alone
+            if owner:
+                try:
+                    os.remove(self.path)
+                    break
+                except FileNotFoundError:
+                    break
+                except PermissionError:
+                    pass
+            time.sleep(0.005)
+        else:
+            logger.warning("could not remove cache lock %s; it will be broken as stale later", self.path.name)
         self._token = None
         if is_dev_mode():
             logger.debug("lock released: %s", self.path.name)
