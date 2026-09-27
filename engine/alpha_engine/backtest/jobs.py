@@ -98,6 +98,11 @@ class _NoCache:
         return compute(), False
 
 
+def _lru(lru: LruLike | None) -> LruLike:
+    # NOT ``lru or ...``: an empty ChartCache has __len__ == 0 and is falsy
+    return lru if lru is not None else _NoCache()
+
+
 class JobsClosed(RuntimeError):
     """The engine is shutting down; no new runs are accepted."""
 
@@ -127,7 +132,7 @@ def prepare_history(cache: OhlcvCache, symbol: str, lru: LruLike | None = None) 
         history = load_history(cache, symbol)
         return PreparedHistory(key=key, history=history, bars=build_bar_arrays(history.h1, history.spec))
 
-    value, hit = (lru or _NoCache()).get_or_compute(key, compute)
+    value, hit = _lru(lru).get_or_compute(key, compute)
     if is_dev_mode():
         logger.debug("backtest history %s: %s (%d H1 bars)", symbol, "cache hit" if hit else "loaded",
                      len(value.bars))
@@ -144,7 +149,7 @@ def first_valid_index(prepared: PreparedHistory, params: dict[str, Any], params_
         valid = np.flatnonzero(cb.valid)
         return int(valid[0]) if len(valid) else None
 
-    value, _ = (lru or _NoCache()).get_or_compute(("bt_first_valid", prepared.key, params_hash), compute)
+    value, _ = _lru(lru).get_or_compute(("bt_first_valid", prepared.key, params_hash), compute)
     return value
 
 
@@ -161,7 +166,7 @@ def full_scan(prepared: PreparedHistory, config: RunConfig, lru: LruLike | None 
         return scan_full_history(StdDevChannelStrategy(), prepared.history.h1, prepared.history.h4, config.params,
                                  config.account, symbol=config.symbol)
 
-    value, hit = (lru or _NoCache()).get_or_compute(("bt_scan", prepared.key, config.params_hash, config.account.rr),
+    value, hit = _lru(lru).get_or_compute(("bt_scan", prepared.key, config.params_hash, config.account.rr),
                                                     compute)
     if is_dev_mode():
         logger.debug("backtest scan %s: %s (%d candidates)", config.symbol, "cache hit" if hit else "computed",
@@ -412,14 +417,7 @@ class BacktestJobs:
             output = build_run_output(result)
             timings["metrics_s"] = time.perf_counter() - t
             self._check_cancel(job)
-            t = time.perf_counter()
-            self.repo.save_result(job.run_id, output, elapsed_s=time.perf_counter() - started, timings=timings)
-            timings["persist_s"] = time.perf_counter() - t
-            timings["total_s"] = time.perf_counter() - started
-            try:  # the persistence time itself is only known after the result transaction
-                self.repo.update_timings(job.run_id, timings["total_s"], timings)
-            except Exception as exc:
-                logger.warning("backtest run %d: timings not stored (%s)", job.run_id, type(exc).__name__)
+            timings = self.repo.save_result(job.run_id, output, started=started, timings=timings)
         except BacktestCancelled:
             status = "interrupted" if job.shutdown else "cancelled"
             self._finish(job, status, status, INTERRUPTED_FA if job.shutdown else CANCELLED_FA,

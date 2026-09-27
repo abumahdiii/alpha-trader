@@ -208,7 +208,11 @@ def test_manual_run_end_to_end_with_ws_and_exact_metrics(env: Env, scan_gate: Ga
     assert detail["provisional"] is True and detail["provisional_label_fa"] == PROVISIONAL_LABEL_FA
     assert detail["spread_fallback"] == direct.spread_fallback.model_dump(mode="json")
     assert detail["request"] == MANUAL and detail["from"] == MANUAL["from"] and detail["to"] == MANUAL["to"]
-    assert detail["result_meta"]["entry_rule"] == "next_bar_open" and detail["timings"]["persist_s"] >= 0
+    assert detail["result_meta"]["entry_rule"] == "next_bar_open"
+    assert {"load_s", "scan_s", "simulate_s", "metrics_s", "persist_s", "total_s"} <= set(detail["timings"])
+    assert detail["elapsed_s"] == detail["timings"]["total_s"]
+    # the worker reused the history the POST validation prepared (shared LRU with the chart routes)
+    assert env.app.state.chart_cache.hits >= 1
 
     # trades: full payloads, identical to the direct run
     page = env.trades(run_id)

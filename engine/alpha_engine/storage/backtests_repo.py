@@ -25,6 +25,7 @@ Status machine: ``queued -> running -> done | error | cancelled``; ``queued -> c
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Sequence
 from typing import Any, Literal
 
@@ -136,8 +137,13 @@ class BacktestsRepo:
                  None if timings is None else _dumps(timings), run_id))
         return cur.rowcount == 1
 
-    def save_result(self, run_id: int, output: Any, *, elapsed_s: float, timings: dict[str, float]) -> None:
-        """Store a finished run (``backtest.results.RunOutput``) in ONE transaction and mark it ``done``."""
+    def save_result(self, run_id: int, output: Any, *, started: float, timings: dict[str, float]) -> dict[str, float]:
+        """Store a finished run (``backtest.results.RunOutput``) in ONE transaction and mark it ``done``.
+
+        ``started`` = ``time.perf_counter()`` at the start of the run; the stored timings get ``persist_s``
+        (row building + inserts, up to but excluding the COMMIT) and ``total_s`` (= ``elapsed_s``), so a
+        ``done`` row always has complete timings. Returns the stored timings."""
+        t0 = time.perf_counter()
         result = output.result
         plan = result.plan
         window_rows = []
@@ -189,6 +195,8 @@ class BacktestsRepo:
             self._conn.executemany(
                 "INSERT INTO backtest_equity (run_id, window_index, seq, time_utc, balance, equity)"
                 " VALUES (?, ?, ?, ?, ?, ?)", equity_rows)
+            now = time.perf_counter()
+            timings = {**timings, "persist_s": now - t0, "total_s": now - started}
             cur = self._conn.execute(
                 "UPDATE backtest_runs SET status = 'done', progress = 100, finished_utc = ?, seed = ?,"
                 " seed_generated = ?, plan_json = ?, fingerprint_json = ?, labels_json = ?, result_json = ?,"
@@ -197,17 +205,14 @@ class BacktestsRepo:
                 (utc_now_text(), plan.seed, int(plan.seed_generated), _dumps(plan.model_dump(mode="json")),
                  _dumps(result.fingerprint.model_dump(mode="json")), _dumps(list(result.labels_fa)), _dumps(meta),
                  _dumps(output.metrics), None if output.distribution is None else _dumps(output.distribution),
-                 output.trade_count, output.net_profit, output.net_profit_pct, elapsed_s, _dumps(timings), run_id))
+                 output.trade_count, output.net_profit, output.net_profit_pct, timings["total_s"], _dumps(timings),
+                 run_id))
             if cur.rowcount != 1:
                 raise RuntimeError(f"backtest run {run_id} is not running any more; result not stored")
         if is_dev_mode():
-            logger.debug("backtest run %d stored: windows=%d trades=%d equity points=%d", run_id, len(window_rows),
-                         len(trade_rows), len(equity_rows))
-
-    def update_timings(self, run_id: int, elapsed_s: float, timings: dict[str, float]) -> None:
-        with self._conn.transaction():
-            self._conn.execute("UPDATE backtest_runs SET elapsed_s = ?, timings_json = ? WHERE id = ?",
-                               (elapsed_s, _dumps(timings), run_id))
+            logger.debug("backtest run %d stored in %.3f s: windows=%d trades=%d equity points=%d", run_id,
+                         time.perf_counter() - t0, len(window_rows), len(trade_rows), len(equity_rows))
+        return timings
 
     def mark_stale_interrupted(self) -> int:
         """Runs left ``queued``/``running`` by a previous engine process -> ``interrupted`` (startup)."""
