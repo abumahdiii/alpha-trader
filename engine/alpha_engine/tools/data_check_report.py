@@ -34,6 +34,12 @@ logger = get_logger(__name__)
 
 GAP_LABELS = {"weekend": "آخر هفته", "holiday": "تعطیلی", "session_break": "وقفه روزانه", "missing": "کندل گم‌شده"}
 SOURCE_LABELS = {"fit": "برازش تاریخی", "override": "override دستی (MT5_SERVER_UTC_OFFSET)", "live": "تیک زنده"}
+ANCHOR_LABELS = {
+    "weekly_close": "بسته شدن هفتگی جمعه ۱۷:۰۰ نیویورک (پنجشنبه اگر جمعه تعطیل باشد)",
+    "daily_break": "شروع وقفه روزانه ۱۷:۰۰ نیویورک (دوشنبه تا پنجشنبه)",
+    "weekly_open": "باز شدن هفتگی یکشنبه ۱۸:۰۰ نیویورک",
+}
+ROLE_LABELS = {"primary": "اصلی", "tie_break": "فقط برای رفع تساوی", "unused": "استفاده نشد"}
 
 
 def _csv(value: str) -> list[str]:
@@ -112,8 +118,9 @@ def build_report(
             f"| مدل مؤثر (برای تبدیل) | `{fit.effective_label}` |",
             f"| منبع | {SOURCE_LABELS.get(fit.source, fit.source)} |",
             f"| مدل استنتاج‌شده از داده | `{fit.inferred_label}` |",
-            f"| نسبت تطابق | {fit.matched}/{fit.checks} ({fit.match_ratio:.0%}) روی {fit.weeks} هفته |",
-            f"| لنگر برازش | بسته شدن جمعه ۱۷:۰۰ و باز شدن یکشنبه ۱۸:۰۰ نیویورک |",
+            f"| نسبت تطابق (لنگرهای اصلی) | {fit.matched}/{fit.checks} ({fit.match_ratio:.0%}) روی {fit.weeks} هفته |",
+            *[f"| لنگر «{ANCHOR_LABELS.get(a.name, a.name)}» ({ROLE_LABELS.get(a.role, a.role)}) | "
+              f"{a.matched}/{a.checks} ({a.ratio:.0%}) |" for a in fit.anchors],
             f"| offset فعلی مدل | {fit.model_offset_now_hours:+g} ساعت |" if fit.model_offset_now_hours is not None
             else "| offset فعلی مدل | - |",
             f"| offset زنده (زمان برازش) | {fit.live_offset_hours if fit.live_offset_hours is not None else '-'}"
@@ -180,7 +187,8 @@ def build_report(
                 out.append(f"| {GAP_LABELS[kind]} (`{kind}`) | {count} |")
             out.append(f"| مجموع کندل‌های گم‌شده | {report.missing_bars_total} |")
             if report.session_break_slots:
-                out.append(f"| ساعت‌های وقفه روزانه (UTC) | {', '.join(report.session_break_slots)} |")
+                out.append(f"| ساعت‌های وقفه روزانه (UTC @ رژیم DST نیویورک/لندن) | "
+                           f"{', '.join(report.session_break_slots)} |")
             missing = [g for g in report.gaps if g.kind == "missing"]
             if missing:
                 out += ["", f"آخرین گپ‌های «کندل گم‌شده» (حداکثر ۱۰ مورد از {len(missing)}):", ""]

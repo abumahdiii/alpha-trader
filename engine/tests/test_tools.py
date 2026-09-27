@@ -35,7 +35,7 @@ def test_fetch_history_fills_cache_and_prints_summary(setup, synthetic, tmp_path
     assert fetch_history.run(["--years", "5"], settings=settings, adapter=adapter, out=out) == 0
     text = out.getvalue()
     assert "state=connected" in text and "offset: effective=us_dst(+2) source=fit" in text
-    assert "match=19/20" in text
+    assert "match=49/49" in text  # primary anchors: 10 weekly closes + 39 daily breaks
     assert "XAUUSD.x H1: rows=1117" in text and "history_short=True" in text
     assert "'weekend': 9, 'holiday': 1, 'session_break': 39, 'missing': 5" in text
     assert FAKE_PASSWORD not in text and FAKE_LOGIN not in text
@@ -78,7 +78,11 @@ def test_data_check_report_persian_with_utc_and_server_time(setup, tmp_path) -> 
     assert code == 0 and report_path.is_file()
     text = report_path.read_text(encoding="utf-8")
     assert text.startswith("# گزارش چک دستی داده خام")
-    assert "زمان سرور (Data Window)" in text and "`us_dst(+2)`" in text and "19/20 (95%)" in text
+    assert "زمان سرور (Data Window)" in text and "`us_dst(+2)`" in text and "49/49 (100%)" in text
+    # per-anchor rows: close + daily break are primary, the weekly open only breaks ties
+    assert "(اصلی) | 10/10 (100%) |" in text and "(اصلی) | 39/39 (100%) |" in text
+    assert "(فقط برای رفع تساوی) | 10/10 (100%) |" in text
+    assert "`22:00Z x1 @NY-std/LDN-std`" not in text and "22:00Z x1 @NY-std/LDN-std" in text
     # newest XAUUSD.x H1 bar: 2025-05-04 23:00Z == server 2025.05.05 02:00 (US DST, +3)
     assert "| 2025-05-04 23:00Z | 2025.05.05 02:00 |" in text
     # oldest: 2025-02-24 00:00Z == server 02:00 (US standard time, +2)
