@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from alpha_engine.backtest.costs import causal_spread
+from alpha_engine.backtest.costs import causal_spread, observed_spread, resolve_fallback_points
 from alpha_engine.backtest.history import build_bar_arrays
 from alpha_engine.backtest.models import CostModel, ExitReason, SkipReason, Window
 from alpha_engine.backtest.simulator import held_over_weekend, scan_provider, simulate_window
@@ -51,8 +51,9 @@ def cand(h1: pd.DataFrame, i: int, direction: str, sl: float, rr: float = 2.0) -
 
 
 def run(h1: pd.DataFrame, cands: dict[int, SignalCandidate], *, balance: float = 10_000.0, risk: float = 1.0,
-        leverage: int = 100, commission: float = 0.0, window: tuple[int, int] | None = None):
-    bars = build_bar_arrays(h1, SPEC)
+        leverage: int = 100, commission: float = 0.0, window: tuple[int, int] | None = None,
+        fallback: int | None = None):
+    bars = build_bar_arrays(h1, SPEC, fallback)
     lo, hi = window or (0, len(h1))
     start = h1["time"].iloc[lo].to_pydatetime()
     end = (h1["time"].iloc[hi - 1] + pd.Timedelta(hours=1)).to_pydatetime() if hi == len(h1) else \
@@ -301,13 +302,79 @@ def test_zero_spread_on_entry_bar_uses_previous_non_zero() -> None:
 
 
 def test_zero_spread_is_never_filled_from_the_future() -> None:
+    """The causal fill never copies a LATER bar's spread; with an explicit fallback of 0 the leading bars
+    really trade at zero spread (the explicit zero-cost case)."""
     h1 = frame([
         (2001, 2002, 1999, 2000.5, 0),
-        (2000.00, 2001.00, 1999.00, 2000.00, 0),  # no earlier non-zero spread -> 0
+        (2000.00, 2001.00, 1999.00, 2000.00, 0),  # no earlier non-zero spread, fallback 0 -> 0
         (2000.00, 2001.00, 1999.00, 2000.00, 50),
     ])
-    tr = run(h1, {0: cand(h1, 0, "buy", 1995.00)}).trades[0]
+    res = run(h1, {0: cand(h1, 0, "buy", 1995.00)}, fallback=0)
+    tr = res.trades[0]
     assert tr.entry == 2000.00 and tr.spread_at_entry_points == 0 and "entry_spread_zero" in tr.flags
+    assert res.zero_spread_bars_unfilled == 2 and res.spread_fallback_bars == 0
+
+
+def test_causal_spread_with_fallback_and_auto_median() -> None:
+    s = causal_spread(np.array([0, 0, 12]), 3, 0.01, fallback_points=34)
+    assert s.points.tolist() == [34, 34, 12] and s.fallback.tolist() == [True, True, False]
+    assert not s.unfilled.any() and not s.filled.any() and s.fallback_points == 34
+    assert s.price[0] == pytest.approx(0.34)
+    s = causal_spread(np.array([0, 12, 0]), 3, 0.01, fallback_points=34)  # later zeros: causal fill, not fallback
+    assert s.points.tolist() == [34, 12, 12] and s.filled.tolist() == [False, False, True]
+    assert s.fallback.tolist() == [True, False, False]
+    # auto = ceil(median of the non-zero spreads): [30, 31, 40, 34] -> median 32.5 -> 33
+    raw = np.array([0, 30, 31, 0, 40, 34, 0])
+    assert resolve_fallback_points(raw, None) == (33, "auto_median_observed")
+    assert resolve_fallback_points(np.array([0, 34, 30, 40]), None) == (34, "auto_median_observed")
+    obs = observed_spread(raw)
+    assert (obs.count, obs.first_index, obs.last_index, obs.median) == (4, 1, 5, 32.5)
+    assert resolve_fallback_points(np.zeros(5, dtype=int), None) == (0, "none")
+    assert resolve_fallback_points(None, None) == (0, "none")
+    assert resolve_fallback_points(raw, 0) == (0, "user") and resolve_fallback_points(raw, 25) == (25, "user")
+    with pytest.raises(ValueError):
+        resolve_fallback_points(raw, -1)
+    # spread_from_frame / build_bar_arrays default to the auto value
+    h1 = frame([(2001, 2002, 1999, 2000.5, 0), (2000, 2001, 1999, 2000, 30), (2000, 2001, 1999, 2000, 41)])
+    assert build_bar_arrays(h1, SPEC).spread.points.tolist() == [36, 30, 41]  # ceil(35.5)
+
+
+def test_leading_zero_spread_buy_uses_the_fallback_worked_example() -> None:
+    """Buy with a user fallback of 34 points (no broker spread before bar 2), gold 0.01 / 100 per price unit,
+    balance 10000, risk 1 % = 100, rr 2, commission 3.50/lot/side:
+    bid open 2000.00 -> fill = ask = 2000.00 + 34 * 0.01 = 2000.34; SL 1995.00 -> distance 5.34;
+    TP = 2000.34 + 2 * 5.34 = 2011.02; volume = 100 / (5.34 * 100) = 0.18727 -> 0.18; risk = 0.18 * 534 = 96.12;
+    bar 2 high 2011.50 >= TP -> exit 2011.02; gross = 10.68 * 0.18 * 100 = 192.24;
+    commission = 3.50 * 0.18 * 2 = 1.26; net = 190.98; R = 190.98 / 96.12 = 1.98689."""
+    h1 = frame([
+        (2001, 2002, 1999, 2000.5, 0),
+        (2000.00, 2001.00, 1999.00, 2000.00, 0),  # entry bar: no earlier broker spread -> fallback 34
+        (2000.00, 2011.50, 1999.00, 2010.00, 50),
+    ])
+    res = run(h1, {0: cand(h1, 0, "buy", 1995.00)}, commission=3.5, fallback=34)
+    tr = res.trades[0]
+    assert tr.entry == pytest.approx(2000.34) and tr.spread_at_entry_points == 34
+    assert "entry_spread_fallback" in tr.flags and "entry_spread_zero" not in tr.flags
+    assert tr.take_profit == pytest.approx(2011.02) and tr.volume == 0.18
+    assert tr.risk_amount == pytest.approx(96.12)
+    assert tr.exit_reason is ExitReason.TP and tr.exit_price == pytest.approx(2011.02)
+    assert tr.gross_pnl == pytest.approx(192.24) and tr.commission == pytest.approx(1.26)
+    assert tr.net_pnl == pytest.approx(190.98) and tr.r_multiple == pytest.approx(190.98 / 96.12)
+    assert res.spread_fallback_bars == 2 and res.zero_spread_bars_unfilled == 0 and res.zero_spread_bars_filled == 0
+
+
+def test_leading_zero_spread_short_exits_on_ask_with_the_fallback() -> None:
+    """Sell, fallback 30 points: bid high 2004.80 < SL 2005 but ask high 2004.80 + 0.30 = 2005.10 >= SL -> SL."""
+    h1 = frame([
+        (1999.00, 2001.00, 1998.50, 2000.50, 0),
+        (2000.00, 2001.00, 1999.00, 2000.20, 0),
+        (2000.20, 2004.80, 1999.50, 2003.00, 0),
+    ])
+    res = run(h1, {0: cand(h1, 0, "sell", 2005.00)}, fallback=30)
+    tr = res.trades[0]
+    assert tr.entry == 2000.00 and tr.exit_reason is ExitReason.SL and tr.exit_price == 2005.00
+    assert tr.spread_at_exit_points == 30 and "exit_spread_fallback" in tr.flags
+    assert "entry_spread_fallback" in tr.flags and res.spread_fallback_bars == 3
 
 
 def test_commission_both_sides() -> None:

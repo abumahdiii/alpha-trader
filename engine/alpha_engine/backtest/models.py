@@ -35,6 +35,7 @@ NO_SWAP_LABEL_FA = "بدون سوآپ"
 ZERO_COMMISSION_LABEL_FA = "کمیسیون صفر"
 HISTORICAL_SPREAD_LABEL_FA = "اسپرد تاریخی بروکر (خرید با ask، فروش با bid)"
 NO_SPREAD_DATA_LABEL_FA = "داده اسپرد در دسترس نیست؛ اسپرد صفر فرض شد (بدون هزینه اسپرد)"
+ZERO_SPREAD_LABEL_FA = "بدون اسپرد (هزینه صفر)"
 
 SEED_MAX = 2**63 - 1
 
@@ -90,6 +91,9 @@ class CostModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
     spread: Literal["historical"] = "historical"
+    # Spread (points) for bars with no earlier non-zero broker spread (see costs.py): None = auto (ceil of the
+    # median observed non-zero spread of the full cached history), 0 = explicit zero cost, > 0 = fixed value.
+    fallback_spread_points: int | None = Field(default=None, ge=0, le=100_000)
     commission_per_lot_per_side: float = Field(default=0.0, ge=0.0, le=1000.0)
     swap: Literal["none"] = "none"
 
@@ -259,8 +263,9 @@ class WindowResult(BaseModel):
     equity: list[EquityPoint]
     candidates: int  # scan candidates with a decision inside the window
     zero_spread_bars_filled: int  # in-window bars whose zero spread was replaced by the last non-zero one
-    zero_spread_bars_unfilled: int  # zero spread and no earlier non-zero spread: 0 used
+    zero_spread_bars_unfilled: int  # zero spread, no earlier non-zero spread and no fallback: 0 really used
     weekend_holds: int  # trades held over a weekend (swap is NOT modeled)
+    spread_fallback_bars: int = 0  # zero spread, no earlier non-zero spread: the fallback spread was used
     stopped_reason: Literal["balance_depleted"] | None = None
 
     # metrics.WindowSummaryLike (summarize_windows)
@@ -303,6 +308,43 @@ class DataFingerprint(BaseModel):
     spec_source: str | None = None
 
 
+class SpreadFallback(BaseModel):
+    """The fallback spread a run used for bars without an earlier broker spread (see costs.py)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    points: int = Field(ge=0)
+    source: Literal["auto_median_observed", "user", "none"]  # none = auto, but no non-zero spread in the data
+    observed_from: datetime | None  # open of the first cached H1 bar with a non-zero spread
+    observed_to: datetime | None  # open of the last one
+    observed_bars: int  # cached H1 bars with a non-zero spread (full history)
+    observed_median: float | None  # median of those spreads (points)
+    fallback_bars: int  # simulated in-window bars (all windows) that used ``points`` (> 0)
+    zero_bars: int  # simulated in-window bars that used 0 (no earlier spread and fallback 0)
+    total_bars: int  # simulated in-window bars (all windows)
+
+
+def spread_label_fa(fb: SpreadFallback) -> str:
+    """Honest spread label of a run (replaces the plain historical-spread label when bars were not priced
+    with the broker's own spread)."""
+    since = fb.observed_from.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if fb.observed_from else None
+
+    def pct(n: int) -> str:
+        return f"{(n / fb.total_bars * 100.0) if fb.total_bars else 0.0:.1f}"
+
+    why = "میانه اسپرد مشاهده‌شده" if fb.source == "auto_median_observed" else "تعیین کاربر"
+    if fb.fallback_bars:
+        if since:
+            return (f"اسپرد تاریخی بروکر فقط از {since}؛ برای {pct(fb.fallback_bars)}٪ کندل‌ها اسپرد ثابت "
+                    f"{fb.points} پوینت ({why}) فرض شد")
+        return f"داده اسپرد بروکر در دسترس نیست؛ برای همه کندل‌ها اسپرد ثابت {fb.points} پوینت ({why}) فرض شد"
+    if fb.zero_bars:
+        if since:
+            return f"اسپرد تاریخی بروکر فقط از {since}؛ برای {pct(fb.zero_bars)}٪ کندل‌ها {ZERO_SPREAD_LABEL_FA}"
+        return f"{ZERO_SPREAD_LABEL_FA}؛ داده اسپرد بروکر در دسترس نیست"
+    return HISTORICAL_SPREAD_LABEL_FA
+
+
 class RunResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -316,6 +358,7 @@ class RunResult(BaseModel):
     entry_rule: Literal["next_bar_open"] = "next_bar_open"
     price_basis: Literal["bid_bars"] = "bid_bars"  # bars are bid; ask = bid + spread * point
     spread_source: Literal["historical", "none"]
+    spread_fallback: SpreadFallback
     total_trades: int
     total_skipped: int
 
@@ -340,6 +383,9 @@ __all__ = [
     "RunResult",
     "SkipReason",
     "SkippedCandidate",
+    "SpreadFallback",
+    "ZERO_SPREAD_LABEL_FA",
+    "spread_label_fa",
     "Trade",
     "Window",
     "WindowPlan",

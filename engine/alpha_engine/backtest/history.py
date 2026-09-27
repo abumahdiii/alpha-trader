@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -175,8 +175,9 @@ def scan_full_history(
                       first_valid_index=first_valid, h1_count=len(h1))
 
 
-def build_bar_arrays(h1: pd.DataFrame, spec: SymbolSpec) -> BarArrays:
-    """H1 arrays + causal spread + ``missing`` gaps for the simulator."""
+def build_bar_arrays(h1: pd.DataFrame, spec: SymbolSpec, fallback_spread_points: int | None = None) -> BarArrays:
+    """H1 arrays + causal spread (fallback for bars without an earlier broker spread; ``None`` = auto, see
+    ``costs.py``) + ``missing`` gaps for the simulator."""
     times_ns = np.ascontiguousarray(bar_open_times(h1).as_unit("ns").asi8)
     if len(times_ns) > 1 and not (np.diff(times_ns) > 0).all():
         raise ValueError("H1 bars must be sorted by time without duplicates")
@@ -191,12 +192,19 @@ def build_bar_arrays(h1: pd.DataFrame, spec: SymbolSpec) -> BarArrays:
         if is_dev_mode():
             logger.debug("backtest bars: %d H1 bars, gaps %s, missing-gap entries blocked after %d bar(s)",
                          len(times_ns), report.counts, int(missing.sum()))
-    spread = spread_from_frame(h1, spec.point)
+    spread = spread_from_frame(h1, spec.point, fallback_spread_points)
     return BarArrays(
         times_ns=times_ns, open=h1["open"].to_numpy(dtype=np.float64), high=h1["high"].to_numpy(dtype=np.float64),
         low=h1["low"].to_numpy(dtype=np.float64), close=h1["close"].to_numpy(dtype=np.float64), spread=spread,
         missing_gap_after=missing,
     )
+
+
+def with_fallback_spread(bars: BarArrays, h1: pd.DataFrame, spec: SymbolSpec, fallback_points: int) -> BarArrays:
+    """``bars`` with the spread series rebuilt for another fallback (prices/gaps shared, list views reset)."""
+    if bars.spread.fallback_points == fallback_points:
+        return bars
+    return replace(bars, spread=spread_from_frame(h1, spec.point, fallback_points), _lists={})
 
 
 __all__ = [
@@ -207,4 +215,5 @@ __all__ = [
     "data_fingerprint",
     "load_history",
     "scan_full_history",
+    "with_fallback_spread",
 ]
