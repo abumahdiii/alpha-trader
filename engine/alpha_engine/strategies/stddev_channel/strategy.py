@@ -25,7 +25,7 @@ import pandas as pd
 
 from ...logging_setup import get_logger, is_dev_mode
 from ...storage.account_settings import AccountSettings
-from ...strategy.base import H4_DURATION, Strategy, StrategyContext, slice_closed_bars
+from ...strategy.base import H4_DURATION, Strategy, StrategyContext, bar_open_times, slice_closed_bars
 from ...strategy.params import ParamSchema, params_hash
 from ...strategy.registry import register
 from ...strategy.signal import SignalCandidate
@@ -39,13 +39,28 @@ from .setups import (
     SIDE_FA,
     ChannelBars,
     SetupHit,
+    any_touch,
     compute_channel_bars,
+    with_patterns,
 )
 from .state_machine import PRIORITY, Decision, decide_at
 
 logger = get_logger(__name__)
 
 _H1 = timedelta(hours=1)
+
+
+def _closed_h4(h4: pd.DataFrame, decision_time: pd.Timestamp) -> pd.DataFrame:
+    """Rows of ``h4`` with ``open + 4h <= decision_time`` (``slice_closed_bars``, via searchsorted).
+
+    Rows must be sorted by open time (``mtf`` rejects unsorted input later anyway); for unsorted input
+    this falls back to the boolean-mask slice.
+    """
+    times = bar_open_times(h4)
+    if not times.is_monotonic_increasing:
+        return slice_closed_bars(h4, H4_DURATION, decision_time)
+    count = int(np.searchsorted(times + H4_DURATION, decision_time, side="right"))
+    return h4 if count == len(h4) else h4.iloc[:count]
 
 
 def _fmt(value: float) -> str:
@@ -91,13 +106,18 @@ class StdDevChannelStrategy(Strategy):
         if len(h1) == 0:
             return None
         decision_time = ctx.decision_time_utc
-        # Defensive: never use an H4 bar that is still forming at D, even if a caller passed one.
-        h4 = slice_closed_bars(ctx.h4, H4_DURATION, decision_time)
+        # Defensive: never use an H4 bar that is still forming at D, even if a caller passed one
+        # (same rule as strategy.base.slice_closed_bars: open + 4h <= D).
+        h4 = _closed_h4(ctx.h4, decision_time)
         if is_dev_mode() and len(h4) != len(ctx.h4):
             logger.debug("%s %s @ %s: dropped %d H4 bar(s) not closed at decision time",
                          self.name, ctx.symbol, decision_time.isoformat(), len(ctx.h4) - len(h4))
         t = len(h1) - 1
-        cb = compute_channel_bars(h1, h4, p, pattern_from=t)
+        # Only the last `history_bars` bars are read by the setup logic; patterns only at t, and only
+        # when a setup is still possible (direction allowed and some line touched) -- pure speed-ups.
+        cb = compute_channel_bars(h1, h4, p, start=t - p.history_bars + 1, pattern_from=None)
+        if (cb.buy_ok[t] or cb.sell_ok[t]) and any_touch(cb, t, p.touch_lookback):
+            cb = with_patterns(cb, p, t)
         decision = decide_at(cb, t, p)
         _log_decision(self.name, ctx.symbol, cb, decision)
         return _candidate(self, ctx.symbol, cb, decision, p, params_hash(clean), ctx.account)

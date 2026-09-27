@@ -41,19 +41,26 @@ Bounce setups at the confirmation bar ``t`` (``touch_lookback`` = TL, ``approach
                   close_{t-a} < mid_{t-a} - tol_{t-a},  close_t <= mid_t + tol_t
 
 The last condition of each rule rejects a confirmation candle that closed THROUGH the line.
+
+Projection note: the H4 -> H1 projection is assembled from the public building blocks of
+``indicators.mtf`` / ``indicators.regression_channel`` (``last_closed_index``, ``h1_bars_since``,
+``line_value_at``, ``is_flat``) with exactly the arithmetic of ``mtf.project_channel_to_h1`` (a test asserts
+bitwise equality). The wrapper itself is not called because it builds a DataFrame column by column
+(~10 ms per call with pandas 3), which made per-bar ``evaluate`` far too slow; here only the H4 channel
+rows actually needed are computed.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import numpy as np
 import pandas as pd
 
 from ...indicators.atr import wilder_atr
-from ...indicators.mtf import project_channel_to_h1
-from ...indicators.regression_channel import rolling_regression_channel
+from ...indicators.mtf import h1_bars_since, last_closed_index
+from ...indicators.regression_channel import is_flat, line_value_at, rolling_regression_channel
 from ...logging_setup import get_logger, is_dev_mode
 from ...patterns.candles import detect_reversals
 from ...strategy.base import bar_open_times
@@ -152,89 +159,148 @@ def _ohlc(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.n
     return tuple(frame[c].to_numpy(dtype=np.float64) for c in ("open", "high", "low", "close"))  # type: ignore[return-value]
 
 
+_H4_NS = int(pd.Timedelta(hours=4).value)
+_H1_NS = int(pd.Timedelta(hours=1).value)
+
+
 def compute_channel_bars(
-    h1: pd.DataFrame, h4: pd.DataFrame, p: StdDevParams, *, pattern_from: int = 0
+    h1: pd.DataFrame,
+    h4: pd.DataFrame,
+    p: StdDevParams,
+    *,
+    start: int = 0,
+    pattern_from: int | None = 0,
 ) -> ChannelBars:
-    """Vectorised, causal indicator arrays for every H1 bar.
+    """Vectorised, causal indicator arrays for the H1 bars of ``h1``.
 
     ``h4`` may contain H4 bars that are not closed yet at some H1 bars (``scan`` passes the full
-    history): the projection only ever reads ``j*`` (the last H4 bar closed at each H1 decision time)
-    and the rolling channel / Wilder ATR at ``j*`` depend on H4 bars ``<= j*`` only.
+    history): only ``j*`` (the last H4 bar closed at each H1 decision time) is ever read, and the
+    rolling channel / Wilder ATR at ``j*`` depend on H4 bars ``<= j*`` only.
 
-    ``pattern_from``: reversal patterns are computed only for bars ``>= pattern_from`` (others False).
-    Patterns at bar ``i`` depend on bars ``i-1`` and ``i`` only, so this is a pure speed-up for
-    ``evaluate``, which only needs the confirmation pattern at the last bar.
+    ``start``: channel lines are produced for bars ``>= start`` only (earlier bars are NaN); ATR_H1 is
+    always computed over the whole history (Wilder recursion). ``pattern_from``: reversal patterns for
+    bars ``>= pattern_from`` (``None`` = none; see :func:`with_patterns`). Both are pure speed-ups for
+    ``evaluate``, which reads only its last ``history_bars`` bars.
     """
     times = bar_open_times(h1)
     h4_times = bar_open_times(h4)
     o, h, lo, c = _ohlc(h1)
     size = len(c)
+    start = max(0, min(start, size))
     nan = np.full(size, np.nan)
 
     atr_h1 = wilder_atr(h, lo, c, p.atr_period).to_numpy() if size else nan.copy()
+    h4_ns = h4_times.as_unit("ns").asi8
+    h1_ns = times.as_unit("ns").asi8
 
-    if len(h4) >= p.n and size:
-        h4_o, h4_h, h4_l, h4_c = _ohlc(h4)
-        channel = rolling_regression_channel(h4_c, p.n, p.k, p.sigma_ddof)
-        atr_h4_series = wilder_atr(h4_h, h4_l, h4_c, p.atr_period)
-        proj = project_channel_to_h1(
-            channel, h4_times, pd.DataFrame(index=times), p.n, p.projection_mode,
-            h4_atr=atr_h4_series.to_numpy(), flat_mult=p.flat_mult,
-        )
-        mid = proj["mid"].to_numpy()
-        upper = proj["upper"].to_numpy()
-        lower = proj["lower"].to_numpy()
-        slope = proj["slope"].to_numpy()
-        sigma = proj["sigma"].to_numpy()
-        bars_ahead = proj["bars_ahead"].to_numpy()
-        atr_h4 = proj["atr_h4"].to_numpy()
-        is_flat = proj["is_flat"].to_numpy(dtype=bool)
-        j = proj["h4_index"].to_numpy()
-        h4_ns = h4_times.as_unit("ns").asi8
-        h4_open = np.where(j >= 0, h4_ns[np.where(j >= 0, j, 0)], -1)
-    else:  # not enough closed H4 bars for a single channel: nothing is tradable
-        mid, upper, lower, slope, sigma, bars_ahead, atr_h4 = (nan.copy() for _ in range(7))
-        is_flat = np.zeros(size, dtype=bool)
-        h4_open = np.full(size, -1, dtype=np.int64)
+    # j* and m are computed on the H1 tail [s:], where s is the last H1 bar opening at or before the
+    # open of j*(start): m counts H1 bars in [open_j*, T), so every count for bars >= start is the same
+    # as on the full history. When j*(start) does not exist (start of data), s = 0 (full history).
+    # Bars in [s, start) get j = -1: m of a bar depends only on its own j*, and they are blanked anyway.
+    j = np.full(size, -1, dtype=np.int64)
+    if size:
+        j[start:] = last_closed_index(h4_times, times[start:])
+    s = start
+    if start and size and start < size:
+        s = 0
+        if j[start] >= 0:
+            s = int(np.searchsorted(h1_ns, h4_ns[j[start]], side="right")) - 1
+            s = min(max(s, 0), start)
+
+    if p.projection_mode == "bar_count":
+        m = np.full(size, -1, dtype=np.int64)
+        if size:
+            m[s:] = h1_bars_since(h4_times, j[s:], times[s:])
+        bars_ahead = np.where(m >= 0, m / (_H4_NS / _H1_NS), np.nan)  # same arithmetic as mtf
+    else:
+        jc0 = np.where(j >= 0, j, 0)
+        elapsed = h1_ns - (h4_ns[jc0] if len(h4_ns) else np.zeros(size, dtype=np.int64))
+        bars_ahead = np.where(j >= 0, elapsed / _H4_NS, np.nan)
+
+    # H4 channel rows needed by bars >= start (j* >= n-1), computed in one vectorised call.
+    chan = np.full((len(h4_ns), 5), np.nan)
+    atr_h4_all = np.full(len(h4_ns), np.nan)
+    needed = j[start:]
+    needed = needed[needed >= p.n - 1]
+    if len(needed):
+        j_lo, j_hi = int(needed.min()), int(needed.max())
+        h4_o, h4_h, h4_l, h4_c = _ohlc(h4.iloc[: j_hi + 1])
+        block = rolling_regression_channel(h4_c[j_lo - p.n + 1: j_hi + 1], p.n, p.k, p.sigma_ddof).to_numpy()
+        chan[j_lo: j_hi + 1] = block[p.n - 1:]
+        atr_h4_all[: j_hi + 1] = wilder_atr(h4_h, h4_l, h4_c, p.atr_period).to_numpy()
+
+    has_j = j >= 0
+    jc = np.where(has_j, j, 0)
+
+    def pick(values: np.ndarray) -> np.ndarray:
+        if not len(values):
+            return nan.copy()
+        return np.where(has_j, values[jc], np.nan)
+
+    if start:
+        bars_ahead = bars_ahead.copy()
+        bars_ahead[:start] = np.nan
+    usable = ~np.isnan(bars_ahead)
+    slope_j = pick(chan[:, 3])
+    mid = line_value_at(pick(chan[:, 0]), slope_j, bars_ahead)
+    upper = line_value_at(pick(chan[:, 1]), slope_j, bars_ahead)
+    lower = line_value_at(pick(chan[:, 2]), slope_j, bars_ahead)
+    slope = np.where(usable, slope_j, np.nan)
+    sigma = np.where(usable, pick(chan[:, 4]), np.nan)
+    atr_h4 = np.where(usable, pick(atr_h4_all), np.nan)
+    flat = np.asarray(is_flat(slope, p.n, atr_h4, p.flat_mult), dtype=bool).reshape(size)
+    h4_open = np.where(has_j, h4_ns[jc], -1) if len(h4_ns) else np.full(size, -1, dtype=np.int64)
 
     tol = atr_h1 * p.touch_atr_mult
     valid = np.isfinite(mid) & np.isfinite(upper) & np.isfinite(lower) & np.isfinite(atr_h1) & np.isfinite(atr_h4)
     with np.errstate(invalid="ignore"):
-        buy_ok = valid & (is_flat | (slope > 0))
-        sell_ok = valid & (is_flat | (slope < 0))
+        buy_ok = valid & (flat | (slope > 0))
+        sell_ok = valid & (flat | (slope < 0))
 
+    cb = ChannelBars(
+        times=times, open=o, high=h, low=lo, close=c, mid=mid, upper=upper, lower=lower, slope=slope,
+        sigma=sigma, bars_ahead=bars_ahead, h4_open=h4_open, atr_h4=atr_h4, is_flat=flat,
+        atr_h1=atr_h1, tol=tol, valid=valid, buy_ok=buy_ok, sell_ok=sell_ok,
+        bull=np.zeros(size, dtype=bool), bear=np.zeros(size, dtype=bool),
+        bull_pattern=np.full(size, "", dtype=object), bear_pattern=np.full(size, "", dtype=object),
+    )
+    if pattern_from is not None:
+        cb = with_patterns(cb, p, pattern_from)
+    if is_dev_mode():
+        logger.debug(
+            "stddev compute_channel_bars: h1=%d h4=%d start=%d n=%d k=%g ddof=%d mode=%s valid=%d buy_ok=%d "
+            "sell_ok=%d flat=%d bull=%d bear=%d",
+            size, len(h4), start, p.n, p.k, p.sigma_ddof, p.projection_mode, int(valid.sum()),
+            int(buy_ok.sum()), int(sell_ok.sum()), int(flat.sum()), int(cb.bull.sum()), int(cb.bear.sum()),
+        )
+    return cb
+
+
+def with_patterns(cb: ChannelBars, p: StdDevParams, pattern_from: int) -> ChannelBars:
+    """Copy of ``cb`` with reversal patterns for bars ``>= pattern_from`` (bar i uses bars i-1 and i)."""
+    size = len(cb)
+    start = max(0, min(pattern_from, size))
     bull = np.zeros(size, dtype=bool)
     bear = np.zeros(size, dtype=bool)
     bull_pattern = np.full(size, "", dtype=object)
     bear_pattern = np.full(size, "", dtype=object)
-    start = max(0, min(pattern_from, size))
     if start < size:
         lead = 1 if start > 0 else 0  # engulfing at `start` needs bar start-1
-        sub = h1.iloc[start - lead:]
-        rev = detect_reversals(
-            sub[["open", "high", "low", "close"]].reset_index(drop=True), p.patterns,
-            wick_body_ratio=p.pin_wick_body_ratio, opposite_wick_max=p.pin_opposite_wick_max,
-        )
-        rev = rev.iloc[lead:]
+        lo_i = start - lead
+        ohlc = np.column_stack([cb.open[lo_i:], cb.high[lo_i:], cb.low[lo_i:], cb.close[lo_i:]])
+        rev = detect_reversals(ohlc, p.patterns, wick_body_ratio=p.pin_wick_body_ratio,
+                               opposite_wick_max=p.pin_opposite_wick_max).iloc[lead:]
         bull[start:] = rev["bullish"].to_numpy(dtype=bool)
         bear[start:] = rev["bearish"].to_numpy(dtype=bool)
         names = rev["pattern"].to_numpy(dtype=object)
         bull_pattern[start:] = [_side_names(x, "bullish") for x in names]
         bear_pattern[start:] = [_side_names(x, "bearish") for x in names]
+    return replace(cb, bull=bull, bear=bear, bull_pattern=bull_pattern, bear_pattern=bear_pattern)
 
-    if is_dev_mode():
-        logger.debug(
-            "stddev compute_channel_bars: h1=%d h4=%d n=%d k=%g ddof=%d mode=%s valid=%d buy_ok=%d sell_ok=%d "
-            "flat=%d bull=%d bear=%d (patterns from %d)",
-            size, len(h4), p.n, p.k, p.sigma_ddof, p.projection_mode, int(valid.sum()), int(buy_ok.sum()),
-            int(sell_ok.sum()), int(is_flat.sum()), int(bull.sum()), int(bear.sum()), start,
-        )
-    return ChannelBars(
-        times=times, open=o, high=h, low=lo, close=c, mid=mid, upper=upper, lower=lower, slope=slope,
-        sigma=sigma, bars_ahead=bars_ahead, h4_open=h4_open, atr_h4=atr_h4, is_flat=is_flat,
-        atr_h1=atr_h1, tol=tol, valid=valid, buy_ok=buy_ok, sell_ok=sell_ok, bull=bull, bear=bear,
-        bull_pattern=bull_pattern, bear_pattern=bear_pattern,
-    )
+
+def any_touch(cb: ChannelBars, t: int, lookback: int) -> bool:
+    """Some bar in ``[t-lookback, t]`` touches some channel line (a necessary condition of every setup)."""
+    return any(touch_offset(cb, line, t, lookback) is not None for line in ("lower", "mid", "upper"))
 
 
 def _side_names(joined: str, side: str) -> str:
