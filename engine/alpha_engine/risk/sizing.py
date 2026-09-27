@@ -33,6 +33,11 @@ Worked examples (balance 1000, risk 1 % -> 10.00 USD, leverage 100, step 0.01, m
   -> loss/lot 0.50 * 1000 = 500.00 -> volume 0.02, margin 0.02 * 1000 * 80 / 100 = 16.00.
 * Gold with SL 60.00 away -> loss/lot 6000 -> raw 0.0016667 -> 0.00 < 0.01 -> rejected.
 * Floor, not round: raw 0.0299999 -> 0.02; raw 0.03 (float 0.0299999999999999989) -> 0.03.
+
+:func:`size_from_spec` feeds the phase-1 :class:`~alpha_engine.data.symbols.SymbolSpec` (``symbol_info``
+of the broker) into the same formula. With the REAL cached specs (2026-09-27: XAUUSD.x contract 100,
+tick_value 1.0, tick_size 0.01; BRNUSD.x contract 1000, tick_value 10.0, tick_size 0.01; both volume
+0.01/0.01/100) it reproduces the two worked examples above exactly.
 """
 
 from __future__ import annotations
@@ -43,8 +48,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..data.symbols import SymbolSpec
 from ..logging_setup import get_logger, is_dev_mode
 from ..storage.account_settings import AccountSettings
+from ..strategy.signal import SignalCandidate
 
 logger = get_logger(__name__)
 
@@ -194,4 +201,54 @@ def size_for_account(
         balance=account.balance, risk_pct=account.risk_pct, leverage=account.leverage, entry=entry,
         stop_loss=stop_loss, tick_value=tick_value, tick_size=tick_size, volume_min=volume_min,
         volume_step=volume_step, volume_max=volume_max, contract_size=contract_size, price=price,
+    )
+
+
+def size_from_spec(
+    levels: SignalCandidate | tuple[float, float],
+    account: AccountSettings,
+    spec: SymbolSpec,
+    *,
+    entry: float | None = None,
+) -> SizingResult:
+    """:func:`size_for_account` with the contract data of ``spec`` (phase-1 ``SymbolSpec``).
+
+    ``levels`` is either a :class:`SignalCandidate` or an ``(entry, stop_loss)`` pair:
+
+    * candidate: ``stop_loss`` from the candidate; ``entry`` = the actual fill price (open of bar t+1)
+      when given, otherwise the candidate's ``reference_price`` (close of bar t) for an *indicative*
+      volume. The candidate's symbol must be ``spec.name``;
+    * pair: ``entry`` must not be passed again.
+
+    ``tick_value/tick_size`` -> value per price unit (decision D9), ``trade_contract_size`` -> margin and
+    the 1 % cross-check. Bad numbers give a rejected result (never an exception), like ``size_position``.
+    """
+    if isinstance(levels, SignalCandidate):
+        if levels.symbol != spec.name:
+            raise ValueError(f"candidate is for {levels.symbol!r} but the symbol spec is for {spec.name!r}")
+        entry_price = levels.reference_price if entry is None else entry
+        stop_loss = levels.stop_loss
+    else:
+        if entry is not None:
+            raise TypeError("pass the entry price either in `levels` or as `entry`, not both")
+        try:
+            entry_price, stop_loss = levels
+        except (TypeError, ValueError):
+            raise TypeError("levels must be a SignalCandidate or an (entry, stop_loss) pair") from None
+    if is_dev_mode():
+        logger.debug(
+            "size_from_spec %s: entry=%s sl=%s contract=%g tick_value=%g tick_size=%g vol=%g/%g/%g account=%s",
+            spec.name, entry_price, stop_loss, spec.trade_contract_size, spec.trade_tick_value,
+            spec.trade_tick_size, spec.volume_min, spec.volume_step, spec.volume_max, account.model_dump(),
+        )
+    return size_for_account(
+        account,
+        entry=entry_price,
+        stop_loss=stop_loss,
+        tick_value=spec.trade_tick_value,
+        tick_size=spec.trade_tick_size,
+        volume_min=spec.volume_min,
+        volume_step=spec.volume_step,
+        volume_max=spec.volume_max,
+        contract_size=spec.trade_contract_size,
     )

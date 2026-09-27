@@ -1,4 +1,4 @@
-"""``/strategies`` REST routes (not yet mounted; ``app.include_router(router)`` wires them in).
+"""``/strategies`` REST routes (mounted by ``create_app``).
 
 * ``GET /strategies`` -- every registered strategy with its active params version.
 * ``GET /strategies/{name}`` -- one strategy; 404 if not registered.

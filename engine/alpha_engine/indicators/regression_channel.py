@@ -18,8 +18,14 @@ Math, for one window ``y_0 .. y_{n-1}`` with ``x = 0 .. n-1``::
 Numerics: every window is centered on its own mean before the products are formed and the residuals are
 computed explicitly (not as ``Syy - slope^2*Sxx``), so there is no global cumulative-sum drift and no
 catastrophic cancellation at price levels like 2000 over 30k+ bars. Windows come from
-``numpy.lib.stride_tricks.sliding_window_view`` (a view, no copy) and are processed in row chunks to cap
-temporary memory; the only Python loop is over chunks, never over bars.
+``numpy.lib.stride_tricks.sliding_window_view`` and are processed in row chunks to cap temporary memory;
+the only Python loop is over chunks, never over bars.
+
+Determinism: a bar's values are **bit-identical** whether the channel is computed on a prefix of the
+history or on the full history (``evaluate`` on a prefix == ``scan`` on everything, exactly). Every
+per-window sum is an elementwise product followed by a row ``sum(axis=1)`` over a C-contiguous copy of
+the chunk -- never a BLAS matrix-vector product (``dev @ xc``), whose rounding depends on the matrix
+shape (blocking/SIMD kernels) and made prefix and full results differ by ~1 ulp.
 
 Worked example (also a test): closes [1,3,2,5,4], n=5, k=2, ddof=0
     ybar=3, xc=[-2,-1,0,1,2], d=y-ybar=[-2,0,-1,2,1], sum(xc*d)=8, Sxx=10 -> slope=0.8
@@ -124,12 +130,14 @@ def rolling_regression_channel(close: Any, n: int = 100, k: float = 2.0, ddof: i
         rows = windows.shape[0]
         chunk = max(1, _CHUNK_ELEMENTS // n)
         for start in range(0, rows, chunk):  # loop over chunks of windows, not over bars
-            w = windows[start:start + chunk]
+            # C-contiguous copy of the chunk, so each row reduction below runs over one contiguous row in
+            # the same order whatever the chunk's row count (bit-identical prefix/full results, see doc).
+            w = np.ascontiguousarray(windows[start:start + chunk])
             ybar = w.mean(axis=1)
             dev = w - ybar[:, None]
-            slope = (dev @ xc) / sxx
+            slope = (dev * xc).sum(axis=1) / sxx  # elementwise + row sum; never BLAS (`@`/dot/einsum)
             resid = dev - slope[:, None] * xc
-            ssr = np.einsum("ij,ij->i", resid, resid)
+            ssr = (resid * resid).sum(axis=1)
             sigma = np.sqrt(ssr / (n - ddof))
             mid = ybar + slope * half_span
             block = out[n - 1 + start:n - 1 + start + len(w)]

@@ -95,3 +95,44 @@ not reachable and the cache may be missing recent bars.
 the cache: offset model/match ratio/live offset, symbol specs, and per series the 10 newest and 10 oldest
 bars in both UTC and broker server time (compare with the MT5 Data Window), history depth vs the 5-year
 target and gap counts.
+
+## Strategies and account settings (phase 2)
+
+- **Database:** SQLite `<data_dir>/alpha.db` (`ALPHA_TRADER_DATA_DIR`, default `<repo>/data/alpha.db`), stdlib
+  `sqlite3`, WAL, migrations in `alpha_engine/storage/db.py`. Opened by the app lifespan into `app.state.db`
+  and closed on shutdown; only the engine writes it. If it cannot be opened the error is logged, `/health`
+  keeps working and the routes below answer 503 `db_unavailable`. Tests always use a temp data dir.
+- **Registry:** `create_app` imports `alpha_engine.strategies`, which registers `stddev_channel` (code
+  version 1). Strategies are Python code; only their parameters are stored.
+- **Params versions:** the first read creates params version 1 from the schema defaults; saving a different
+  (validated) set creates version n+1 and makes it active; saving the same set keeps the version. Provenance
+  = strategy name + code version + params version + `params_hash` (sha256 of the canonical validated JSON).
+
+| Route | Response |
+|---|---|
+| `GET /strategies` | `[{name, title_fa, version, params_version, params, params_hash, params_saved_utc, param_schema: [{name, type, default, min, max, choices, step, label_fa, description_fa}], params_errors_fa}]` |
+| `GET /strategies/{name}` | one item as above; 404 `strategy_not_found` |
+| `PUT /strategies/{name}` | body `{"params": {...}}`, FULL replacement (missing keys take defaults) -> item + `created_new_version`; 422 `invalid_body` / `invalid_params` (Persian `errors_fa`, includes cross-field rules such as "at least one confirmation pattern") |
+| `GET /settings` | `{balance, risk_pct, leverage, rr}` (defaults `1000, 1.0, 100, 2.0` until the first update) |
+| `PUT /settings` | partial update, e.g. `{"risk_pct": 0.5}` -> new settings; 422 `invalid_settings` with Persian `errors_fa`. Bounds: `0 < balance <= 1e9`, `0 < risk_pct <= 10`, `1 <= leverage <= 1000` (integer), `0.1 <= rr <= 20` |
+
+Errors: `{"detail": {"code", "message_fa", "errors_fa": [...]}}`.
+
+For callers inside the engine: `alpha_engine.strategy.context.build_context(symbol, h1, h4, *, db, ...)` builds
+the `StrategyContext` from the active params and the stored account settings, keeping only H4 bars closed at
+the decision time (and, with `now_utc`, only closed H1 bars); `alpha_engine.risk.size_from_spec(candidate or
+(entry, sl), account, spec)` sizes a suggestion with a cached/live `SymbolSpec` (gold SL 5.00 -> 0.02 lots,
+margin 40; brent SL 0.50 -> 0.02 lots, margin 16 with balance 1000, risk 1 %, leverage 100).
+
+### Channel check tool (cache only, no MT5)
+
+```
+.venv\Scripts\python.exe -m alpha_engine.tools.channel_check_report --symbol XAUUSD.x --out <report.md> [--end <UTC ISO>] [--n 100] [--k 2] [--h1-bars 4] [--data-dir <dir>]
+```
+
+Persian report for comparing the engine's channel with MT5's *Standard Deviation Channel* object: the last
+`n` closed H4 bars ending at `--end` (default: last cached H4 bar), first/middle/last bar times in UTC and
+broker server time, the three lines at those bars for sigma `ddof=0` and `ddof=1`, slope, sigma, flatness
+vs ATR_H4(14) (Wilder = engine, SMA = MT5's built-in ATR), drawing/reading instructions for MT5, and the H1
+projection (`bar_count`, `calendar` for comparison) for the H1 bars decided with this channel. Exit codes:
+0 written, 1 not enough cached data, 2 invalid arguments. It never writes the cache.

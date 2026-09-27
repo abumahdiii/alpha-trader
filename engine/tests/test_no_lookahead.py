@@ -7,10 +7,8 @@
 (3) an H4 bar still forming at the decision time is never used (planted extreme bar), while the same
     extreme values in the last CLOSED H4 bar do change the decision (control).
 
-Float note: ``rolling_regression_channel`` computes the slope with a BLAS matrix-vector product whose
-rounding depends on the matrix shape, so channel values computed on a prefix and on the full history
-may differ by ~1 ulp. Decisions, setups, prices, SL/TP and reason text are compared exactly; the
-channel-derived floats in ``extra`` are compared to 1e-12 relative.
+Everything is compared EXACTLY, channel-derived floats in ``extra`` included: ``rolling_regression_channel``
+uses no BLAS product, so a bar's channel values are bit-identical on a prefix and on the full history.
 """
 
 from __future__ import annotations
@@ -65,6 +63,7 @@ def ctx_at(h1: pd.DataFrame, h4: pd.DataFrame, t: int, **kw) -> StrategyContext:
 
 
 def assert_same(a: SignalCandidate | None, b: SignalCandidate | None) -> None:
+    """Exact equality: every field, every ``extra`` float bit for bit (no tolerance)."""
     if a is None or b is None:
         assert a is b, (a, b)
         return
@@ -74,10 +73,12 @@ def assert_same(a: SignalCandidate | None, b: SignalCandidate | None) -> None:
     assert ea.keys() == eb.keys()
     for key, va in ea.items():
         vb = eb[key]
+        assert type(va) is type(vb), (key, va, vb)
         if isinstance(va, float):
-            assert math.isclose(va, vb, rel_tol=1e-12, abs_tol=1e-9), (key, va, vb)
+            assert math.copysign(1.0, va) == math.copysign(1.0, vb) and va == vb, (key, va, vb)
         else:
             assert va == vb, (key, va, vb)
+    assert a == b
 
 
 def _randomize(frame: pd.DataFrame, rows: np.ndarray, seed: int) -> pd.DataFrame:
@@ -133,7 +134,7 @@ def test_tail_computation_matches_full_history(walk) -> None:
         np.testing.assert_array_equal(tail.atr_h1[sl], full.atr_h1[sl])
         np.testing.assert_array_equal(tail.atr_h4[sl], full.atr_h4[sl])
         for name in ("mid", "upper", "lower", "slope", "sigma"):
-            np.testing.assert_allclose(getattr(tail, name)[sl], getattr(full, name)[sl], rtol=1e-12, atol=0)
+            np.testing.assert_array_equal(getattr(tail, name)[sl], getattr(full, name)[sl], err_msg=name)
         assert np.isnan(tail.mid[:start]).all()
 
 
