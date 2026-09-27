@@ -11,6 +11,7 @@ import 'package:provider/provider.dart';
 import 'package:alpha_trader/models/engine_health.dart';
 import 'package:alpha_trader/providers/engine_api_provider.dart';
 import 'package:alpha_trader/providers/engine_status_provider.dart';
+import 'package:alpha_trader/providers/shell_navigation.dart';
 import 'package:alpha_trader/services/engine_api.dart';
 import 'package:alpha_trader/services/engine_client.dart';
 import 'package:alpha_trader/services/engine_process.dart';
@@ -84,8 +85,7 @@ class FakeEngineHttp implements HttpClientAdapter {
   void close({bool force = false}) {}
 
   /// Requests to `"METHOD /path"`.
-  List<RequestOptions> sent(String route) =>
-      requests.where((r) => '${r.method} ${r.uri.path}' == route).toList();
+  List<RequestOptions> sent(String route) => requests.where((r) => '${r.method} ${r.uri.path}' == route).toList();
 
   /// Decoded JSON body of a request ([EngineApi] sends JSON text).
   static Object? bodyOf(RequestOptions r) => r.data == null ? null : jsonDecode(r.data as String);
@@ -100,8 +100,7 @@ ResponseBody jsonBody(Object body, [int status = 200]) => ResponseBody.fromStrin
     );
 
 /// The engine's `{"detail": {"code", "message_fa", "errors_fa"}}` error.
-ResponseBody engineError(int status, String code, String messageFa, [List<String> errorsFa = const []]) =>
-    jsonBody({
+ResponseBody engineError(int status, String code, String messageFa, [List<String> errorsFa = const []]) => jsonBody({
       'detail': {'code': code, 'message_fa': messageFa, 'errors_fa': errorsFa},
     }, status);
 
@@ -215,7 +214,9 @@ Map<String, Object?> strategyJson({
 /// Providers + MaterialApp (Persian locale, RTL) around [child], with an
 /// engine that becomes running on [start] and an [EngineApi] on [http].
 class EngineHarness {
-  EngineHarness({FakeEngineHttp? http}) : http = http ?? FakeEngineHttp() {
+  EngineHarness({FakeEngineHttp? http, ShellNavigation? navigation})
+      : http = http ?? FakeEngineHttp(),
+        navigation = navigation ?? ShellNavigation() {
     engine = EngineStatusProvider(launcher: NoProcessLauncher(), clientFactory: HealthyClient.new);
     apis = EngineApiProvider(
       engine: engine,
@@ -224,6 +225,7 @@ class EngineHarness {
   }
 
   final FakeEngineHttp http;
+  final ShellNavigation navigation;
   late final EngineStatusProvider engine;
   late final EngineApiProvider apis;
 
@@ -232,6 +234,7 @@ class EngineHarness {
           ChangeNotifierProvider(create: (_) => ThemeProvider(initialThemeMode: ThemeMode.light)),
           ChangeNotifierProvider<EngineStatusProvider>.value(value: engine),
           ChangeNotifierProvider<EngineApiProvider>.value(value: apis),
+          ChangeNotifierProvider<ShellNavigation>.value(value: navigation),
         ],
         child: Builder(
           builder: (context) => MaterialApp(
@@ -265,6 +268,7 @@ class EngineHarness {
     await tester.pumpWidget(const SizedBox.shrink());
     apis.dispose();
     engine.dispose();
+    navigation.dispose();
   }
 }
 
