@@ -167,6 +167,12 @@ class _ChartToolbar extends StatelessWidget {
   Widget build(BuildContext context) {
     final ChartController c = controller;
     final bool busy = c.isLoading;
+    final String? rangeError = c.rangeErrorFa;
+    // Highlight only an actionable button (an invalid range disables it).
+    final bool dirty = c.rangeDirty && rangeError == null;
+    final VoidCallback? onLoad = busy || c.symbol == null || rangeError != null ? null : c.load;
+    const Icon loadIcon = Icon(Icons.refresh, size: 18);
+    const Text loadLabel = Text('به‌روزرسانی نمودار');
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       child: Wrap(
@@ -205,12 +211,33 @@ class _ChartToolbar extends StatelessWidget {
             icon: const Icon(Icons.event, size: 18),
             label: Text('تا ${c.to == null ? '—' : formatDate(c.to!)}'),
           ),
-          ElevatedButton.icon(
-            key: const ValueKey<String>('chart-load'),
-            onPressed: busy || c.symbol == null ? null : c.load,
-            icon: const Icon(Icons.download, size: 18),
-            label: const Text('بارگذاری'),
-          ),
+          if (dirty)
+            Tooltip(
+              key: const ValueKey<String>('chart-range-dirty'),
+              message: 'بازه تغییر کرده؛ برای دیدن نمودار جدید به‌روزرسانی کنید',
+              child: Badge(
+                smallSize: 8,
+                child: FilledButton.icon(
+                  key: const ValueKey<String>('chart-load'),
+                  onPressed: onLoad,
+                  icon: loadIcon,
+                  label: loadLabel,
+                ),
+              ),
+            )
+          else
+            ElevatedButton.icon(
+              key: const ValueKey<String>('chart-load'),
+              onPressed: onLoad,
+              icon: loadIcon,
+              label: loadLabel,
+            ),
+          if (rangeError != null)
+            Text(
+              rangeError,
+              key: const ValueKey<String>('chart-range-error'),
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: context.appColors.error),
+            ),
           IconButton(
             key: const ValueKey<String>('chart-reset-zoom'),
             tooltip: 'بازنشانی زوم (آخرین کندل‌ها)',

@@ -53,6 +53,14 @@ Offset _at(WidgetTester tester, int index, double price) {
   return origin + Offset(s.viewport!.xOf(index), s.priceScale!.yOf(price));
 }
 
+const ValueKey<String> _loadKey = ValueKey<String>('chart-load');
+
+/// Lets the fake source's futures complete after a button tap.
+Future<void> _settleLoad(WidgetTester tester) async {
+  await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+  await tester.pumpAndSettle();
+}
+
 void main() {
   testWidgets('31k H1 bars: builds, paints only the visible range, pans and zooms', (WidgetTester tester) async {
     final FakeChartDataSource src = FakeChartDataSource(h1Count: 31000);
@@ -126,6 +134,52 @@ void main() {
     expect(c.selectedSetupId, m.item.id);
     expect(find.text(m.item.reasonFa), findsOneWidget);
     expect(find.text('این فقط پیشنهاد است؛ برنامه هیچ سفارشی ثبت نمی‌کند.'), findsOneWidget);
+  });
+
+  testWidgets('update button: label, dirty highlight after a range change, cleared by the load',
+      (WidgetTester tester) async {
+    final FakeChartDataSource src = FakeChartDataSource(h1Count: 1200);
+    final ChartController c = await _pump(tester, src);
+    expect(find.descendant(of: find.byKey(_loadKey), matching: find.text('به‌روزرسانی نمودار')), findsOneWidget);
+    expect(find.text('بارگذاری'), findsNothing);
+    expect(tester.widget(find.byKey(_loadKey)), isNot(isA<FilledButton>()));
+    expect(find.byKey(const ValueKey<String>('chart-range-dirty')), findsNothing);
+
+    c.setRange(from: c.from!.subtract(const Duration(days: 5)));
+    await tester.pump();
+    expect(c.rangeDirty, isTrue);
+    expect(tester.widget(find.byKey(_loadKey)), isA<FilledButton>());
+    expect(find.byKey(const ValueKey<String>('chart-range-dirty')), findsOneWidget);
+    expect(find.byTooltip('بازه تغییر کرده؛ برای دیدن نمودار جدید به‌روزرسانی کنید'), findsOneWidget);
+
+    await tester.tap(find.byKey(_loadKey));
+    await _settleLoad(tester);
+    expect(c.rangeDirty, isFalse);
+    expect(tester.widget(find.byKey(_loadKey)), isNot(isA<FilledButton>()));
+    expect(find.byKey(const ValueKey<String>('chart-range-dirty')), findsNothing);
+  });
+
+  testWidgets('start after end: Persian error, update disabled, no request', (WidgetTester tester) async {
+    final FakeChartDataSource src = FakeChartDataSource(h1Count: 1200);
+    final ChartController c = await _pump(tester, src);
+    final DateTime to = c.to!;
+    c.setRange(from: to.add(const Duration(days: 2)));
+    await tester.pump();
+    expect(c.from, to.add(const Duration(days: 2)), reason: 'setRange keeps the pick');
+    expect(find.byKey(const ValueKey<String>('chart-range-error')), findsOneWidget);
+    expect(find.text(kRangeOrderErrorFa), findsOneWidget);
+    expect(tester.widget<ButtonStyleButton>(find.byKey(_loadKey)).onPressed, isNull);
+
+    src.calls.clear();
+    await tester.runAsync(c.load);
+    await tester.pumpAndSettle();
+    expect(src.calls, isEmpty);
+    expect(c.state, ChartLoadState.ready);
+
+    c.setRange(from: to.subtract(const Duration(days: 3)));
+    await tester.pump();
+    expect(find.byKey(const ValueKey<String>('chart-range-error')), findsNothing);
+    expect(tester.widget<ButtonStyleButton>(find.byKey(_loadKey)).onPressed, isNotNull);
   });
 
   testWidgets('setup table row tap jumps the chart to the setup and highlights it', (WidgetTester tester) async {

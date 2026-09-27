@@ -77,6 +77,7 @@ const String kEngineUnavailableFa =
     'موتور تحلیل در دسترس نیست. صبر کنید تا نشانگر موتور «فعال» شود و دوباره تلاش کنید.';
 const String kEmptyRangeFa = 'در این بازه هیچ کندلی در کش نیست. بازه دیگری انتخاب کنید یا داده را به‌روز کنید.';
 const String kUnexpectedErrorFa = 'خطای غیرمنتظره در دریافت داده چارت.';
+const String kRangeOrderErrorFa = 'تاریخ شروع باید قبل از تاریخ پایان باشد.';
 
 /// State of the chart page: inputs (symbol, timeframe, UTC date range),
 /// loading/error/empty states, the loaded [ChartData], setup selection and
@@ -109,6 +110,19 @@ class ChartController extends ChangeNotifier {
   bool _updating = false;
   UpdateOutcome? _updateOutcome;
 
+  // Inputs of the last load() that went out (snapshot at its start), for
+  // the «به‌روزرسانی نمودار» highlight.
+  bool _hasLoaded = false;
+  String? _loadedSymbol;
+  ChartTimeframe? _loadedTimeframe;
+  DateTime? _loadedFrom;
+  DateTime? _loadedTo;
+
+  /// setSymbol/setTimeframe load by themselves; until that load starts the
+  /// selection is not "dirty" (no highlight flicker while the meta arrives).
+  bool _autoLoadPending = false;
+  bool _wasDirty = false;
+
   int _loadSerial = 0;
   int _infoSerial = 0;
   int _metaSerial = 0;
@@ -139,6 +153,22 @@ class ChartController extends ChangeNotifier {
   bool get updating => _updating;
   UpdateOutcome? get updateOutcome => _updateOutcome;
   bool get isLoading => _state == ChartLoadState.loading;
+
+  /// True when the selected symbol / timeframe / range differs from what the
+  /// chart currently shows, i.e. «به‌روزرسانی نمودار» would change it.
+  bool get rangeDirty =>
+      _hasLoaded &&
+      !_autoLoadPending &&
+      (_symbol != _loadedSymbol || _timeframe != _loadedTimeframe || _from != _loadedFrom || _to != _loadedTo);
+
+  /// Persian validation error of the selected range (start after end), or
+  /// null. [setRange] accepts it (from and to are picked one after the
+  /// other); [load] refuses it.
+  String? get rangeErrorFa {
+    final DateTime? from = _from;
+    final DateTime? to = _to;
+    return (from != null && to != null && from.isAfter(to)) ? kRangeOrderErrorFa : null;
+  }
 
   int? get digits {
     for (final SymbolItem s in _symbols) {
@@ -180,6 +210,7 @@ class ChartController extends ChangeNotifier {
     _resetSelection();
     _dataInfo = null;
     _updateOutcome = null;
+    _autoLoadPending = true;
     notifyListeners();
     await _applyDefaultRange();
     await load();
@@ -192,12 +223,15 @@ class ChartController extends ChangeNotifier {
     _timeframe = tf;
     _resetSelection();
     _dataInfo = null;
+    _autoLoadPending = true;
     notifyListeners();
     await load();
     unawaited(refreshDataInfo());
   }
 
-  /// Sets the UTC range without loading (the «بارگذاری» button loads).
+  /// Sets the UTC range without loading: the «به‌روزرسانی نمودار» button
+  /// loads it ([rangeDirty] highlights it meanwhile). A start after the end
+  /// is kept as picked and reported by [rangeErrorFa] instead of rejected.
   void setRange({DateTime? from, DateTime? to}) {
     _from = from?.toUtc() ?? _from;
     _to = to?.toUtc() ?? _to;
@@ -240,14 +274,26 @@ class ChartController extends ChangeNotifier {
   // ------------------------------------------------------------ loading
 
   /// Loads bars + channel (+ setups on H1) for the current inputs. A newer
-  /// call makes older in-flight responses stale; they are dropped.
+  /// call makes older in-flight responses stale; they are dropped. An
+  /// invalid range ([rangeErrorFa]) is refused without any request.
   Future<void> load() async {
     final String? symbol = _symbol;
     if (symbol == null) return;
+    _autoLoadPending = false;
+    if (rangeErrorFa != null) {
+      _log('load refused: invalid range ${formatUtc(_from!)} > ${formatUtc(_to!)}');
+      notifyListeners();
+      return;
+    }
     final int serial = ++_loadSerial;
     final ChartTimeframe tf = _timeframe;
     final DateTime? from = _from;
     final DateTime? to = _to;
+    _hasLoaded = true;
+    _loadedSymbol = symbol;
+    _loadedTimeframe = tf;
+    _loadedFrom = from;
+    _loadedTo = to;
     final Stopwatch sw = Stopwatch()..start();
     _log('load #$serial $symbol ${tf.code} ${from ?? 'default'} .. ${to ?? 'default'}');
     _setState(ChartLoadState.loading);
@@ -347,6 +393,7 @@ class ChartController extends ChangeNotifier {
       final Duration half = Duration(milliseconds: defaultWindow.inMilliseconds ~/ 2);
       _from = t.toUtc().subtract(half);
       _to = t.toUtc().add(half);
+      _autoLoadPending = true;
       notifyListeners();
       await load();
     }
@@ -442,6 +489,24 @@ class ChartController extends ChangeNotifier {
       await load();
     }
   }
+
+  /// Logs [rangeDirty] transitions (every state change goes through here).
+  @override
+  void notifyListeners() {
+    if (kDevMode) {
+      final bool dirty = rangeDirty;
+      if (dirty != _wasDirty) {
+        _wasDirty = dirty;
+        _log(dirty
+            ? 'range dirty: selection $_symbol ${_timeframe.code} ${_fmt(_from)} .. ${_fmt(_to)} != loaded '
+                '$_loadedSymbol ${_loadedTimeframe?.code} ${_fmt(_loadedFrom)} .. ${_fmt(_loadedTo)}'
+            : 'range clean: selection = loaded');
+      }
+    }
+    super.notifyListeners();
+  }
+
+  static String _fmt(DateTime? t) => t == null ? '-' : formatUtc(t);
 
   void _log(String message) {
     if (!kDevMode) return;
