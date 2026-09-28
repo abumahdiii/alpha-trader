@@ -240,10 +240,43 @@ def engine_dir() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _is_venv_launcher(path: str) -> bool:
+    """``<venv>/Scripts/python.exe`` (or ``<venv>/bin/python``): its grandparent holds ``pyvenv.cfg``."""
+    return os.path.isfile(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(path))), "pyvenv.cfg"))
+
+
+def worker_interpreter() -> str:
+    """The REAL interpreter binary for the worker (never a venv redirector).
+
+    On Windows ``<venv>\\Scripts\\python.exe`` is a launcher that starts the base interpreter as a CHILD process.
+    The worker's Job Object allows exactly ONE active process, so the launcher's child is refused and the launcher
+    exits with code 101 -- the worker never starts. Therefore the worker is spawned with the base interpreter
+    (``sys._base_executable``, else ``<sys.base_prefix>/python.exe``). It does not need the venv's ``site``: the
+    parent sends its own ``sys.path`` (including the venv's site-packages) in the ``go`` line, and the flags
+    ``-E -s -S`` ignore the environment, user site and ``.pth`` files anyway. The one-process cap stays.
+
+    Worked example (this project): parent ``engine\\.venv\\Scripts\\python.exe`` -> worker
+    ``E:\\Programs\\minicoda\\python.exe``. Frozen builds are handled by :func:`worker_command` (``sys.executable``
+    is the real exe). If no base binary can be found, ``sys.executable`` is returned and the worker fails closed
+    under the job's process cap (reported as ``crashed``), never runs without it."""
+    candidates = [getattr(sys, "_base_executable", None)]
+    base_prefix = getattr(sys, "base_prefix", None)
+    if base_prefix:
+        names = ("python.exe",) if os.name == "nt" else (f"python{sys.version_info.major}.{sys.version_info.minor}",
+                                                         f"python{sys.version_info.major}", "python")
+        for name in names:
+            candidates.append(os.path.join(base_prefix, name) if os.name == "nt"
+                              else os.path.join(base_prefix, "bin", name))
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and not _is_venv_launcher(candidate):
+            return os.path.abspath(candidate)
+    return sys.executable
+
+
 def worker_command() -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, WORKER_FLAG]
-    return [sys.executable, "-E", "-s", "-S", "-B", "-m", "alpha_engine", WORKER_FLAG]
+    return [worker_interpreter(), "-E", "-s", "-S", "-B", "-m", "alpha_engine", WORKER_FLAG]
 
 
 def worker_env() -> dict[str, str]:
