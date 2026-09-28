@@ -22,6 +22,11 @@ From this directory, with the project venv (after the user has approved the envi
 
 Then `GET http://127.0.0.1:8765/health`.
 
+## Package (release)
+
+Frozen with PyInstaller (onedir) for machines without Python: see `packaging/README.md` (build steps
+need the user's permission; `requirements-build.txt` is build-only).
+
 ## Test
 
 ```
@@ -48,8 +53,8 @@ Read from the OS environment first, then from `<repo>/.env` (OS environment wins
 | `MT5_SERVER_UTC_OFFSET` | - | Fixed broker offset override in hours (-14..14, no DST). Unset = automatic (see below) |
 | `ENGINE_MT5_AUTOCONNECT` | `true` | Connect to MT5 in the background on startup (`false`/`0`/`no`/`off` disables) |
 | `ENGINE_SYMBOLS` | `XAUUSD.x,BRNUSD.x` | Symbols served by `/symbols` and `/rates` |
-| `ALPHA_TRADER_DATA_DIR` | `<repo>/data` | Cache, database and results |
-| `ALPHA_TRADER_ENV_FILE` | `<repo>/.env` | Alternative `.env` path |
+| `ALPHA_TRADER_DATA_DIR` | `<repo>/data` (frozen: `<app>/user_data`) | Cache, database and results |
+| `ALPHA_TRADER_ENV_FILE` | `<repo>/.env` (frozen: `<app>/.env`) | Alternative `.env` path |
 | `ALPHA_DATA_CHECK_CONFIRMED` | `false` | `true` once the user confirmed the raw-data check: backtests are no longer labelled «موقت تا تایید چک داده» (`provisional`) |
 
 ## Market data (phase 1)
