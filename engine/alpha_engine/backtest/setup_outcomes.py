@@ -70,6 +70,7 @@ import pandas as pd
 from ..data.symbols import SymbolSpec
 from ..logging_setup import get_logger, is_dev_mode
 from ..storage.account_settings import AccountSettings
+from ..strategy.base import WarmupTextsFa
 from ..strategy.signal import SignalCandidate
 from .history import HistoryData, ScanResult
 from .metrics import compute_metrics
@@ -81,7 +82,7 @@ from .models import (
     Trade,
     WindowResult,
 )
-from .periods import PeriodError, data_end, earliest_start, manual_window, warmup_h4_bars
+from .periods import DEFAULT_WARMUP_TEXTS_FA, PeriodError, data_end, earliest_start, manual_window
 from .runner import run_backtest
 from .simulator import (
     BarArrays,
@@ -180,7 +181,7 @@ def _log(outcome: SetupOutcome) -> SetupOutcome:
         c = outcome.candidate
         if outcome.trade is None:
             rej = outcome.rejection
-            logger.debug("setup outcome %s %s %s decision %s: %s %s (%s)", c.symbol, c.direction, c.setup.value,
+            logger.debug("setup outcome %s %s %s decision %s: %s %s (%s)", c.symbol, c.direction, c.setup_slug,
                          c.decision_time_utc.isoformat(), outcome.status, rej.reason.value if rej else "-",
                          rej.detail if rej else "-")
         else:
@@ -188,7 +189,7 @@ def _log(outcome: SetupOutcome) -> SetupOutcome:
             assert pos is not None
             logger.debug("setup outcome %s %s %s decision %s: entry=%.5f (bid open %.5f, spread %d pts %s) SL=%.5f "
                          "TP=%.5f vol=%g risk=%.4f -> %s/%s exit %s @ %.5f pnl_price=%.5f gross=%.4f commission=%.4f "
-                         "net=%.4f R=%s bars=%d", c.symbol, c.direction, c.setup.value, c.decision_time_utc.isoformat(),
+                         "net=%.4f R=%s bars=%d", c.symbol, c.direction, c.setup_slug, c.decision_time_utc.isoformat(),
                          tr.entry, tr.entry_bid_open, tr.spread_at_entry_points, pos.spread_source, tr.stop_loss,
                          tr.take_profit, tr.volume, tr.risk_amount, outcome.result, tr.exit_reason.value,
                          tr.exit_time.isoformat(), tr.exit_price, outcome.pnl_price or 0.0, tr.gross_pnl,
@@ -284,32 +285,36 @@ def backtest_window_for_range(
     h1_times_ns: np.ndarray,
     h4_times_ns: np.ndarray,
     first_valid: int | None,
-    atr_period: int,
+    margin_h4_bars: int,
+    *,
+    texts: WarmupTextsFa | None = None,
 ) -> RangeWindow:
     """Window for the decision range ``[range_from, range_to]`` (module docstring), clipped and validated
-    exactly like ``POST /backtests`` (``periods.earliest_start`` + ``periods.manual_window``)."""
+    exactly like ``POST /backtests`` (``periods.earliest_start`` + ``periods.manual_window``) with the strategy's
+    warm-up margin (``Strategy.warmup_margin_h4_bars``) and wording (``Strategy.warmup_texts_fa``)."""
     if range_from is None or range_to is None or not len(h1_times_ns):
         return RangeWindow(False, None, None, None, None, code="no_data", message_fa="داده‌ای برای بک‌تست در کش نیست.")
     start = range_from.ceil("h") - H1
     end = range_to.floor("h")
     req = (start.to_pydatetime(), end.to_pydatetime())
-    warm = warmup_h4_bars(atr_period)
+    warm = int(margin_h4_bars)
+    tx = texts if texts is not None else DEFAULT_WARMUP_TEXTS_FA
     try:
-        earliest = earliest_start(h1_times_ns, h4_times_ns, first_valid, atr_period)
+        earliest = earliest_start(h1_times_ns, h4_times_ns, first_valid, warm, texts=tx)
         last = data_end(h1_times_ns)
         if end <= earliest:  # the whole range is before the earliest start: the POST error itself
-            manual_window(start, end, h1_times_ns, earliest, warmup_bars=warm)
+            manual_window(start, end, h1_times_ns, earliest, warmup_bars=warm, texts=tx)
             raise PeriodError("window_too_early", "بازه قبل از اولین زمان مجاز بک‌تست است.")  # pragma: no cover
         if start >= last:
             raise PeriodError("window_beyond_data", f"بازه بعد از آخرین داده کش ({_fmt(last)}) است.")
         notes: list[str] = []
         if start < earliest:
             start = earliest
-            notes.append(f"ابتدای بازه بک‌تست به اولین زمان مجاز ({_fmt(earliest)}) منتقل شد (گرم شدن کانال و ATR).")
+            notes.append(f"ابتدای بازه بک‌تست به اولین زمان مجاز ({_fmt(earliest)}) منتقل شد ({tx.clip_reason}).")
         if end > last:
             end = last
             notes.append(f"انتهای بازه بک‌تست به آخرین داده کش ({_fmt(last)}) محدود شد.")
-        manual_window(start, end, h1_times_ns, earliest, warmup_bars=warm)
+        manual_window(start, end, h1_times_ns, earliest, warmup_bars=warm, texts=tx)
     except PeriodError as exc:
         if is_dev_mode():
             logger.debug("setups backtest window %s..%s unavailable: %s", req[0].isoformat(), req[1].isoformat(),
@@ -338,10 +343,14 @@ def run_range_backtest(
     cost_model: CostModel,
     provisional: bool = True,
 ) -> WindowResult:
-    """The manual backtest of ``window`` exactly as the job worker runs it (``runner.run_backtest``)."""
+    """The manual backtest of ``window`` exactly as the job worker runs it (``runner.run_backtest``; the strategy
+    is the one that made ``scan``, whose identity goes into the config)."""
     assert window.available and window.start is not None and window.end is not None
+    ident = scan.identity
     config = RunConfig(symbol=history.symbol, mode="manual", start=window.start, end=window.end, cost_model=cost_model,
-                       account=account, strategy_name=strategy_name, strategy_version=strategy_version, params=params,
+                       account=account, strategy_name=strategy_name, strategy_version=strategy_version,
+                       strategy_sha256=None if ident is None else ident.sha256,
+                       strategy_source=None if ident is None else ident.source, params=params,
                        params_version=params_version, params_hash=params_hash, provisional=provisional)
     result = run_backtest(config, history, scan, bars=bars)
     return result.windows[0]

@@ -1,7 +1,7 @@
 """Bar-by-bar trade simulation over the H1 bars of ONE window (phase-4 decisions 1-5).
 
 Decisions come from a *candidate provider* ``candidate_at(i, has_open_trade)``: in production the
-precomputed full-history ``StdDevChannelStrategy.scan`` (``history.scan_full_history``) indexed by the
+precomputed full-history ``Strategy.scan`` of the run's strategy (``history.scan_full_history``) indexed by the
 confirmation bar; in the equivalence test a per-bar ``evaluate`` on ``h1[:i+1]`` + closed H4 bars. Both give
 the same trades (tests/test_backtest_equivalence.py).
 
@@ -393,7 +393,7 @@ def settle(
             flags.append(f"exit_spread_{src}")
     cand = tr.cand
     return Trade(
-        window_index=window_index, trade_index=trade_index, direction=cand.direction, setup_type=cand.setup.value,
+        window_index=window_index, trade_index=trade_index, direction=cand.direction, setup_type=cand.setup_slug,
         line=cand.line, pattern=cand.pattern, confirmation_bar_time=cand.confirmation_bar_open_utc,
         decision_time=cand.decision_time_utc, entry_time=ns_to_dt(entry_ns), entry=tr.entry,
         entry_bid_open=tr.entry_bid_open, stop_loss=tr.sl, take_profit=tr.tp, rr=cand.rr, volume=tr.volume,
@@ -453,12 +453,12 @@ def simulate_window(
     def skip(cand: SignalCandidate, reason: SkipReason, detail: str | None, reason_fa: str | None = None) -> None:
         skipped.append(SkippedCandidate(
             window_index=wi, time=cand.decision_time_utc, confirmation_bar_time=cand.confirmation_bar_open_utc,
-            direction=cand.direction, setup_type=cand.setup.value, reason=reason,
+            direction=cand.direction, setup_type=cand.setup_slug, reason=reason,
             reason_fa=reason_fa or SKIP_REASON_FA[reason], detail=detail,
         ))
         if dev:
             logger.debug("bt w%d %s: %s %s skipped: %s (%s)", wi, cand.decision_time_utc.isoformat(), cand.direction,
-                         cand.setup.value, reason.value, detail)
+                         cand.setup_slug, reason.value, detail)
 
     def close_trade(tr: OpenPosition, i: int, price: float, reason: ExitReason, exit_ns: int) -> None:
         nonlocal balance, weekend_holds
@@ -486,7 +486,7 @@ def simulate_window(
             assert sizing is not None
             logger.debug("bt w%d fill %s %s @ %s: bid open=%.5f spread=%d pts (%.5f)%s fill=%.5f SL=%.5f TP=%.5f "
                          "balance=%.2f risk=%.2f vol=%g (raw %.6f) actual_risk=%.4f margin=%.2f commission=%.4f", wi,
-                         cand.direction, cand.setup.value, ns_to_dt(TIMES[i]).isoformat(), opened.entry_bid_open,
+                         cand.direction, cand.setup_slug, ns_to_dt(TIMES[i]).isoformat(), opened.entry_bid_open,
                          SPTS[i], SPR[i], "" if opened.spread_source == "historical" else f" [{opened.spread_source}]",
                          opened.entry, opened.sl, opened.tp, balance, sizing.risk_amount, sizing.volume,
                          sizing.raw_volume, sizing.actual_risk, sizing.margin, opened.commission)
@@ -531,7 +531,7 @@ def simulate_window(
             n_candidates += 1
             if dev:
                 logger.debug("bt w%d decision @ %s: candidate %s %s line=%s ref=%.5f SL=%.5f open_trade=%s", wi,
-                             cand.decision_time_utc.isoformat(), cand.direction, cand.setup.value, cand.line,
+                             cand.decision_time_utc.isoformat(), cand.direction, cand.setup_slug, cand.line,
                              cand.reference_price, cand.stop_loss, trade is not None)
             if trade is not None:
                 skip(cand, SkipReason.POSITION_OPEN,

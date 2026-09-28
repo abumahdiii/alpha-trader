@@ -175,7 +175,8 @@ def start_backtest_jobs(app: FastAPI) -> Any:
     except Exception as exc:
         logger.error("backtest runs could not be checked at startup (%s: %s)", type(exc).__name__, exc)
         return None
-    jobs = BacktestJobs(db, app.state.market_data.cache, getattr(app.state, "chart_cache", None))
+    jobs = BacktestJobs(db, app.state.market_data.cache, getattr(app.state, "chart_cache", None),
+                        registry=getattr(app.state, "strategy_registry", None))
     if is_dev_mode():
         logger.debug("startup: backtest jobs ready (%d stale run(s) marked interrupted)", stale)
     return jobs

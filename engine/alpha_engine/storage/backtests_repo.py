@@ -43,11 +43,14 @@ ACTIVE_STATUSES: frozenset[str] = frozenset({"queued", "running"})
 TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "error", "cancelled", "interrupted"})
 INTERRUPTED_FA = "اجرا با بسته شدن engine نیمه‌کاره ماند و ادامه داده نمی‌شود؛ دوباره اجرا کنید."
 
+# strategy_sha256 / strategy_source live in the stored RunConfig snapshot (strategy contract S1; no schema
+# change): NULL for configs stored before these fields existed or for built-in strategies without a hash.
 _SUMMARY_COLUMNS = (
     "id, created_utc, started_utc, finished_utc, status, progress, error_code, error_message_fa, symbol, mode, "
     "period_start_utc, period_end_utc, windows_count, window_months, seed, seed_generated, strategy_name, "
     "strategy_version, params_version, params_hash, provisional, trade_count, net_profit, net_profit_pct, "
-    "elapsed_s"
+    "elapsed_s, json_extract(config_json, '$.strategy_sha256') AS strategy_sha256, "
+    "json_extract(config_json, '$.strategy_source') AS strategy_source"
 )
 
 

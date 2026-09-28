@@ -22,17 +22,22 @@ Worker steps and the overall percent reported to the UI (the simulator's own 0..
 simulating band)::
 
     loading    0 ->  3 %   cached H1/H4 + spec (never MT5), bar arrays, gaps
-    scanning   3 -> 15 %   StdDevChannelStrategy.scan over the FULL history (runner.run_backtest input)
+    scanning   3 -> 15 %   Strategy.scan of the run's strategy over the FULL history (runner.run_backtest input)
     simulating 15 -> 95 %  runner.run_backtest progress_cb (every PROGRESS_EVERY bars + window ends)
     saving     95 -> 100 % metrics (full equity) + ONE result transaction
 
+The strategy of a run is the instance ``POST /backtests`` resolved (``submit(..., strategy=...)``), else the
+class registered under ``config.strategy_name`` in the jobs' registry (the app's ``strategy_registry``); it
+is checked against the config (``runner.check_config``) before anything is scanned.
+
 Prepared data is shared through a bounded LRU (the app's ``ChartCache`` instance): the history + bar arrays
 keyed by symbol and the identity (file id, mtime, size) of the H1/H4 Parquet files and the spec JSON; the
-first valid channel bar keyed additionally by the params hash; the full-history scan by params hash and
-R:R. A cache write is a new file identity, i.e. a new key. ``/chart/setups`` uses the same history, bar
-arrays and scan entries (``prepare_history`` / ``scan_for`` / ``bars_for_cost``), so the chart's setups
-and a backtest are the very same candidate objects; the chart keeps its own scan only when the symbol spec
-is missing.
+first valid bar keyed additionally by the STRATEGY IDENTITY (name, code version, source SHA-256) and the
+params hash; the full-history scan by strategy identity, params hash and R:R -- two strategies whose params
+happen to hash alike never share an entry. A cache write is a new file identity, i.e. a new key.
+``/chart/setups`` uses the same history, bar arrays and scan entries (``prepare_history`` / ``scan_for`` /
+``bars_for_cost``), so the chart's setups and a backtest are the very same candidate objects; the chart keeps
+its own scan only when the symbol spec is missing.
 
 Errors end the run ``error`` with a code and a Persian message: ``PeriodError`` / ``HistoryUnavailable``
 keep their codes (``window_too_early``, ``data_too_short``, ``no_data``, ``spec_missing``, ...),
@@ -50,15 +55,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-import numpy as np
-
 from ..data.cache import OhlcvCache
 from ..data.schema import Timeframe
 from ..logging_setup import get_logger, is_dev_mode
 from ..storage.backtests_repo import ACTIVE_STATUSES, INTERRUPTED_FA, TERMINAL_STATUSES, BacktestsRepo
 from ..storage.db import EngineConnection
-from ..strategies.stddev_channel import StdDevChannelStrategy, resolve_params
-from ..strategies.stddev_channel.setups import compute_channel_bars
+from ..strategy.base import Strategy
+from ..strategy.registry import StrategyRegistry
 from .history import (
     HistoryData,
     HistoryUnavailable,
@@ -72,7 +75,7 @@ from ..storage.account_settings import AccountSettings
 from .models import CostModel, RunConfig
 from .periods import PeriodError
 from .results import build_run_output
-from .runner import BacktestCancelled, RunConfigError, run_backtest
+from .runner import BacktestCancelled, RunConfigError, check_config, run_backtest, strategy_for_config
 from .simulator import BarArrays
 
 logger = get_logger(__name__)
@@ -145,17 +148,19 @@ def prepare_history(cache: OhlcvCache, symbol: str, lru: LruLike | None = None) 
     return value
 
 
-def first_valid_index(prepared: PreparedHistory, params: dict[str, Any], params_hash: str,
+def first_valid_index(prepared: PreparedHistory, strategy: Strategy, params: dict[str, Any], params_hash: str,
                       lru: LruLike | None = None) -> int | None:
-    """First H1 bar whose channel and ATRs are defined (same code as ``history.scan_full_history``)."""
+    """``strategy.first_valid_index`` on the full history (the value ``history.scan_full_history`` stores),
+    cached per strategy identity + params hash."""
+    ident = strategy.identity
 
     def compute() -> int | None:
-        p, _ = resolve_params(params)
-        cb = compute_channel_bars(prepared.history.h1, prepared.history.h4, p, pattern_from=None)
-        valid = np.flatnonzero(cb.valid)
-        return int(valid[0]) if len(valid) else None
+        return strategy.first_valid_index(prepared.history.h1, prepared.history.h4, params)
 
-    value, _ = _lru(lru).get_or_compute(("bt_first_valid", prepared.key, params_hash), compute)
+    value, hit = _lru(lru).get_or_compute(("bt_first_valid", prepared.key, ident.cache_key, params_hash), compute)
+    if is_dev_mode():
+        logger.debug("backtest first valid bar %s %s params %s: %s (%s)", prepared.history.symbol, ident.label(),
+                     params_hash[:12], value, "cache hit" if hit else "computed")
     return value
 
 
@@ -171,26 +176,30 @@ def bars_for(prepared: PreparedHistory, config: RunConfig) -> BarArrays:
     return bars_for_cost(prepared, config.cost_model)
 
 
-def scan_for(prepared: PreparedHistory, *, symbol: str, params: dict[str, Any], params_hash: str,
-             account: AccountSettings, lru: LruLike | None = None) -> ScanResult:
+def scan_for(prepared: PreparedHistory, *, strategy: Strategy, symbol: str, params: dict[str, Any],
+             params_hash: str, account: AccountSettings, lru: LruLike | None = None) -> ScanResult:
     """Full-history scan shared by the backtest runs and ``/chart/setups`` (same LRU entry, same candidate
-    objects): keyed by the prepared data, the params hash and the R:R (the only account field a candidate
-    carries)."""
+    objects): keyed by the prepared data, the strategy identity (name, code version, source SHA-256), the
+    params hash and the R:R (the only account field a candidate carries)."""
+    ident = strategy.identity
 
     def compute() -> ScanResult:
-        return scan_full_history(StdDevChannelStrategy(), prepared.history.h1, prepared.history.h4, params,
-                                 account, symbol=symbol)
+        return scan_full_history(strategy, prepared.history.h1, prepared.history.h4, params, account, symbol=symbol)
 
-    value, hit = _lru(lru).get_or_compute(("bt_scan", prepared.key, params_hash, account.rr), compute)
+    value, hit = _lru(lru).get_or_compute(("bt_scan", prepared.key, ident.cache_key, params_hash, account.rr),
+                                          compute)
     if is_dev_mode():
-        logger.debug("backtest scan %s: %s (%d candidates)", symbol, "cache hit" if hit else "computed",
-                     len(value.candidates))
+        logger.debug("backtest scan %s %s params %s rr=%g: %s (%d candidates)", symbol, ident.label(),
+                     params_hash[:12], account.rr, "cache hit" if hit else "computed", len(value.candidates))
     return value
 
 
-def full_scan(prepared: PreparedHistory, config: RunConfig, lru: LruLike | None = None) -> ScanResult:
-    return scan_for(prepared, symbol=config.symbol, params=config.params, params_hash=config.params_hash,
-                    account=config.account, lru=lru)
+def full_scan(prepared: PreparedHistory, config: RunConfig, lru: LruLike | None = None,
+              strategy: Strategy | None = None) -> ScanResult:
+    """The run's scan (``strategy`` default: the registered class named ``config.strategy_name``)."""
+    strategy = strategy if strategy is not None else strategy_for_config(config)
+    return scan_for(prepared, strategy=strategy, symbol=config.symbol, params=config.params,
+                    params_hash=config.params_hash, account=config.account, lru=lru)
 
 
 # ---------------------------------------------------------------------------------------------- job state
@@ -210,6 +219,7 @@ class JobState:
     net_profit_pct: float | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
     seed_generated: bool = False  # random run whose seed the engine drew at submit time (config.seed)
+    strategy: Strategy | None = None  # the instance POST /backtests resolved (None: from the registry)
     shutdown: bool = False
     future: Future | None = None
     version: int = 0
@@ -238,6 +248,7 @@ class BacktestJobs:
         cache: OhlcvCache,
         lru: LruLike | None = None,
         *,
+        registry: StrategyRegistry | None = None,
         progress_db_interval_s: float = PROGRESS_DB_INTERVAL_S,
         progress_db_step: float = PROGRESS_DB_STEP,
         clock: Callable[[], float] = time.monotonic,
@@ -245,6 +256,7 @@ class BacktestJobs:
         self.repo = BacktestsRepo(db)
         self.cache = cache
         self.lru: LruLike = lru if lru is not None else _NoCache()
+        self.registry = registry  # None: the process-wide registry (strategy.resolve.strategy_for)
         self._interval = progress_db_interval_s
         self._step = progress_db_step
         self._clock = clock
@@ -258,23 +270,27 @@ class BacktestJobs:
     def closing(self) -> bool:
         return self._closing
 
-    def submit(self, run_id: int, config: RunConfig, *, seed_generated: bool = False) -> JobState:
-        """Queue a run. ``seed_generated``: ``config.seed`` was drawn by the engine at submit time (the request
-        had none); the stored plan then says ``seed_generated: true`` although the runner got an explicit seed."""
+    def submit(self, run_id: int, config: RunConfig, *, strategy: Strategy | None = None,
+               seed_generated: bool = False) -> JobState:
+        """Queue a run. ``strategy``: the instance the route resolved for ``config`` (default: the class
+        registered under ``config.strategy_name``). ``seed_generated``: ``config.seed`` was drawn by the engine
+        at submit time (the request had none); the stored plan then says ``seed_generated: true`` although the
+        runner got an explicit seed."""
         if seed_generated and (config.mode != "random" or config.seed is None):
             raise ValueError("seed_generated needs a random run with its (generated) seed in the config")
         with self._lock:
             if self._closing:
                 raise JobsClosed(CLOSING_FA)
             job = JobState(run_id=run_id, config=config, windows_total=_windows_total(config),
-                           seed_generated=seed_generated)
+                           seed_generated=seed_generated, strategy=strategy)
             self._jobs[run_id] = job
             queued_before = sum(1 for j in self._jobs.values() if j.status in ACTIVE_STATUSES) - 1
             job.future = self._executor.submit(self._run, job)
             self._prune_locked()
         if is_dev_mode():
-            logger.debug("backtest job %d submitted: %s %s, %d run(s) ahead in the queue", run_id, config.symbol,
-                         config.mode, queued_before)
+            logger.debug("backtest job %d submitted: %s %s strategy %s v%d (%s), %d run(s) ahead in the queue", run_id,
+                         config.symbol, config.mode, config.strategy_name, config.strategy_version,
+                         "resolved instance" if strategy is not None else "from registry", queued_before)
         return job
 
     def snapshot(self, run_id: int) -> dict[str, Any] | None:
@@ -422,6 +438,8 @@ class BacktestJobs:
                                  job.windows_total)
 
         try:
+            strategy = job.strategy if job.strategy is not None else strategy_for_config(job.config, self.registry)
+            check_config(job.config, strategy)  # RunConfigError -> config_mismatch before any work
             self._set_phase(job, "loading")
             t = time.perf_counter()
             prepared = prepare_history(self.cache, job.config.symbol, self.lru)
@@ -429,7 +447,7 @@ class BacktestJobs:
             self._check_cancel(job)
             self._set_phase(job, "scanning")
             t = time.perf_counter()
-            scan = full_scan(prepared, job.config, self.lru)
+            scan = full_scan(prepared, job.config, self.lru, strategy)
             timings["scan_s"] = time.perf_counter() - t
             self._check_cancel(job)
             self._set_phase(job, "simulating")

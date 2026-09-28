@@ -115,7 +115,7 @@ def _config(symbol: str, account: AccountSettings, **kw: Any) -> RunConfig:
 def _manual_full(history: HistoryData, scan, account: AccountSettings, **kw: Any) -> RunConfig:
     times = pd.DatetimeIndex(history.h1["time"]).as_unit("ns").asi8
     earliest = earliest_start(times, pd.DatetimeIndex(history.h4["time"]).as_unit("ns").asi8,
-                              scan.first_valid_index, 14)
+                              scan.first_valid_index, 140)
     end = pd.Timestamp(int(times[-1]), tz="UTC") + pd.Timedelta(hours=1)
     return _config(history.symbol, account, mode="manual", start=earliest.to_pydatetime(), end=end.to_pydatetime(),
                    **kw)

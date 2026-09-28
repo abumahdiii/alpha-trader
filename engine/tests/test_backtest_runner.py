@@ -78,19 +78,19 @@ def test_earliest_start_worked_example() -> None:
     h4 = make_h4("up", n_h4=300)
     h1_ns = (T0 + pd.to_timedelta(np.arange(1200), unit="h")).as_unit("ns").asi8
     h4_ns = pd.DatetimeIndex(h4["time"]).as_unit("ns").asi8
-    assert earliest_start(h1_ns, h4_ns, 399, 14) == pd.Timestamp("2026-02-14 00:00", tz="UTC")
+    assert earliest_start(h1_ns, h4_ns, 399, 140) == pd.Timestamp("2026-02-14 00:00", tz="UTC")
     with pytest.raises(PeriodError) as exc:
-        earliest_start(h1_ns, h4_ns[:200], 399, 14)
+        earliest_start(h1_ns, h4_ns[:200], 399, 140)
     assert exc.value.code == "data_too_short"
     with pytest.raises(PeriodError):
-        earliest_start(h1_ns, h4_ns, None, 14)
+        earliest_start(h1_ns, h4_ns, None, 140)
 
 
 def test_manual_window_validation(data) -> None:
     history, scan, bars = data
     times = bars.times_ns
     earliest = earliest_start(times, pd.DatetimeIndex(history.h4["time"]).as_unit("ns").asi8,
-                              scan.first_valid_index, 14)
+                              scan.first_valid_index, 140)
     end = pd.Timestamp(int(times[-1]), tz="UTC") + pd.Timedelta(hours=1)
     ok = manual_window(earliest, end, times, earliest, warmup_bars=140)
     assert ok.windows[0].start == earliest.to_pydatetime() and ok.data_end == end.to_pydatetime()
@@ -132,7 +132,7 @@ def test_random_windows_are_seeded_and_bounded(data) -> None:
     history, scan, bars = data
     times = bars.times_ns
     earliest = earliest_start(times, pd.DatetimeIndex(history.h4["time"]).as_unit("ns").asi8,
-                              scan.first_valid_index, 14)
+                              scan.first_valid_index, 140)
     a = random_windows(times, earliest, count=20, months=1, seed=123, warmup_bars=140)
     b = random_windows(times, earliest, count=20, months=1, seed=123, warmup_bars=140)
     c = random_windows(times, earliest, count=20, months=1, seed=124, warmup_bars=140)
@@ -219,7 +219,7 @@ def _leading_zero_history(history: HistoryData, zero_until: int) -> HistoryData:
 def _full_manual(history: HistoryData, scan, **kw) -> RunConfig:
     times = pd.DatetimeIndex(history.h1["time"]).as_unit("ns").asi8
     earliest = earliest_start(times, pd.DatetimeIndex(history.h4["time"]).as_unit("ns").asi8,
-                              scan.first_valid_index, 14)
+                              scan.first_valid_index, 140)
     end = pd.Timestamp(int(times[-1]), tz="UTC") + pd.Timedelta(hours=1)
     return cfg(mode="manual", start=earliest.to_pydatetime(), end=end.to_pydatetime(), **kw)
 
@@ -323,7 +323,7 @@ def test_seeded_cache_end_to_end(tmp_path) -> None:
     assert bars.missing_gap_after.sum() >= 3  # planted single missing bars / missing H4 buckets
     scan = scan_full_history(STRATEGY, history.h1, history.h4, CLEAN, ACCOUNT, symbol=SYMBOL)
     earliest = earliest_start(bars.times_ns, pd.DatetimeIndex(history.h4["time"]).as_unit("ns").asi8,
-                              scan.first_valid_index, 14)
+                              scan.first_valid_index, 140)
     end = pd.Timestamp(int(bars.times_ns[-1]), tz="UTC") + pd.Timedelta(hours=1)
     res = run_backtest(cfg(mode="manual", start=earliest.to_pydatetime(), end=end.to_pydatetime()), history, scan,
                        bars=bars)
