@@ -132,6 +132,10 @@ KEY_LABELS_FA: dict[str, str] = {
     "zero_spread_bars_unfilled": "کندل‌های اسپرد صفر پرنشده", "weekend_holds": "نگهداری‌های آخر هفته",
     "spread_fallback_bars": "کندل‌های اسپرد جایگزین", "stopped_reason": "دلیل توقف",
     "equity_points_full": "نقاط کامل منحنی سرمایه", "equity_points_stored": "نقاط ذخیره‌شده منحنی سرمایه",
+    # account / cost model / spread fallback
+    "risk_pct": "ریسک هر معامله (٪)", "leverage": "اهرم", "spread": "اسپرد",
+    "fallback_spread_points": "اسپرد جایگزین (پوینت)", "commission_per_lot_per_side": "کمیسیون هر لات در هر طرف",
+    "swap": "سوآپ", "points": "پوینت", "source": "منبع",
     # skipped / equity
     "time": "زمان (UTC)", "reason": "دلیل (کد)", "detail": "جزئیات", "balance": "موجودی", "equity": "ارزش حساب",
     # key/value tables
