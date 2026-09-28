@@ -323,8 +323,9 @@ void main() {
     await tester.tap(find.byKey(const ValueKey<String>('setups-pane-toggle')));
     await tester.pumpAndSettle();
     await tester.scrollUntilVisible(find.byKey(const ValueKey<String>('gap-row-0')), 80,
-        scrollable: find.descendant(
-            of: find.byKey(const ValueKey<String>('data-info-panel')), matching: find.byType(Scrollable)).first);
+        scrollable: find
+            .descendant(of: find.byKey(const ValueKey<String>('data-info-panel')), matching: find.byType(Scrollable))
+            .first);
     await tester.drag(find.byKey(const ValueKey<String>('data-info-panel')), const Offset(0, -120));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey<String>('gap-row-0')));
