@@ -81,10 +81,21 @@ hiddenimports += ["numpy", "pandas", "pyarrow", "pyarrow.parquet", "pyarrow.lib"
 # MetaTrader5 is imported lazily inside mt5_adapter (and its _core*.pyd from __init__).
 hiddenimports += _submodules("MetaTrader5")
 hiddenimports += ["MetaTrader5", "MetaTrader5._core"]
+# Strategy-plugin worker (``<exe> --plugin-worker``, dispatched by packaging/entry.py): the worker imports its
+# modules lazily, and plugin code may import these whitelisted modules at runtime (they are pre-imported in the
+# worker before its lockdown, so they must be in the bundle). ``_submodules("alpha_engine")`` above already
+# covers alpha_engine.plugins.*; listed explicitly so a refactor of that helper cannot drop the worker.
+hiddenimports += [
+    "alpha_engine.plugins", "alpha_engine.plugins.worker", "alpha_engine.plugins.validator",
+    "alpha_engine.plugins.host", "alpha_engine.plugins.checks", "alpha_engine.plugins.fixture",
+    "alpha_engine.plugins.store", "alpha_engine.plugins.template", "alpha_engine.routes.plugins",
+    "numpy.random", "numpy.typing", "numpy.lib.stride_tricks", "pandas.api.types", "statistics", "dataclasses",
+]
 
 # Package data. None needed today.
-# SLOT (strategy-plugin upload, backlog): the downloadable plugin template will ship as package data,
-# e.g. datas += [(str(ENGINE_DIR / "alpha_engine" / "plugins" / "template"), "alpha_engine/plugins/template")].
+# SLOT (strategy-plugin upload): filled -- the downloadable template is a STRING constant
+# (alpha_engine/plugins/template.py, TEMPLATE_SOURCE), so it ships inside the bytecode and needs no datas entry;
+# the worker entry points are in the hiddenimports above.
 datas = []
 datas += _metadata("fastapi", "starlette", "pydantic", "pydantic_core", "uvicorn", "websockets")
 

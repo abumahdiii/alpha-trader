@@ -87,8 +87,12 @@ Packaging does not change the safety model: the bundle contains the same code th
 `tests/test_no_order_calls.py` scans, and both build scripts re-run that scan in their preflight.
 No credentials are ever bundled; both scripts reject `.env`, `config.local.json` and credential patterns.
 
-## Future: strategy-plugin template
+## Strategy-plugin worker
 
-The spec has a documented `datas` slot for the downloadable plugin template. A plugin worker flag, if
-added, is parsed in `alpha_engine.__main__.main()` (argv passes through `entry.py` untouched);
-`freeze_support()` is already called for a `multiprocessing`-based worker.
+`alpha_engine.exe --plugin-worker` is the sandboxed plugin worker (`alpha_engine/plugins/worker.py`); the engine
+starts it itself (`[sys.executable, "--plugin-worker"]` when frozen) inside a Windows Job Object. `entry.py`
+dispatches this one flag BEFORE importing `alpha_engine.__main__` (which would load uvicorn / the app / the
+settings), mirroring `python -m alpha_engine --plugin-worker`. The worker uses JSON lines, never pickle or
+`multiprocessing`. The downloadable template is a string constant (`alpha_engine/plugins/template.py`), so the spec
+needs no `datas` entry; the worker modules and the whitelisted numpy/pandas submodules are listed in
+`hiddenimports`. `alpha_engine.exe --plugin-check file.py` runs the upload checks on a local file.
