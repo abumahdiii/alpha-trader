@@ -241,7 +241,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey<String>('setup-details')), findsOneWidget);
     expect(c.selectedSetupId, m.item.id);
-    expect(find.text(m.item.reasonFa), findsOneWidget);
+    const ValueKey<String> details = ValueKey<String>('setup-details');
+    expect(find.descendant(of: find.byKey(details), matching: find.text(m.item.reasonFa)), findsOneWidget);
     expect(find.text('این فقط پیشنهاد است؛ برنامه هیچ سفارشی ثبت نمی‌کند.'), findsOneWidget);
     // The marker has priority: its candle's info panel does not open.
     expect(c.inspectedIndex, isNull);
@@ -318,6 +319,14 @@ void main() {
     final Gap gap = c.dataInfo!.gaps.gaps.first;
     expect(gap.kind, GapKind.missing);
     expect(c.data!.covers(gap.after), isFalse);
+    // The side panel is as tall as the chart: collapse the setups pane below it, then scroll to the gaps.
+    await tester.tap(find.byKey(const ValueKey<String>('setups-pane-toggle')));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(find.byKey(const ValueKey<String>('gap-row-0')), 80,
+        scrollable: find.descendant(
+            of: find.byKey(const ValueKey<String>('data-info-panel')), matching: find.byType(Scrollable)).first);
+    await tester.drag(find.byKey(const ValueKey<String>('data-info-panel')), const Offset(0, -120));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey<String>('gap-row-0')));
     await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
     await tester.pumpAndSettle();
