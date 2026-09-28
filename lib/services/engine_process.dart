@@ -4,6 +4,7 @@ import 'dart:ffi' as ffi;
 import 'dart:io';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:path/path.dart' as p;
 import 'package:win32/win32.dart';
 
@@ -91,8 +92,7 @@ String? findEngineRoot({
     );
   }
 
-  final List<Directory> starts = searchFrom ??
-      [Directory.current, File(Platform.resolvedExecutable).parent];
+  final List<Directory> starts = searchFrom ?? [Directory.current, File(Platform.resolvedExecutable).parent];
   for (final Directory start in starts) {
     String dir = p.normalize(p.absolute(start.path));
     while (true) {
@@ -103,6 +103,175 @@ String? findEngineRoot({
     }
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Packaged (release) engine discovery and the launch spec
+// ---------------------------------------------------------------------------
+
+/// Where the frozen engine sits below the app folder (engine/packaging/README.md).
+const List<String> _packagedEngineParts = ['engine', 'alpha_engine', 'alpha_engine.exe'];
+
+/// The PyInstaller onedir engine of a packaged install:
+/// `<app>\engine\alpha_engine\alpha_engine.exe`.
+class PackagedEngine {
+  const PackagedEngine({required this.appDir});
+
+  /// Folder of `alpha_trader.exe` (the install root).
+  final String appDir;
+
+  String get executable => p.joinAll([appDir, ..._packagedEngineParts]);
+
+  /// The exe's own folder (its `_internal\` runtime sits next to it).
+  String get workingDirectory => p.dirname(executable);
+
+  /// Engine data folder: `<app>\user_data` (`<app>\data` is Flutter's own assets).
+  String get dataDir => p.join(appDir, 'user_data');
+
+  /// Optional local env file, never shipped.
+  String get envFile => p.join(appDir, '.env');
+}
+
+/// Returns the packaged engine next to the running app, or null.
+///
+/// [appDir] defaults to the folder of [Platform.resolvedExecutable].
+PackagedEngine? findPackagedEngine({String? appDir, bool Function(String path)? fileExists}) {
+  final bool Function(String) exists = fileExists ?? (String path) => File(path).existsSync();
+  final String dir = p.normalize(p.absolute(appDir ?? File(Platform.resolvedExecutable).parent.path));
+  final PackagedEngine engine = PackagedEngine(appDir: dir);
+  return exists(engine.executable) ? engine : null;
+}
+
+/// Which engine [EngineProcess] starts.
+sealed class EngineLocation {
+  const EngineLocation();
+}
+
+/// The frozen `alpha_engine.exe` of a packaged install (release).
+class PackagedEngineLocation extends EngineLocation {
+  const PackagedEngineLocation(this.engine);
+
+  final PackagedEngine engine;
+
+  @override
+  String toString() => 'packaged(${engine.executable})';
+}
+
+/// `engine\.venv\Scripts\python.exe -m alpha_engine` of a repository checkout (dev).
+class DevEngineLocation extends EngineLocation {
+  const DevEngineLocation(this.repoRoot);
+
+  final String repoRoot;
+
+  @override
+  String toString() => 'dev(venv under $repoRoot)';
+}
+
+/// Chooses the engine to start.
+///
+/// * [preferPackaged] (release builds): the packaged exe next to the app
+///   first; without one (a release build run from the repository) the venv
+///   discovery below.
+/// * otherwise (debug/profile): the venv discovery first ([findEngineRoot]:
+///   `ENGINE_ROOT` / `ALPHA_ENGINE_ROOT` overrides, then a walk up), the
+///   packaged exe only as the last resort.
+///
+/// An override that is set but invalid still throws (never a silent switch
+/// to some other engine). Null = nothing found.
+EngineLocation? resolveEngineLocation({
+  required bool preferPackaged,
+  String? appDir,
+  String? dartDefineRoot,
+  String? envRoot,
+  List<Directory>? searchFrom,
+  bool Function(String path)? fileExists,
+}) {
+  PackagedEngineLocation? packaged() {
+    final PackagedEngine? e = findPackagedEngine(appDir: appDir, fileExists: fileExists);
+    return e == null ? null : PackagedEngineLocation(e);
+  }
+
+  DevEngineLocation? dev() {
+    final String? root = findEngineRoot(
+      dartDefineRoot: dartDefineRoot,
+      envRoot: envRoot,
+      searchFrom: searchFrom,
+      fileExists: fileExists,
+    );
+    return root == null ? null : DevEngineLocation(root);
+  }
+
+  return preferPackaged ? (packaged() ?? dev()) : (dev() ?? packaged());
+}
+
+/// Persian message when no engine was found in either place.
+const String kEngineNotFoundFa = 'موتور برنامه پیدا نشد. نسخه نصبی باید فایل '
+    'engine\\alpha_engine\\alpha_engine.exe را کنار alpha_trader.exe داشته باشد؛ '
+    'در حالت توسعه محیط پایتون engine\\.venv\\Scripts\\python.exe لازم است '
+    '(مسیر پروژه را با متغیر محیطی ALPHA_ENGINE_ROOT مشخص کنید).';
+
+/// Everything [Process.start] needs to start the engine.
+class EngineLaunchSpec {
+  const EngineLaunchSpec({
+    required this.location,
+    required this.executable,
+    required this.arguments,
+    required this.workingDirectory,
+    required this.environment,
+  });
+
+  final EngineLocation location;
+  final String executable;
+  final List<String> arguments;
+  final String workingDirectory;
+
+  /// Added to the inherited environment (explicit values win).
+  final Map<String, String> environment;
+
+  bool get isPackaged => location is PackagedEngineLocation;
+}
+
+/// Pure: the command line, folder and environment for [location] on [port].
+///
+/// Both modes always pass `DEV_MODE` explicitly (an inherited OS-level
+/// value can't flip the engine) and `ENGINE_PORT`. Packaged: no arguments,
+/// cwd = the exe folder, plus `ALPHA_TRADER_DATA_DIR=<app>\user_data` and
+/// `ALPHA_TRADER_ENV_FILE=<app>\.env`. Dev: `python.exe -m alpha_engine`
+/// in `<repo>\engine` (the engine's own defaults: `<repo>\data`, `<repo>\.env`).
+EngineLaunchSpec buildEngineLaunchSpec({
+  required EngineLocation location,
+  required int port,
+  required bool devMode,
+}) {
+  final Map<String, String> env = {
+    'DEV_MODE': devMode ? 'true' : 'false',
+    'ENGINE_PORT': '$port',
+    // Child output is decoded as UTF-8; without these a venv Python would
+    // write the console code page into the pipe (a frozen exe ignores them:
+    // its entry.py forces UTF-8 itself).
+    'PYTHONUNBUFFERED': '1',
+    'PYTHONIOENCODING': 'utf-8',
+  };
+  return switch (location) {
+    PackagedEngineLocation(:final PackagedEngine engine) => EngineLaunchSpec(
+        location: location,
+        executable: engine.executable,
+        arguments: const [],
+        workingDirectory: engine.workingDirectory,
+        environment: {
+          ...env,
+          'ALPHA_TRADER_DATA_DIR': engine.dataDir,
+          'ALPHA_TRADER_ENV_FILE': engine.envFile,
+        },
+      ),
+    DevEngineLocation(:final String repoRoot) => EngineLaunchSpec(
+        location: location,
+        executable: p.joinAll([repoRoot, ..._venvPythonParts]),
+        arguments: const ['-m', 'alpha_engine'],
+        workingDirectory: p.join(repoRoot, 'engine'),
+        environment: env,
+      ),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -172,20 +341,30 @@ Future<bool> isLoopbackPortFree(int port) async {
 
 /// Spawns (or attaches to) the Python engine and stops it again.
 ///
-/// Process tree note: `engine\.venv\Scripts\python.exe` is the venv
+/// Which engine: [resolveEngineLocation] -- a release build prefers the
+/// packaged `<app>\engine\alpha_engine\alpha_engine.exe`, a debug build the
+/// repository venv; the command line comes from [buildEngineLaunchSpec].
+///
+/// Process tree note (dev): `engine\.venv\Scripts\python.exe` is the venv
 /// *launcher*; it starts the base interpreter as its own child inside a
 /// kill-on-close job, so terminating the launcher also ends the interpreter.
 /// The pid in `/health` is therefore the interpreter's, not [Process.pid].
+/// The packaged onedir exe has no such indirection: the bootloader process
+/// runs the engine itself, so [Process.pid] == the `/health` pid.
 class EngineProcess implements EngineLauncher {
   EngineProcess({
     EngineClientFactory? clientFactory,
     this.preferredPort = kDefaultEnginePort,
     this.fallbackPorts = kFallbackEnginePorts,
+    this.preferPackaged = kReleaseMode,
   }) : _clientFactory = clientFactory ?? ((int port) => EngineClient(port: port));
 
   final EngineClientFactory _clientFactory;
   final int preferredPort;
   final List<int> fallbackPorts;
+
+  /// Look for the packaged engine first (release builds).
+  final bool preferPackaged;
 
   static const Duration _probeTimeout = Duration(seconds: 1);
   static const Duration _shutdownRequestTimeout = Duration(seconds: 1);
@@ -213,19 +392,18 @@ class EngineProcess implements EngineLauncher {
     }
     _cancelled = false;
 
-    final String? root = findEngineRoot(
+    final EngineLocation? location = resolveEngineLocation(
+      preferPackaged: preferPackaged,
       dartDefineRoot: const String.fromEnvironment('ENGINE_ROOT'),
       envRoot: Platform.environment['ALPHA_ENGINE_ROOT'],
     );
-    if (root == null) {
-      throw const EngineLaunchException(
-        'محیط پایتون موتور پیدا نشد (engine\\.venv\\Scripts\\python.exe). '
-        'مسیر پروژه را با متغیر محیطی ALPHA_ENGINE_ROOT مشخص کنید.',
-      );
+    if (location == null) {
+      _log('[EngineProcess] no engine found (preferPackaged=$preferPackaged, '
+          'app=${File(Platform.resolvedExecutable).parent.path})');
+      throw const EngineLaunchException(kEngineNotFoundFa);
     }
-    final String python = p.joinAll([root, ..._venvPythonParts]);
-    final String engineDir = p.join(root, 'engine');
-    _log('[EngineProcess] engine root: $root');
+    _log('[EngineProcess] launcher mode: ${location is PackagedEngineLocation ? 'packaged' : 'dev'} '
+        '(preferPackaged=$preferPackaged) -> $location');
 
     final EnginePortDecision decision = await chooseEnginePort(
       preferred: preferredPort,
@@ -242,25 +420,18 @@ class EngineProcess implements EngineLauncher {
       return EngineLaunchResult(port: decision.port, attached: true);
     }
 
-    final Map<String, String> env = {
-      // Always explicit so an inherited OS-level DEV_MODE can't flip the engine.
-      'DEV_MODE': kDevMode ? 'true' : 'false',
-      'ENGINE_PORT': '${decision.port}',
-      'PYTHONUNBUFFERED': '1',
-      // Child output is decoded as UTF-8 below; without this Python would
-      // write the console code page into the pipe.
-      'PYTHONIOENCODING': 'utf-8',
-    };
-    _log('[EngineProcess] spawning $python -m alpha_engine (cwd=$engineDir, '
-        'DEV_MODE=${env['DEV_MODE']}, ENGINE_PORT=${env['ENGINE_PORT']})');
+    final EngineLaunchSpec spec = buildEngineLaunchSpec(location: location, port: decision.port, devMode: kDevMode);
+    // The environment holds no secrets (port, flags, folders), so it is logged whole.
+    _log('[EngineProcess] spawning ${spec.executable} ${spec.arguments.join(' ')} '
+        '(cwd=${spec.workingDirectory}, env=${spec.environment})');
 
     final Process process;
     try {
       process = await Process.start(
-        python,
-        const ['-m', 'alpha_engine'],
-        workingDirectory: engineDir,
-        environment: env,
+        spec.executable,
+        spec.arguments,
+        workingDirectory: spec.workingDirectory,
+        environment: spec.environment,
         includeParentEnvironment: true,
         runInShell: false,
       );
@@ -394,10 +565,7 @@ class EngineProcess implements EngineLauncher {
   }
 
   static void _pipe(Stream<List<int>> stream, String name) {
-    stream
-        .transform(const Utf8Decoder(allowMalformed: true))
-        .transform(const LineSplitter())
-        .listen(
+    stream.transform(const Utf8Decoder(allowMalformed: true)).transform(const LineSplitter()).listen(
           (String line) => _log('[engine:$name] $line'),
           onError: (Object e) => _log('[EngineProcess] $name pipe error: $e'),
         );
@@ -474,8 +642,7 @@ class _KillOnCloseJob {
   static _KillOnCloseJob? tryAssign(int pid) {
     if (!Platform.isWindows) return null;
     int job = 0;
-    final ffi.Pointer<_JobObjectExtendedLimitInformation> info =
-        calloc<_JobObjectExtendedLimitInformation>();
+    final ffi.Pointer<_JobObjectExtendedLimitInformation> info = calloc<_JobObjectExtendedLimitInformation>();
     try {
       job = CreateJobObject(ffi.nullptr, ffi.nullptr);
       if (job == 0) {
@@ -483,8 +650,8 @@ class _KillOnCloseJob {
         return null;
       }
       info.ref.basicLimitInformation.limitFlags = _jobObjectLimitKillOnJobClose;
-      if (SetInformationJobObject(job, _jobObjectExtendedLimitInformation, info,
-              ffi.sizeOf<_JobObjectExtendedLimitInformation>()) ==
+      if (SetInformationJobObject(
+              job, _jobObjectExtendedLimitInformation, info, ffi.sizeOf<_JobObjectExtendedLimitInformation>()) ==
           0) {
         _log('[EngineProcess] SetInformationJobObject failed');
         CloseHandle(job);

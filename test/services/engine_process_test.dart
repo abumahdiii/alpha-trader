@@ -91,8 +91,7 @@ void main() {
     });
 
     test('dart-define override wins, and may point at engine/', () {
-      expect(findEngineRoot(dartDefineRoot: repo, searchFrom: const [], fileExists: exists),
-          p.normalize(repo));
+      expect(findEngineRoot(dartDefineRoot: repo, searchFrom: const [], fileExists: exists), p.normalize(repo));
       expect(
         findEngineRoot(
           dartDefineRoot: p.join(repo, 'engine'),
@@ -119,6 +118,144 @@ void main() {
         ),
         throwsA(isA<EngineLaunchException>()),
       );
+    });
+  });
+
+  group('packaged engine (release launcher)', () {
+    final String app = p.join(Directory.systemTemp.path, 'AlphaTrader');
+    final String exe = p.join(app, 'engine', 'alpha_engine', 'alpha_engine.exe');
+    final String repo = p.join(Directory.systemTemp.path, 'fake_alpha_repo');
+    final String python = p.join(repo, 'engine', '.venv', 'Scripts', 'python.exe');
+    final String repoApp = p.join(repo, 'build', 'windows', 'x64', 'runner', 'Release');
+
+    bool Function(String) existing(Set<String> files) => (String path) => files.any((f) => p.equals(f, path));
+
+    test('findPackagedEngine: exe present -> paths below the app folder', () {
+      final PackagedEngine? e = findPackagedEngine(appDir: app, fileExists: existing({exe}));
+      expect(e, isNotNull);
+      expect(p.equals(e!.executable, exe), isTrue);
+      expect(p.equals(e.workingDirectory, p.join(app, 'engine', 'alpha_engine')), isTrue);
+      expect(p.equals(e.dataDir, p.join(app, 'user_data')), isTrue);
+      expect(p.equals(e.envFile, p.join(app, '.env')), isTrue);
+    });
+
+    test('findPackagedEngine: exe missing -> null (only the exact path counts)', () {
+      expect(findPackagedEngine(appDir: app, fileExists: existing({})), isNull);
+      // An engine folder without the exe, or the exe one level off, is not a packaged engine.
+      expect(
+        findPackagedEngine(appDir: app, fileExists: existing({p.join(app, 'engine', 'alpha_engine.exe')})),
+        isNull,
+      );
+    });
+
+    test('release prefers the packaged exe even when a venv is reachable', () {
+      final EngineLocation? l = resolveEngineLocation(
+        preferPackaged: true,
+        appDir: app,
+        searchFrom: [Directory(repo)],
+        fileExists: existing({exe, python}),
+      );
+      expect(l, isA<PackagedEngineLocation>());
+    });
+
+    test('release without a packaged exe (run from the repo) falls back to the venv', () {
+      final EngineLocation? l = resolveEngineLocation(
+        preferPackaged: true,
+        appDir: repoApp,
+        searchFrom: [Directory(repoApp)],
+        fileExists: existing({python}),
+      );
+      expect(l, isA<DevEngineLocation>());
+      expect(p.equals((l! as DevEngineLocation).repoRoot, repo), isTrue);
+    });
+
+    test('debug prefers the venv; the packaged exe is only the last resort', () {
+      expect(
+        resolveEngineLocation(
+          preferPackaged: false,
+          appDir: app,
+          searchFrom: [Directory(repo)],
+          fileExists: existing({exe, python}),
+        ),
+        isA<DevEngineLocation>(),
+      );
+      expect(
+        resolveEngineLocation(
+          preferPackaged: false,
+          appDir: app,
+          searchFrom: [Directory(app)],
+          fileExists: existing({exe}),
+        ),
+        isA<PackagedEngineLocation>(),
+      );
+    });
+
+    test('debug keeps the ENGINE_ROOT / ALPHA_ENGINE_ROOT overrides (invalid still throws)', () {
+      final EngineLocation? l = resolveEngineLocation(
+        preferPackaged: false,
+        appDir: app,
+        envRoot: p.join(repo, 'engine'),
+        searchFrom: const [],
+        fileExists: existing({exe, python}),
+      );
+      expect(l, isA<DevEngineLocation>());
+      expect(
+        () => resolveEngineLocation(
+          preferPackaged: false,
+          appDir: app,
+          dartDefineRoot: p.join(Directory.systemTemp.path, 'nope'),
+          searchFrom: const [],
+          fileExists: existing({exe}),
+        ),
+        throwsA(isA<EngineLaunchException>()),
+      );
+    });
+
+    test('nothing anywhere -> null; the Persian message names both locations', () {
+      expect(
+        resolveEngineLocation(preferPackaged: true, appDir: app, searchFrom: const [], fileExists: existing({})),
+        isNull,
+      );
+      expect(kEngineNotFoundFa, contains(r'engine\alpha_engine\alpha_engine.exe'));
+      expect(kEngineNotFoundFa, contains(r'engine\.venv\Scripts\python.exe'));
+      expect(kEngineNotFoundFa, contains('ALPHA_ENGINE_ROOT'));
+    });
+
+    test('launch spec, packaged: the exe, no args, exe folder, data dir + env file', () {
+      final EngineLaunchSpec s = buildEngineLaunchSpec(
+        location: PackagedEngineLocation(PackagedEngine(appDir: app)),
+        port: 8766,
+        devMode: false,
+      );
+      expect(s.isPackaged, isTrue);
+      expect(p.equals(s.executable, exe), isTrue);
+      expect(s.arguments, isEmpty);
+      expect(p.equals(s.workingDirectory, p.join(app, 'engine', 'alpha_engine')), isTrue);
+      expect(s.environment['DEV_MODE'], 'false');
+      expect(s.environment['ENGINE_PORT'], '8766');
+      expect(p.equals(s.environment['ALPHA_TRADER_DATA_DIR']!, p.join(app, 'user_data')), isTrue);
+      expect(p.equals(s.environment['ALPHA_TRADER_ENV_FILE']!, p.join(app, '.env')), isTrue);
+    });
+
+    test('launch spec, dev: unchanged venv command line and environment', () {
+      final EngineLaunchSpec s = buildEngineLaunchSpec(location: DevEngineLocation(repo), port: 8765, devMode: true);
+      expect(s.isPackaged, isFalse);
+      expect(p.equals(s.executable, python), isTrue);
+      expect(s.arguments, ['-m', 'alpha_engine']);
+      expect(p.equals(s.workingDirectory, p.join(repo, 'engine')), isTrue);
+      expect(s.environment, {
+        'DEV_MODE': 'true',
+        'ENGINE_PORT': '8765',
+        'PYTHONUNBUFFERED': '1',
+        'PYTHONIOENCODING': 'utf-8',
+      });
+    });
+
+    test('launch spec never carries credentials', () {
+      for (final EngineLocation l in [PackagedEngineLocation(PackagedEngine(appDir: app)), DevEngineLocation(repo)]) {
+        final EngineLaunchSpec s = buildEngineLaunchSpec(location: l, port: 8765, devMode: true);
+        expect(s.environment.keys.where((k) => k.contains('PASSWORD') || k.contains('LOGIN')), isEmpty);
+      }
     });
   });
 
