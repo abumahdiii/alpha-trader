@@ -16,24 +16,28 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from alpha_engine.app import create_app
 from alpha_engine.backtest import jobs as jobs_module
 from alpha_engine.backtest.history import load_history
 from alpha_engine.backtest.metrics import compute_metrics, summarize_windows
-from alpha_engine.backtest.models import NO_SWAP_LABEL_FA, PROVISIONAL_LABEL_FA, RunConfig
+from alpha_engine.backtest.models import NO_SWAP_LABEL_FA, PROVISIONAL_LABEL_FA, SEED_MAX, RunConfig
 from alpha_engine.backtest.runner import run_backtest
 from alpha_engine.config import Settings
 from alpha_engine.data.cache import OhlcvCache
 from alpha_engine.logging_setup import ROOT_LOGGER_NAME
-from alpha_engine.storage.backtests_repo import BacktestsRepo
+from alpha_engine.routes import backtests as routes_module
+from alpha_engine.storage.backtests_repo import ACTIVE_STATUSES, TERMINAL_STATUSES, BacktestsRepo
 from alpha_engine.storage.db import DB_FILENAME, open_db
+from alpha_engine.strategy.base import bar_open_times
 from fixtures.seed_cache import seed_cache
 
 GOLD, BRENT = "XAUUSD.x", "BRNUSD.x"
@@ -151,10 +155,13 @@ def scan_gate(monkeypatch: pytest.MonkeyPatch) -> Iterator[Gate]:
 
 
 def _ws_messages(env: Env, run_id: int) -> list[dict]:
+    """Progress + final messages (keepalives, sent only after long idle periods, are skipped)."""
     messages = []
     with env.client.websocket_connect(f"/ws/backtests/{run_id}") as ws:
         while True:
             msg = ws.receive_json()
+            if msg["type"] == "keepalive":
+                continue
             messages.append(msg)
             if msg["type"] != "progress":
                 break
@@ -558,3 +565,333 @@ def test_job_lifecycle_logs_only_under_dev_mode(make_settings, seeded: Path, tmp
             assert needle in text, needle
     else:
         assert not [m for m in handler.messages if "backtest" in m.lower()]
+
+
+# ================================================================================ phase 5 wave 2 (W2-E)
+# ------------------------------------------------------------------------------------------ list paging/filters
+def _fake_run(repo: BacktestsRepo, symbol: str, mode: str, status: str) -> int:
+    """A stored run row (no job): enough for the list endpoint, which reads the database only."""
+    random_mode = mode == "random"
+    run_id = repo.create_run(
+        request={}, config={}, symbol=symbol, mode=mode, period_start=None, period_end=None,
+        windows_count=4 if random_mode else None, window_months=1 if random_mode else None,
+        seed=7 if random_mode else None, seed_generated=False if random_mode else None,
+        strategy_name="stddev_channel", strategy_version=1, params_version=1, params_hash="a" * 64,
+        provisional=True, labels_fa=[])
+    if status == "running":
+        assert repo.mark_running(run_id)
+    elif status != "queued":
+        assert repo.finish(run_id, status, error_code=status, error_message_fa="خطای آزمایشی")  # type: ignore[arg-type]
+    return run_id
+
+
+RUN_SPECS = [(GOLD, "manual", "error"), (GOLD, "random", "queued"), (BRENT, "manual", "cancelled"),
+             (GOLD, "random", "error"), (BRENT, "random", "running"), (GOLD, "manual", "interrupted"),
+             (BRENT, "random", "error")]
+
+
+def _list(env: Env, **query: Any) -> dict:
+    response = env.client.get("/backtests", params=query)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_list_offset_paging_filters_and_total(env: Env) -> None:
+    repo = BacktestsRepo(env.app.state.db)
+    ids = [_fake_run(repo, *spec) for spec in RUN_SPECS]
+    newest = ids[::-1]
+
+    full = _list(env)
+    assert (full["count"], full["total"], full["offset"], full["limit"]) == (7, 7, 0, 50)
+    assert [r["id"] for r in full["runs"]] == newest
+    # pages of 3 cover everything exactly once, newest first
+    pages = [_list(env, offset=o, limit=3) for o in (0, 3, 6)]
+    assert [r["id"] for p in pages for r in p["runs"]] == newest
+    assert [p["count"] for p in pages] == [3, 3, 1] and {(p["total"], p["limit"]) for p in pages} == {(7, 3)}
+    assert [p["offset"] for p in pages] == [0, 3, 6]
+    # offset beyond the total: empty page, correct total
+    beyond = _list(env, offset=100, limit=5)
+    assert beyond == {"count": 0, "total": 7, "offset": 100, "limit": 5, "runs": []}
+    assert _list(env, offset=7)["runs"] == [] and _list(env, offset=7)["total"] == 7
+
+    def expect(**filters: str) -> list[int]:
+        keep = []
+        for run_id, (symbol, mode, status) in zip(ids, RUN_SPECS, strict=True):
+            row = {"symbol": symbol, "mode": mode, "status": status}
+            if all(row[k] == v for k, v in filters.items()):
+                keep.append(run_id)
+        return keep[::-1]
+
+    for filters in ({"symbol": GOLD}, {"symbol": BRENT}, {"mode": "random"}, {"mode": "manual"},
+                    {"status": "error"}, {"status": "queued"}, {"symbol": GOLD, "mode": "random"},
+                    {"symbol": BRENT, "mode": "random", "status": "error"}, {"symbol": GOLD, "status": "error"},
+                    {"symbol": GOLD, "status": "cancelled"}, {"mode": "manual", "status": "running"}):
+        got = _list(env, **filters)
+        want = expect(**filters)
+        assert [r["id"] for r in got["runs"]] == want and got["total"] == got["count"] == len(want), filters
+        assert all(r[k] == v for r in got["runs"] for k, v in filters.items())
+    assert expect(symbol=GOLD, status="cancelled") == [] and len(expect(symbol=GOLD)) == 4
+    # filters + paging together
+    paged = _list(env, symbol=GOLD, limit=2, offset=1)
+    assert [r["id"] for r in paged["runs"]] == expect(symbol=GOLD)[1:3] and paged["total"] == 4
+    assert _list(env, symbol=GOLD, mode="random", offset=5)["runs"] == []
+    # filter values are bound parameters, never SQL
+    assert _list(env, symbol="x' OR '1'='1")["total"] == 0
+    assert _list(env, symbol=f"{GOLD}' --")["total"] == 0
+    assert _list(env, status="done") == {"count": 0, "total": 0, "offset": 0, "limit": 50, "runs": []}
+    # the item shape is unchanged and the repo stays backward compatible
+    assert set(full["runs"][0]) == set(routes_module.RunSummary.model_json_schema(by_alias=True, mode="serialization")["properties"])
+    assert [r["id"] for r in repo.list_runs(2)] == newest[:2]
+    assert repo.count_runs() == 7 and repo.count_runs(symbol=BRENT) == 3 and repo.count_runs(status="error") == 3
+    assert set(routes_module.LIST_STATUSES) == ACTIVE_STATUSES | TERMINAL_STATUSES
+
+
+def test_list_query_errors_are_persian(env: Env) -> None:
+    for params in ({"offset": -1}, {"offset": 10**9 + 1}, {"limit": 0}, {"limit": 501}, {"mode": "both"},
+                   {"status": "finished"}, {"status": "DONE"}, {"symbol": "X" * 33}, {"symbol": ""}):
+        _error(env.client.get("/backtests", params=params), 422, "invalid_query")
+
+
+# ------------------------------------------------------------------------------------------ limits
+@pytest.fixture(scope="module")
+def seeded_both(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    out = tmp_path_factory.mktemp("bt_seed_both")
+    seed_cache(out, repo_data_dir=out / "not_data", symbols=(GOLD, BRENT), start=START, end=END)
+    return out
+
+
+@pytest.fixture
+def env_both(make_settings, seeded_both: Path, tmp_path: Path) -> Iterator[Env]:
+    yield from _make_env(make_settings, seeded_both, tmp_path)
+
+
+def _limits(env: Env, symbol: str) -> dict:
+    response = env.client.get("/backtests/limits", params={"symbol": symbol})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _ts(text: str) -> datetime:
+    return datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+
+def _z(value: datetime) -> str:
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+LIMIT_KEYS = {"symbol", "earliest_start", "data_start", "data_end", "warmup_h4_bars", "window_months_max",
+              "windows_count_max", "seed_max", "default_fallback_spread_points", "params_version", "params_hash",
+              "note_fa"}
+
+
+@pytest.mark.parametrize("symbol", [GOLD, BRENT])
+def test_limits_are_exactly_what_post_accepts_and_the_runner_plans(env_both: Env, symbol: str) -> None:
+    env = env_both
+    lim = _limits(env, symbol)
+    assert set(lim) == LIMIT_KEYS and lim["symbol"] == symbol and _is_persian(lim["note_fa"])
+    assert lim["warmup_h4_bars"] == 140  # 10 x atr_period 14 (default params)
+    assert (lim["window_months_max"], lim["windows_count_max"], lim["seed_max"]) == (60, 500, SEED_MAX)
+    history = load_history(OhlcvCache(env.data_dir), symbol)
+    times = bar_open_times(history.h1)
+    assert lim["data_start"] == _z(times[0].to_pydatetime())
+    assert lim["data_end"] == _z((times[-1] + timedelta(hours=1)).to_pydatetime())
+    earliest, end = _ts(lim["earliest_start"]), _ts(lim["data_end"])
+    assert _ts(lim["data_start"]) < earliest < end
+    # the boundary is exact: 1 h earlier is rejected, 1 h past the data is rejected, the limits are accepted
+    manual = {"symbol": symbol, "mode": "manual"}
+    detail = _error(env.post({**manual, "from": _z(earliest - timedelta(hours=1)), "to": lim["data_end"]}), 422,
+                    "window_too_early")
+    assert earliest.strftime("%Y-%m-%d %H:%M UTC") in detail["message_fa"]
+    _error(env.post({**manual, "from": lim["earliest_start"], "to": _z(end + timedelta(hours=1))}), 422,
+           "window_beyond_data")
+    ok = env.post({**manual, "from": lim["earliest_start"], "to": lim["data_end"]})
+    assert ok.status_code == 202, ok.text
+    run = env.wait(ok.json()["id"])
+    assert run["status"] == "done", run["error"]
+    # the runner (scan_full_history's first valid bar) planned the very same bounds
+    plan = run["plan"]
+    assert (plan["earliest_start"], plan["data_end"], plan["warmup_h4_bars"]) == \
+        (lim["earliest_start"], lim["data_end"], lim["warmup_h4_bars"])
+    assert (lim["params_version"], lim["params_hash"]) == (run["params_version"], run["params_hash"])
+    # the auto fallback spread the run resolved is the one announced
+    fallback = lim["default_fallback_spread_points"]
+    assert fallback == {"points": run["spread_fallback"]["points"], "source": run["spread_fallback"]["source"]}
+    assert fallback["source"] in ("auto_median_observed", "none")
+
+
+def test_limits_errors_use_the_standard_persian_format(env: Env) -> None:
+    detail = _error(env.client.get("/backtests/limits"), 422, "invalid_query")
+    assert detail["errors_fa"] == []
+    _error(env.client.get("/backtests/limits", params={"symbol": "  "}), 422, "invalid_query")
+    _error(env.client.get("/backtests/limits", params={"symbol": "../x"}), 422, "invalid_symbol")
+    _error(env.client.get("/backtests/limits", params={"symbol": "EURUSD"}), 404, "symbol_not_configured")
+    _error(env.client.get("/backtests/limits", params={"symbol": BRENT}), 422, "no_data")  # configured, not cached
+    assert _limits(env, GOLD)["symbol"] == GOLD
+    OhlcvCache(env.data_dir).spec_path(GOLD).unlink()
+    _error(env.client.get("/backtests/limits", params={"symbol": GOLD}), 422, "spec_missing")
+    _error(env.post(MANUAL), 422, "spec_missing")  # POST says the same
+
+
+def test_limits_stored_params_invalid_is_409(env: Env) -> None:
+    env.client.get("/strategies")
+    db = env.app.state.db
+    with db.transaction():
+        db.execute("UPDATE strategy_versions SET params_json = ? WHERE is_active = 1", ('{"n": 3}',))
+    detail = _error(env.client.get("/backtests/limits", params={"symbol": GOLD}), 409, "stored_params_invalid")
+    assert detail["errors_fa"]
+
+
+def test_limits_data_too_short_matches_post(make_settings, tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    # 3 weeks: fewer than n = 100 closed H4 bars -> no valid channel bar at all
+    seed_cache(data_dir, repo_data_dir=tmp_path / "elsewhere", symbols=(GOLD,), start="2024-06-03", end="2024-06-24")
+    settings = make_settings(environ={"ALPHA_TRADER_DATA_DIR": str(data_dir)})
+    with TestClient(create_app(settings), client=("127.0.0.1", 50000)) as client:
+        _error(client.get("/backtests/limits", params={"symbol": GOLD}), 422, "data_too_short")
+        _error(client.post("/backtests", json={**MANUAL, "from": "2024-06-10T00:00:00Z",
+                                               "to": "2024-06-20T00:00:00Z"}), 422, "data_too_short")
+
+
+def test_limits_without_database_is_503(make_settings) -> None:
+    client = TestClient(create_app(make_settings()), client=("127.0.0.1", 50000))  # no lifespan: no DB
+    response = client.get("/backtests/limits", params={"symbol": GOLD})
+    assert response.status_code == 503 and response.json()["detail"]["code"] == "db_unavailable"
+
+
+# ------------------------------------------------------------------------------------------ seed at submit
+def test_random_submit_without_seed_returns_the_seed_the_run_uses(env: Env, scan_gate: Gate) -> None:
+    body = {k: v for k, v in RANDOM.items() if k != "seed"}
+    blocker = env.submit(MANUAL)  # holds the worker so the random run is still queued when we look
+    assert scan_gate.entered.wait(10)
+    response = env.post(body)
+    assert response.status_code == 202, response.text
+    sub = response.json()
+    seed = sub["seed"]
+    assert sub["seed_generated"] is True and isinstance(seed, int) and 0 <= seed <= SEED_MAX
+    queued = env.detail(sub["id"])
+    assert queued["status"] == "queued" and queued["plan"] is None
+    assert queued["seed"] == seed and queued["seed_generated"] is True and queued["config"]["seed"] == seed
+    assert "seed" not in queued["request"]
+    listed = _list(env, mode="random")["runs"][0]
+    assert listed["id"] == sub["id"] and listed["seed"] == seed and listed["seed_generated"] is True
+    scan_gate.release()
+    assert env.wait(blocker)["status"] == "done"
+    done = env.wait(sub["id"])
+    assert done["status"] == "done"
+    assert done["seed"] == done["config"]["seed"] == done["plan"]["seed"] == seed
+    assert done["seed_generated"] is True and done["plan"]["seed_generated"] is True
+    # rerun with that seed: identical windows, metrics and trades
+    again = env.post({**body, "seed": seed})
+    assert again.status_code == 202 and again.json()["seed"] == seed and again.json()["seed_generated"] is False
+    rerun = env.wait(again.json()["id"])
+    assert rerun["seed_generated"] is False and rerun["plan"]["seed_generated"] is False
+    assert rerun["plan"]["windows"] == done["plan"]["windows"] and rerun["metrics"] == done["metrics"]
+    assert rerun["distribution"] == done["distribution"] and rerun["windows"] == done["windows"]
+    assert env.trades(rerun["id"])["trades"] == env.trades(done["id"])["trades"]
+    # and the stored config alone regenerates it (no API, no DB)
+    direct = env.direct(done)
+    assert [w.window.start.strftime("%Y-%m-%dT%H:%M:%SZ") for w in direct.windows] == \
+        [w["start"] for w in done["windows"]]
+
+
+def test_submit_seed_is_the_one_drawn_at_submit_and_echoed_otherwise(env: Env,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    drawn = []
+
+    def fake_seed() -> int:
+        drawn.append(123456789)
+        return 123456789
+
+    monkeypatch.setattr(routes_module, "new_seed", fake_seed)
+    body = {k: v for k, v in RANDOM.items() if k != "seed"}
+    sub = env.post(body).json()
+    assert (sub["seed"], sub["seed_generated"]) == (123456789, True) and drawn == [123456789]
+    done = env.wait(sub["id"])
+    assert done["plan"]["seed"] == 123456789 and done["plan"]["seed_generated"] is True  # the runner drew nothing
+    given = env.post(RANDOM).json()
+    assert (given["seed"], given["seed_generated"]) == (7, False) and drawn == [123456789]
+    manual = env.post(MANUAL).json()
+    assert manual["seed"] is None and manual["seed_generated"] is None
+    for run_id in (given["id"], manual["id"]):
+        env.wait(run_id)
+
+
+def test_jobs_submit_rejects_seed_generated_without_a_seed(env: Env) -> None:
+    detail = env.wait(env.submit(MANUAL))
+    config = RunConfig.model_validate(detail["config"])
+    with pytest.raises(ValueError):
+        env.app.state.backtest_jobs.submit(10**6, config, seed_generated=True)
+
+
+# ------------------------------------------------------------------------------------------ WS keepalive
+def _assert_keepalive(msg: dict, run_id: int) -> None:
+    assert set(msg) == {"type", "id", "time_utc"} and msg["type"] == "keepalive" and msg["id"] == run_id, msg
+    assert msg["time_utc"].endswith("Z") and _ts(msg["time_utc"]).utcoffset() == timedelta(0)
+
+
+def test_ws_keepalive_while_queued_or_running_never_after_the_end(env: Env, scan_gate: Gate,
+                                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    assert routes_module.WS_KEEPALIVE_S == 15.0  # documented default
+    monkeypatch.setattr(routes_module, "WS_KEEPALIVE_S", 0.3)
+    first = env.submit(MANUAL)
+    assert scan_gate.entered.wait(10)
+    second = env.submit(RANDOM)
+    for run_id, status in ((second, "queued"), (first, "running")):
+        with env.client.websocket_connect(f"/ws/backtests/{run_id}") as ws:
+            progress = ws.receive_json()
+            assert progress["type"] == "progress" and progress["status"] == status
+            started = time.monotonic()
+            for _ in range(2):
+                _assert_keepalive(ws.receive_json(), run_id)
+            assert time.monotonic() - started >= 0.5  # two idle periods of 0.3 s (minus scheduling jitter)
+    # the run goes on: progress messages resume, then the final message, then the socket closes
+    with env.client.websocket_connect(f"/ws/backtests/{first}") as ws:
+        assert ws.receive_json()["type"] == "progress"
+        scan_gate.release()
+        messages: list[dict] = []
+        while not messages or messages[-1]["type"] in ("progress", "keepalive"):
+            messages.append(ws.receive_json())
+        assert messages[-1]["type"] == "done"
+        assert {m["type"] for m in messages} <= {"progress", "keepalive", "done"}
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
+    assert env.wait(second)["status"] == "done"
+    # finished runs: the final message only, no keepalive, then close
+    for run_id in (first, second):
+        with env.client.websocket_connect(f"/ws/backtests/{run_id}") as ws:
+            final = ws.receive_json()
+            assert final["type"] == "done" and final["id"] == run_id
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_json()
+
+
+# ------------------------------------------------------------------------------------------ DEV_MODE logs (W2-E)
+@pytest.mark.parametrize("dev", [True, False])
+def test_w2_logs_only_under_dev_mode(make_settings, seeded: Path, tmp_path: Path, dev: bool, scan_gate: Gate,
+                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(routes_module, "WS_KEEPALIVE_S", 0.2)
+    handler = _ListHandler()
+    for env in _make_env(make_settings, seeded, tmp_path, f"DEV_MODE={'true' if dev else 'false'}\n"
+                         "MT5_PASSWORD=S3cr3t!\nMT5_LOGIN=12345678\n"):
+        logging.getLogger(ROOT_LOGGER_NAME).addHandler(handler)
+        try:
+            _list(env, symbol=GOLD, mode="random", offset=0, limit=10)
+            _limits(env, GOLD)
+            run_id = env.submit({k: v for k, v in RANDOM.items() if k != "seed"})
+            assert scan_gate.entered.wait(10)
+            with env.client.websocket_connect(f"/ws/backtests/{run_id}") as ws:
+                assert ws.receive_json()["type"] == "progress"
+                _assert_keepalive(ws.receive_json(), run_id)
+            scan_gate.release()
+            env.wait(run_id)
+        finally:
+            logging.getLogger(ROOT_LOGGER_NAME).removeHandler(handler)
+    text = "\n".join(handler.messages)
+    assert "S3cr3t!" not in text and "12345678" not in text
+    if dev:
+        for needle in (f"GET /backtests symbol={GOLD} mode=random status=None offset=0 limit=10 -> 0 item(s), total 0",
+                       f"backtest period limits {GOLD}", "earliest=", "generated seed=", "at submit",
+                       f"WS /ws/backtests/{run_id}: keepalive #1"):
+            assert needle in text, needle
+    else:
+        assert not [m for m in handler.messages if "backtest" in m.lower() or "keepalive" in m.lower()]
