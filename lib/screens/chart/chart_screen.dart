@@ -46,5 +46,11 @@ class _ChartPageState extends State<_ChartPage> {
   }
 
   @override
-  Widget build(BuildContext context) => ChartView(controller: _controller);
+  Widget build(BuildContext context) => ChartView(
+        controller: _controller,
+        // WIRING POINT «بک‌تست همین بازه»: pass a callback that opens the
+        // backtest page with the request (symbol + the engine's
+        // backtest_window, exactly as received). null keeps the button disabled.
+        onBacktestRange: null,
+      );
 }

@@ -331,6 +331,7 @@ class ChartController extends ChangeNotifier {
       _log('load #$serial done in ${sw.elapsedMilliseconds} ms: ${data.length} bars, '
           '${channel.validCount}/${channel.count} valid channel points, ${data.setups.length} setups, '
           '${data.gaps.length} gaps, source=${rates.source} stale=${rates.stale}');
+      if (setups != null) _logSetups(setups);
       if (data.isEmpty) {
         _setState(ChartLoadState.empty, message: rates.message ?? channel.messageFa ?? kEmptyRangeFa);
       } else {
@@ -341,6 +342,23 @@ class ChartController extends ChangeNotifier {
       if (_stale(serial, 'load')) return;
       _fail(e, 'load #$serial after ${sw.elapsedMilliseconds} ms');
     }
+  }
+
+  /// DEV_MODE trace of the parsed `/chart/setups` answer (counts only; the
+  /// numbers are the engine's).
+  void _logSetups(SetupsResult r) {
+    if (!kDevMode) return;
+    final SetupsEvaluation? ev = r.evaluation;
+    final SetupsSummary? s = r.summary;
+    final BacktestWindow? w = r.backtestWindow;
+    final int outcomes = r.setups.where((SetupItem x) => x.outcome != null).length;
+    final int flags = r.setups.where((SetupItem x) => x.backtest != null).length;
+    _log('setups parsed: ${r.setups.length} items ${r.statusCounts}, $outcomes outcomes, $flags backtest flags; '
+        'evaluation ${ev == null ? 'absent' : ev.available ? 'available' : 'unavailable (${ev.messageFa})'}; '
+        'summary ${s == null ? '-' : 'closed=${s.closed} W/L=${s.wins}/${s.losses} open=${s.openEndOfData} '
+            'net=${s.netPnl} R=${s.totalR} pf=${s.profitFactorInfinite ? 'inf' : s.profitFactor}'}; '
+        'backtest window ${w == null ? '-' : w.available ? '${w.from} .. ${w.to} clipped=${w.clipped} '
+            'trades=${w.trades} net=${w.netProfit}' : 'unavailable (${w.code})'}');
   }
 
   bool _stale(int serial, String what) {

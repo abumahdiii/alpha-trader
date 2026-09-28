@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../core/dev_mode.dart';
 import '../models/market_data.dart';
 import '../theme/app_semantic_colors.dart';
+import 'backtest_range_request.dart';
 import 'chart_controller.dart';
 import 'chart_data.dart';
 import 'chart_format.dart';
@@ -11,15 +13,21 @@ import 'widgets/candle_info_panel.dart';
 import 'widgets/chart_canvas.dart';
 import 'widgets/data_info_panel.dart';
 import 'widgets/setup_widgets.dart';
+import 'widgets/setups_pane.dart';
 
 /// The whole chart page body: toolbar, candlestick canvas with the candle
-/// info panel (opened by a click on a candle), and a side panel with the
-/// setups table and the data info.
+/// info panel (opened by a click on a candle), the «اطلاعات داده» side
+/// panel, and a resizable / collapsible bottom pane with the range summary
+/// and the full setups table.
 /// Everything is read from [controller]; nothing is computed here.
 class ChartView extends StatefulWidget {
-  const ChartView({super.key, required this.controller});
+  const ChartView({super.key, required this.controller, this.onBacktestRange});
 
   final ChartController controller;
+
+  /// «بک‌تست همین بازه» (the engine's `backtest_window` of the loaded range).
+  /// null = the button stays disabled.
+  final ValueChanged<BacktestRangeRequest>? onBacktestRange;
 
   @override
   State<ChartView> createState() => _ChartViewState();
@@ -31,6 +39,18 @@ const Object _kCandlePanelTapGroup = #chartCandlePanel;
 
 class _ChartViewState extends State<ChartView> {
   final FocusNode _chartFocus = FocusNode(debugLabel: 'chart-area', skipTraversal: true);
+
+  static const double _minChartHeight = 180;
+  static const double _minPaneHeight = 150;
+  static const double _handleHeight = 6;
+
+  /// Share of the height the setups pane takes until the user drags it.
+  static const double _defaultPaneFraction = 0.45;
+
+  /// Dragged pane height; null = [_defaultPaneFraction].
+  double? _paneHeight;
+  bool _paneCollapsed = false;
+  bool _showDataInfo = true;
 
   @override
   void dispose() {
@@ -47,7 +67,22 @@ class _ChartViewState extends State<ChartView> {
   Future<void> _openSetup(SetupMark m) async {
     final ChartController c = widget.controller;
     c.selectSetup(m.item.id);
-    await SetupDetails.show(context, m.item, digits: c.data?.digits);
+    await SetupDetails.show(
+      context,
+      m.item,
+      digits: c.data?.digits,
+      endOfDataLabelFa: c.data?.setupsResult?.evaluation?.endOfDataLabelFa,
+    );
+  }
+
+  void _togglePane() {
+    setState(() => _paneCollapsed = !_paneCollapsed);
+    devLog('[Chart] setups pane ${_paneCollapsed ? 'collapsed' : 'expanded'}');
+  }
+
+  void _toggleDataInfo() {
+    setState(() => _showDataInfo = !_showDataInfo);
+    devLog('[Chart] data info panel ${_showDataInfo ? 'shown' : 'hidden'}');
   }
 
   @override
@@ -59,18 +94,9 @@ class _ChartViewState extends State<ChartView> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            _ChartToolbar(controller: c),
+            _ChartToolbar(controller: c, showDataInfo: _showDataInfo, onToggleDataInfo: _toggleDataInfo),
             if (c.isLoading) const LinearProgressIndicator(minHeight: 2) else const SizedBox(height: 2),
-            Expanded(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  Expanded(child: _chartArea(context, c)),
-                  const VerticalDivider(width: 1),
-                  SizedBox(width: 340, child: _SidePanel(controller: c, onSetupSelected: _onTableSelect)),
-                ],
-              ),
-            ),
+            Expanded(child: LayoutBuilder(builder: (BuildContext context, BoxConstraints box) => _body(c, box))),
             _StatusLine(controller: c),
           ],
         );
@@ -78,7 +104,48 @@ class _ChartViewState extends State<ChartView> {
     );
   }
 
-  void _onTableSelect(SetupMark m) => widget.controller.selectSetup(m.item.id, jump: true);
+  /// Chart (+ data info) above, drag handle, setups pane below.
+  Widget _body(ChartController c, BoxConstraints box) {
+    final double total = box.maxHeight;
+    // Never squeeze the chart below its minimum (a short window shrinks the pane first).
+    final double maxPane =
+        (total - _minChartHeight - _handleHeight).clamp(SetupsPane.headerHeight, double.infinity).toDouble();
+    final double minPane = _minPaneHeight < maxPane ? _minPaneHeight : maxPane;
+    final double pane = _paneCollapsed
+        ? SetupsPane.headerHeight
+        : (_paneHeight ?? total * _defaultPaneFraction).clamp(minPane, maxPane).toDouble();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        Expanded(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              Expanded(child: _chartArea(context, c)),
+              if (_showDataInfo) ...<Widget>[
+                const VerticalDivider(width: 1),
+                SizedBox(width: 340, child: _DataInfoSide(controller: c)),
+              ],
+            ],
+          ),
+        ),
+        _PaneHandle(
+          height: _handleHeight,
+          enabled: !_paneCollapsed,
+          onDrag: (double dy) => setState(() => _paneHeight = (pane - dy).clamp(minPane, maxPane).toDouble()),
+        ),
+        SizedBox(
+          height: pane,
+          child: SetupsPane(
+            controller: c,
+            collapsed: _paneCollapsed,
+            onToggleCollapsed: _togglePane,
+            onBacktestRange: widget.onBacktestRange,
+          ),
+        ),
+      ],
+    );
+  }
 
   Widget _chartArea(BuildContext context, ChartController c) {
     final ChartData? data = c.data;
@@ -174,9 +241,11 @@ class _StateMessage extends StatelessWidget {
 }
 
 class _ChartToolbar extends StatelessWidget {
-  const _ChartToolbar({required this.controller});
+  const _ChartToolbar({required this.controller, required this.showDataInfo, required this.onToggleDataInfo});
 
   final ChartController controller;
+  final bool showDataInfo;
+  final VoidCallback onToggleDataInfo;
 
   Future<void> _pickDay(BuildContext context, {required bool isFrom}) async {
     final ChartController c = controller;
@@ -278,9 +347,17 @@ class _ChartToolbar extends StatelessWidget {
             onPressed: c.data == null ? null : c.resetView,
             icon: const Icon(Icons.fit_screen),
           ),
+          IconButton(
+            key: const ValueKey<String>('chart-toggle-data-info'),
+            tooltip: showDataInfo ? 'بستن پنل اطلاعات داده' : 'نمایش پنل اطلاعات داده',
+            isSelected: showDataInfo,
+            onPressed: onToggleDataInfo,
+            icon: const Icon(Icons.dataset_outlined),
+          ),
           Tooltip(
             message: 'چرخ ماوس: زوم روی نشانگر — Shift + چرخ یا کشیدن: جابه‌جایی — کلیک روی فلش: جزئیات ستاپ — '
-                'کلیک روی کندل: اطلاعات کندل (Esc: بستن)',
+                'کلیک روی کندل: اطلاعات کندل (Esc: بستن) — کلیک روی ردیف جدول ستاپ‌ها: رفتن به آن ستاپ؛ '
+                'مرز بالای جدول را برای تغییر اندازه بکشید',
             child: Icon(Icons.help_outline, size: 20, color: context.appColors.mutedText),
           ),
         ],
@@ -289,43 +366,56 @@ class _ChartToolbar extends StatelessWidget {
   }
 }
 
-class _SidePanel extends StatelessWidget {
-  const _SidePanel({required this.controller, required this.onSetupSelected});
+/// «اطلاعات داده» beside the chart (the setups moved to the bottom pane).
+class _DataInfoSide extends StatelessWidget {
+  const _DataInfoSide({required this.controller});
 
   final ChartController controller;
-  final ValueChanged<SetupMark> onSetupSelected;
 
   @override
   Widget build(BuildContext context) {
-    final ChartController c = controller;
-    final ChartData? data = c.data;
-    final bool h1 = c.timeframe == ChartTimeframe.h1;
-    return DefaultTabController(
-      length: 2,
-      child: Column(children: <Widget>[
-        TabBar(
-          labelColor: Theme.of(context).colorScheme.primary,
-          unselectedLabelColor: context.appColors.mutedText,
-          tabs: const <Widget>[Tab(text: 'ستاپ‌ها'), Tab(text: 'اطلاعات داده')],
-        ),
-        Expanded(
-          child: TabBarView(children: <Widget>[
-            SetupTable(
-              setups: h1 ? (data?.setups ?? const <SetupMark>[]) : const <SetupMark>[],
-              selectedId: c.selectedSetupId,
-              digits: data?.digits,
-              onSelect: onSetupSelected,
-              emptyText: !h1
-                  ? 'ستاپ‌ها روی چارت H1 نمایش داده می‌شوند.'
-                  : data == null
-                      ? 'داده‌ای بارگذاری نشده است.'
-                      : null,
-              noteFa: h1 ? data?.setupsResult?.noteFa : null,
-            ),
-            DataInfoPanel(controller: c),
-          ]),
-        ),
-      ]),
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: <Widget>[
+      Container(
+        height: 36,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        alignment: AlignmentDirectional.centerStart,
+        decoration: BoxDecoration(border: Border(bottom: BorderSide(color: context.appColors.borderColor))),
+        child: Text('اطلاعات داده', style: Theme.of(context).textTheme.titleSmall),
+      ),
+      Expanded(child: DataInfoPanel(controller: controller)),
+    ]);
+  }
+}
+
+/// Drag handle between the chart and the setups pane.
+class _PaneHandle extends StatelessWidget {
+  const _PaneHandle({required this.height, required this.enabled, required this.onDrag});
+
+  final double height;
+  final bool enabled;
+  final ValueChanged<double> onDrag;
+
+  @override
+  Widget build(BuildContext context) {
+    final Widget bar = Container(
+      height: height,
+      color: context.appColors.surfaceMuted,
+      alignment: Alignment.center,
+      child: Container(
+        width: 40,
+        height: 2,
+        decoration: BoxDecoration(color: context.appColors.borderColor, borderRadius: BorderRadius.circular(1)),
+      ),
+    );
+    if (!enabled) return bar;
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeRow,
+      child: GestureDetector(
+        key: const ValueKey<String>('setups-pane-handle'),
+        behavior: HitTestBehavior.opaque,
+        onVerticalDragUpdate: (DragUpdateDetails d) => onDrag(d.delta.dy),
+        child: bar,
+      ),
     );
   }
 }
@@ -339,7 +429,9 @@ class _StatusLine extends StatelessWidget {
   Widget build(BuildContext context) {
     final ChartData? d = controller.data;
     final AppSemanticColors colors = context.appColors;
-    final List<String> parts = <String>['زمان‌های محور و جدول‌ها: UTC'];
+    final List<String> parts = <String>[
+      'زمان‌های محور و پنل کندل: UTC — جدول ستاپ‌ها: وقت محلی (UTC در راهنمای هر خانه)'
+    ];
     if (d != null) {
       parts.add('${d.length} کندل');
       final StrategyProvenance? p = d.channelResult?.provenance;
