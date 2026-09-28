@@ -518,7 +518,9 @@ class ChartController extends ChangeNotifier {
   /// bars are kept; only the trade placement is rebuilt.
   void setTradeOverlay(TradeOverlay? overlay) {
     _tradeOverlay = overlay;
-    if (overlay == null || _selectedTradeKey == null || !overlay.trades.any((t) => tradeKeyOf(t) == _selectedTradeKey)) {
+    if (overlay == null ||
+        _selectedTradeKey == null ||
+        !overlay.trades.any((t) => tradeKeyOf(t) == _selectedTradeKey)) {
       _selectedTradeKey = null;
     }
     final ChartData? d = _data;

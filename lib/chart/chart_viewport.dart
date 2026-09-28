@@ -140,7 +140,8 @@ class ChartViewport {
   ChartViewport fitBars(double bars) {
     if (!(bars > 0)) return this;
     final double w = (width / bars).clamp(minBarWidth, maxBarWidth).toDouble();
-    return ChartViewport._(barCount: barCount, width: width, barWidth: w, startIndex: startIndex)._withStart(startIndex);
+    return ChartViewport._(barCount: barCount, width: width, barWidth: w, startIndex: startIndex)
+        ._withStart(startIndex);
   }
 
   /// Newest bars at the default zoom.

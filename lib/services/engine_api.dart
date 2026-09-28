@@ -515,7 +515,9 @@ class EngineApi {
       final Object? code = detail['code'];
       return EngineApiException(
         kind,
-        message is String && message.trim().isNotEmpty ? message : genericFa(status, code: code is String ? code : null),
+        message is String && message.trim().isNotEmpty
+            ? message
+            : genericFa(status, code: code is String ? code : null),
         statusCode: status,
         code: code is String ? code : null,
         errorsFa: errors is List ? List<String>.unmodifiable(errors.map((Object? e) => '$e')) : const [],

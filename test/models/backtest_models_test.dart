@@ -237,4 +237,26 @@ void main() {
       });
     });
   });
+
+  group('BacktestLimits.pickableDays (whole UTC days the form may send)', () {
+    BacktestLimits l(String start, String end) =>
+        BacktestLimits.fromJson(limitsJson(earliestStart: start, dataEnd: end));
+
+    test('a start inside a day -> the next day; an end at midnight -> the day before', () {
+      final days = l('2024-07-29T09:00:00Z', '2025-03-03T00:00:00Z').pickableDays!;
+      expect(days.first, DateTime.utc(2024, 7, 30));
+      expect(days.last, DateTime.utc(2025, 3, 2));
+    });
+
+    test('a start at midnight is its own day; an end inside a day -> the day before', () {
+      final days = l('2022-01-10T00:00:00Z', '2026-09-25T21:00:00Z').pickableDays!;
+      expect(days.first, DateTime.utc(2022, 1, 10));
+      expect(days.last, DateTime.utc(2026, 9, 24));
+    });
+
+    test('no whole day fits / bounds missing -> null', () {
+      expect(l('2024-07-29T09:00:00Z', '2024-07-30T12:00:00Z').pickableDays, isNull);
+      expect(const BacktestLimits(symbol: 'X').pickableDays, isNull);
+    });
+  });
 }
