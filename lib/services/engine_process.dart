@@ -92,7 +92,8 @@ String? findEngineRoot({
     );
   }
 
-  final List<Directory> starts = searchFrom ?? [Directory.current, File(Platform.resolvedExecutable).parent];
+  final List<Directory> starts = searchFrom ??
+      [Directory.current, File(Platform.resolvedExecutable).parent];
   for (final Directory start in starts) {
     String dir = p.normalize(p.absolute(start.path));
     while (true) {
@@ -565,7 +566,10 @@ class EngineProcess implements EngineLauncher {
   }
 
   static void _pipe(Stream<List<int>> stream, String name) {
-    stream.transform(const Utf8Decoder(allowMalformed: true)).transform(const LineSplitter()).listen(
+    stream
+        .transform(const Utf8Decoder(allowMalformed: true))
+        .transform(const LineSplitter())
+        .listen(
           (String line) => _log('[engine:$name] $line'),
           onError: (Object e) => _log('[EngineProcess] $name pipe error: $e'),
         );
@@ -642,7 +646,8 @@ class _KillOnCloseJob {
   static _KillOnCloseJob? tryAssign(int pid) {
     if (!Platform.isWindows) return null;
     int job = 0;
-    final ffi.Pointer<_JobObjectExtendedLimitInformation> info = calloc<_JobObjectExtendedLimitInformation>();
+    final ffi.Pointer<_JobObjectExtendedLimitInformation> info =
+        calloc<_JobObjectExtendedLimitInformation>();
     try {
       job = CreateJobObject(ffi.nullptr, ffi.nullptr);
       if (job == 0) {
@@ -650,8 +655,8 @@ class _KillOnCloseJob {
         return null;
       }
       info.ref.basicLimitInformation.limitFlags = _jobObjectLimitKillOnJobClose;
-      if (SetInformationJobObject(
-              job, _jobObjectExtendedLimitInformation, info, ffi.sizeOf<_JobObjectExtendedLimitInformation>()) ==
+      if (SetInformationJobObject(job, _jobObjectExtendedLimitInformation, info,
+              ffi.sizeOf<_JobObjectExtendedLimitInformation>()) ==
           0) {
         _log('[EngineProcess] SetInformationJobObject failed');
         CloseHandle(job);

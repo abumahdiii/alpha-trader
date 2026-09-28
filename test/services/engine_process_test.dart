@@ -91,7 +91,8 @@ void main() {
     });
 
     test('dart-define override wins, and may point at engine/', () {
-      expect(findEngineRoot(dartDefineRoot: repo, searchFrom: const [], fileExists: exists), p.normalize(repo));
+      expect(findEngineRoot(dartDefineRoot: repo, searchFrom: const [], fileExists: exists),
+          p.normalize(repo));
       expect(
         findEngineRoot(
           dartDefineRoot: p.join(repo, 'engine'),
