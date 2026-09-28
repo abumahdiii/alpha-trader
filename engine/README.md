@@ -213,8 +213,9 @@ logs/skips broken files; shutdown unregisters them.
 A registered plugin appears in `/strategies` (params store as usual) and is selected with `strategy=<name>` in
 `/chart/setups`, `/backtests/limits` and `POST /backtests`; results record `strategy_source = "plugin"` and
 `strategy_sha256` = the file hash. Self-test without the app: `python -m alpha_engine --plugin-check file.py`
-(same checks, JSON report, exit 0 = accepted; reads no settings). Timings (template): validation ~5.5 s
-(two worker boots ~1.4 s each); a 5-year (31 200 H1 bars) scan ~0.3 s of plugin time + boot.
+(same checks, JSON report, exit 0 = accepted; reads no settings). Measured timings (template, this dev machine): upload
+validation 5.5 s (two worker boots of ~1.4 s each, peak ~280 MiB); a 5-year synthetic scan (31 200 H1 bars, 928
+candidates) 2.1 s end to end, of which ~1.4 s is the worker boot (one fresh worker per call).
 
 ### Channel check tool (cache only, no MT5)
 
