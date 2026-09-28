@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../chart/chart_controller.dart';
@@ -102,7 +103,8 @@ class BacktestTradesChartState extends State<BacktestTradesChart> with Automatic
   void didUpdateWidget(BacktestTradesChart oldWidget) {
     super.didUpdateWidget(oldWidget);
     final BacktestTradesChart old = oldWidget;
-    if (!identical(old.trades, widget.trades) || old.runId != widget.runId) {
+    // A random run's window filter builds a new list on every rebuild: compare the trades themselves.
+    if (!listEquals(old.trades, widget.trades) || old.runId != widget.runId) {
       devLog('[BacktestChart] trades changed: ${old.trades.length} -> ${widget.trades.length}');
       _chart.setTradeOverlay(TradeOverlay(runId: widget.runId, trades: widget.trades));
     }
@@ -222,6 +224,7 @@ class _TradesPane extends StatelessWidget {
                     title: kZeroTradesFa,
                   )
                 : BacktestTradesTable(
+                    keyPrefix: 'bt-chart-trades',
                     trades: trades,
                     digits: digits,
                     showWindow: showWindow,

@@ -103,7 +103,7 @@ void main() {
     final BacktestTradesChartState s = await _pump(tester, f);
     final ChartController c = s.chart;
 
-    await tester.tap(_key('bt-trades-row-1'));
+    await tester.tap(_key('bt-chart-trades-row-1'));
     await tester.pumpAndSettle();
     expect(c.selectedTradeKey, (window: 0, index: 1));
     expect(c.data!.covers(f.trades[1].entryTime!) && c.data!.covers(f.trades[1].exitBarTime!), isTrue);
@@ -111,7 +111,7 @@ void main() {
     expect(ChartPainter.debugLastPaintedTrades, greaterThanOrEqualTo(1));
 
     // Back to the first trade: outside the new range again -> another reload.
-    await tester.tap(_key('bt-trades-row-0'));
+    await tester.tap(_key('bt-chart-trades-row-0'));
     await tester.pumpAndSettle();
     expect(c.selectedTradeKey, (window: 0, index: 0));
     _expectCentredOn(tester, c, f.trades[0]);
@@ -132,7 +132,7 @@ void main() {
     testWidgets('marker click opens the trade details ($name)', (tester) async {
       final _Fixture f = _Fixture();
       final BacktestTradesChartState s = await _pump(tester, f, theme: theme);
-      await tester.tap(_key('bt-trades-row-1'));
+      await tester.tap(_key('bt-chart-trades-row-1'));
       await tester.pumpAndSettle();
 
       final ChartCanvasState cs = _canvas(tester);
@@ -149,6 +149,42 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+
+  testWidgets('rebuilds: an equal trade list keeps the overlay; another window moves the range', (tester) async {
+    final _Fixture f = _Fixture();
+    List<BacktestTrade> trades = List<BacktestTrade>.of(f.trades);
+    DateTime start = f.bars.first.time;
+    late StateSetter rebuild;
+    tester.view.physicalSize = const Size(1600, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(MaterialApp(
+      theme: MyThemes.getLightTheme(),
+      home: Scaffold(
+        body: StatefulBuilder(builder: (BuildContext context, StateSetter set) {
+          rebuild = set;
+          return BacktestTradesChart(source: f.src, runId: 8, symbol: _sym, trades: trades, periodStart: start);
+        }),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    final ChartController c = tester.state<BacktestTradesChartState>(find.byType(BacktestTradesChart)).chart;
+    final TradeOverlay? first = c.tradeOverlay;
+
+    rebuild(() => trades = List<BacktestTrade>.of(f.trades)); // new list, same trades
+    await tester.pumpAndSettle();
+    expect(identical(c.tradeOverlay, first), isTrue);
+
+    rebuild(() => trades = <BacktestTrade>[f.trades[1]]); // another window's trades
+    await tester.pumpAndSettle();
+    expect(c.tradeOverlay!.trades.single.tradeIndex, 1);
+
+    rebuild(() => start = f.bars[1500].time); // another window's period
+    await tester.pumpAndSettle();
+    expect(c.from, f.bars[1500].time);
+    expect(c.data!.trades.single.key, (window: 0, index: 1));
+    expect(tester.takeException(), isNull);
+  });
 
   test('initial range: period start, capped; around the first trade without a period', () {
     final DateTime a = DateTime.utc(2023, 1, 2);

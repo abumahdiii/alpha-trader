@@ -32,6 +32,7 @@ class BacktestTradesTable extends StatelessWidget {
     this.showWindow = false,
     this.onRowTap,
     this.isSelected,
+    this.keyPrefix = 'bt-trades',
   });
 
   final List<BacktestTrade> trades;
@@ -46,11 +47,14 @@ class BacktestTradesTable extends StatelessWidget {
   final ValueChanged<BacktestTrade>? onRowTap;
   final bool Function(BacktestTrade t)? isSelected;
 
+  /// Test keys of the table (the chart tab's copy has its own).
+  final String keyPrefix;
+
   @override
   Widget build(BuildContext context) {
     String price(double? p) => formatChartPrice(p, digits);
     return SortableTable<BacktestTrade>(
-      keyPrefix: 'bt-trades',
+      keyPrefix: keyPrefix,
       rows: trades,
       isSelected: isSelected,
       onRowTap: onRowTap ?? (BacktestTrade t) => showTradeDetails(context, t, digits),

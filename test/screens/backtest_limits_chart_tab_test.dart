@@ -146,7 +146,7 @@ void main() {
     expect(c.data!.trades.map((m) => m.key.index), [0, 1]);
     expect(find.textContaining('3 معامله؛ 2 در بازه نمودار'), findsOneWidget);
 
-    await tester.tap(_key('bt-trades-row-1'));
+    await tester.tap(_key('bt-chart-trades-row-1'));
     await tester.pumpAndSettle();
     expect(c.selectedTradeKey, (window: 0, index: 1));
     expect(c.highlightIndex, c.data!.tradeByKey((window: 0, index: 1))!.entryIndex);
