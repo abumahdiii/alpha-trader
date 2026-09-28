@@ -1,7 +1,10 @@
 """Safety net for the signal-only rule (``.claude/rules/03_trading_safety.md`` section 1).
 
-Scans every ``.py`` file under ``engine/`` (excluding ``.venv``, ``__pycache__`` and this file) and fails
-if a banned MetaTrader 5 order/position/history API name appears:
+Scans every ``.py`` file under ``engine/`` (excluding ``.venv``, ``__pycache__``, this file and the plugin
+validator, which owns the shared scanner and therefore spells the names) and fails if a banned MetaTrader 5
+order/position/history API name appears. The scanner (``BANNED_NAMES``, ``find_violations``) lives in
+``alpha_engine/plugins/validator.py`` because uploaded strategy plugins are checked with the very same rules;
+the downloadable plugin template text is checked here as well:
 
 1. AST pass -- as an identifier (``Name``), attribute (``mt5.x``), import alias, function/class name,
    keyword argument, or inside any string literal (so ``getattr(mt5, "x")`` is caught too);
@@ -15,31 +18,20 @@ is a tripwire against accidents, not a sandbox; code review remains mandatory fo
 
 from __future__ import annotations
 
-import ast
-import re
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
+from alpha_engine.plugins import validator as plugin_validator
+from alpha_engine.plugins.template import TEMPLATE_SOURCE
+from alpha_engine.plugins.validator import BANNED_NAMES, find_source_violations, find_violations
+
 ENGINE_DIR = Path(__file__).resolve().parents[1]
 THIS_FILE = Path(__file__).resolve()
+# The plugin validator owns the shared scanner (BANNED_NAMES, find_violations), so it is the ONE engine module
+# that legitimately spells the banned names: the only exclusion besides this test file.
+VALIDATOR_FILE = Path(plugin_validator.__file__).resolve()
+EXCLUDED_FILES = (THIS_FILE, VALIDATOR_FILE)
 EXCLUDED_DIR_NAMES = frozenset({".venv", "venv", "__pycache__", ".pytest_cache"})
-
-BANNED_NAMES = frozenset({
-    "order_send",
-    "order_check",
-    "order_calc_margin",
-    "order_calc_profit",
-    "positions_get",
-    "positions_total",
-    "orders_get",
-    "orders_total",
-    "history_orders_get",
-    "history_orders_total",
-    "history_deals_get",
-    "history_deals_total",
-})
-# Word boundaries: "_" is a word char, so "history_orders_get" does not also report "orders_get".
-BANNED_RE = re.compile(r"\b(" + "|".join(sorted(BANNED_NAMES)) + r")\b")
 
 
 def iter_python_files(root: Path, exclude_files: Iterable[Path] = ()) -> Iterator[Path]:
@@ -51,44 +43,6 @@ def iter_python_files(root: Path, exclude_files: Iterable[Path] = ()) -> Iterato
         if path.resolve() in excluded:
             continue
         yield path
-
-
-def find_violations(path: Path) -> list[tuple[int, str, str]]:
-    """Return ``(line, kind, name)`` for each banned-name occurrence in ``path``."""
-    source = path.read_text(encoding="utf-8", errors="replace")
-    found: list[tuple[int, str, str]] = []
-
-    try:
-        tree = ast.parse(source, filename=str(path))
-    except SyntaxError:
-        tree = None
-        found.append((0, "unparsable", path.name))
-
-    if tree is not None:
-        for node in ast.walk(tree):
-            line = getattr(node, "lineno", 0)
-            if isinstance(node, ast.Name) and node.id in BANNED_NAMES:
-                found.append((line, "identifier", node.id))
-            elif isinstance(node, ast.Attribute) and node.attr in BANNED_NAMES:
-                found.append((line, "attribute", node.attr))
-            elif isinstance(node, ast.alias):
-                for name in (node.name, node.asname):
-                    if name and set(name.split(".")) & BANNED_NAMES:
-                        found.append((line, "import", name))
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in BANNED_NAMES:
-                found.append((line, "definition", node.name))
-            elif isinstance(node, ast.keyword) and node.arg in BANNED_NAMES:
-                found.append((line, "keyword", node.arg))
-            elif isinstance(node, ast.arg) and node.arg in BANNED_NAMES:
-                found.append((line, "argument", node.arg))
-            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-                for match in BANNED_RE.finditer(node.value):
-                    found.append((line, "string", match.group(1)))
-
-    for lineno, text in enumerate(source.splitlines(), start=1):
-        for match in BANNED_RE.finditer(text):
-            found.append((lineno, "text", match.group(1)))
-    return found
 
 
 def scan_tree(root: Path, exclude_files: Iterable[Path] = ()) -> dict[Path, list[tuple[int, str, str]]]:
@@ -103,19 +57,36 @@ def scan_tree(root: Path, exclude_files: Iterable[Path] = ()) -> dict[Path, list
 # --- the real check --------------------------------------------------------------------------------
 
 def test_engine_contains_no_order_api_names() -> None:
-    scanned = list(iter_python_files(ENGINE_DIR, exclude_files=[THIS_FILE]))
+    scanned = list(iter_python_files(ENGINE_DIR, exclude_files=EXCLUDED_FILES))
     # Guard against a broken glob producing a false green.
     assert ENGINE_DIR / "alpha_engine" / "app.py" in scanned
-    assert THIS_FILE not in scanned
+    for module in ("host.py", "worker.py", "checks.py", "store.py", "template.py", "fixture.py", "__init__.py"):
+        assert ENGINE_DIR / "alpha_engine" / "plugins" / module in scanned  # the plugin package IS scanned
+    assert ENGINE_DIR / "alpha_engine" / "routes" / "plugins.py" in scanned
+    assert THIS_FILE not in scanned and VALIDATOR_FILE not in scanned
     assert not any(".venv" in p.relative_to(ENGINE_DIR).parts for p in scanned)
 
-    violations = scan_tree(ENGINE_DIR, exclude_files=[THIS_FILE])
+    violations = scan_tree(ENGINE_DIR, exclude_files=EXCLUDED_FILES)
     report = "\n".join(
         f"{path.relative_to(ENGINE_DIR)}:{line}: {kind} {name}"
         for path, items in violations.items()
         for line, kind, name in items
     )
     assert not violations, "Banned MT5 order/position API names found (signal-only rule):\n" + report
+
+
+def test_only_the_validator_is_excluded_and_it_really_owns_the_banned_list() -> None:
+    """The exclusion is justified only because the validator defines the list itself."""
+    assert VALIDATOR_FILE == (ENGINE_DIR / "alpha_engine" / "plugins" / "validator.py").resolve()
+    assert set(EXCLUDED_FILES) == {THIS_FILE, VALIDATOR_FILE}
+    names = {name for _, _, name in find_violations(VALIDATOR_FILE)}
+    assert names == set(BANNED_NAMES)  # every banned name is spelled there (and nothing else is flagged)
+    assert len(BANNED_NAMES) == 12
+
+
+def test_template_string_contains_no_order_api_names() -> None:
+    # The template module is scanned as a file too; this checks the downloadable TEXT itself (AST + raw text).
+    assert find_source_violations(TEMPLATE_SOURCE, "template") == []
 
 
 # --- self-tests on planted violations (tmp files only) ---------------------------------------------

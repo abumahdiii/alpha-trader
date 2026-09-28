@@ -109,7 +109,7 @@ def find_source_violations(source: str, label: str = "<source>") -> list[tuple[i
 
 def find_violations(path: Path) -> list[tuple[int, str, str]]:
     """:func:`find_source_violations` of a file (read as UTF-8, undecodable bytes replaced)."""
-    return find_source_violations(path.read_text(encoding="utf-8", errors="replace"), str(path))
+    return find_source_violations(path.read_text(encoding="utf-8", errors="replace"), path.name)
 
 
 # ------------------------------------------------------------------------------------------- import whitelist
