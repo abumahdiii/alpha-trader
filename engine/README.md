@@ -353,15 +353,52 @@ trough. So the stored curve reproduces the stored Sharpe and `max_drawdown_abs` 
 
 | Route | Result |
 |---|---|
-| `POST /backtests` | 202 `{id, status: "queued", provisional, labels_fa}` |
-| `GET /backtests?limit=50` (1..500) | `{count, runs: [summary]}`, newest first |
+| `POST /backtests` | 202 `{id, status: "queued", provisional, labels_fa, seed, seed_generated}` (random: the seed the run uses; manual: both null) |
+| `GET /backtests?offset=0&limit=50&symbol&mode&status` | `{count, total, offset, limit, runs: [summary]}`, newest first (below) |
+| `GET /backtests/limits?symbol=XAUUSD.x` | allowed manual period + request bounds for the ACTIVE params (below) |
 | `GET /backtests/{id}` | detail (below) |
 | `GET /backtests/{id}/trades?window&offset=0&limit=500` (limit 1..5000) | `{run_id, window, total, offset, limit, trades: [trade]}` ordered by window, trade index |
 | `GET /backtests/{id}/equity?window` | `{run_id, window, downsampled: true, rule, count, points: [{window_index, time, balance, equity}]}` |
 | `GET /backtests/{id}/skipped?window` | `{run_id, window, count, skipped: [{window_index, time, confirmation_bar_time, direction, setup_type, reason, reason_fa, detail}]}` |
 | `POST /backtests/{id}/cancel` | `{id, status: "cancelled" (was queued) \| "running" (stops at the next check), cancel_requested: true}`; 409 `not_cancellable` when finished |
 | `DELETE /backtests/{id}` | `{id, deleted: true}`; 409 `run_active` while queued/running (cancel first) |
-| `WS /ws/backtests/{id}` | progress messages, then one final message, then close |
+| `WS /ws/backtests/{id}` | progress messages (plus keepalives while idle), then one final message, then close |
+
+**List paging and filters.** `offset` 0..10^9 (default 0), `limit` 1..500 (default 50); optional exact filters
+`symbol` (as stored, 1..32 characters), `mode` (`manual` | `random`), `status` (`queued` | `running` | `done` |
+`error` | `cancelled` | `interrupted`); filters combine with AND. `count` = items in this page, `total` = runs
+matching the filters (all pages), `offset`/`limit` = the effective values. An offset past the end gives
+`runs: []` with the correct `total`. Invalid values -> 422 `invalid_query` (Persian `message_fa`). Filter values
+are bound SQL parameters. Example: `GET /backtests?symbol=XAUUSD.x&mode=random&offset=20&limit=10` ->
+`{"count": 10, "total": 37, "offset": 20, "limit": 10, "runs": [...]}` (runs 21..30 of 37, newest first).
+
+**Period limits** (`GET /backtests/limits?symbol=`) are computed by the SAME code `POST /backtests` validates
+with (`routes.backtests.period_limits`: `periods.earliest_start` on the cached history and the first valid
+channel bar of the ACTIVE params, `periods.data_end`, `periods.warmup_h4_bars`). A manual run is accepted iff
+`earliest_start <= from < to <= data_end` (and at least one H1 bar inside); `from = earliest_start - 1h` gets
+422 `window_too_early`. The bounds change when the active params or the cache change (`params_hash` is
+echoed so the UI can tell).
+
+Worked example (synthetic fixture cache XAUUSD.x 2024-06-03 .. 2025-03-03, default params, n = 100,
+atr_period = 14 -> warm-up 10 x 14 = 140 H4 bars):
+
+```
+{"symbol": "XAUUSD.x", "earliest_start": "2024-07-29T09:00:00Z", "data_start": "2024-06-03T00:00:00Z",
+ "data_end": "2025-03-03T00:00:00Z", "warmup_h4_bars": 140, "window_months_max": 60, "windows_count_max": 500,
+ "seed_max": 9223372036854775807,
+ "default_fallback_spread_points": {"points": 30, "source": "auto_median_observed"},
+ "params_version": 1, "params_hash": "8e223612...a32ec5", "note_fa": "بازه دستی نیم‌باز ..."}
+```
+
+`POST` manual `from=2024-07-29T09:00:00Z, to=2025-03-03T00:00:00Z` -> 202; `from=2024-07-29T08:00:00Z` ->
+422 `window_too_early`; `to=2025-03-03T01:00:00Z` -> 422 `window_beyond_data`. `source` is
+`auto_median_observed` or `none`.
+
+`default_fallback_spread_points` = what an omitted `fallback_spread_points` resolves to
+(`costs.resolve_fallback_points`: ceil(median non-zero spread of the cached H1 history); `none` = no spread
+data, 0 points). Errors (standard format): 422 `invalid_query` (no symbol), `invalid_symbol`, `no_data`,
+`spec_missing`, `data_too_short`; 404 `symbol_not_configured`, `strategy_not_found`; 409 `stored_params_invalid`;
+503 `db_unavailable`, `cache_unreadable` (the same codes and statuses `POST /backtests` returns).
 
 `POST /backtests` body (`null` = not given; fields of the other mode -> 422 `field_not_for_mode`):
 
@@ -373,18 +410,21 @@ trough. So the stored curve reproduces the stored Sharpe and `max_drawdown_abs` 
 ```
 
 Manual: `[from, to)` UTC (no offset = UTC), required. Random: `windows_count` 1..500 (default 20),
-`window_months` 1..60 (default 3), `seed` 0..2^63-1 (omitted -> generated and stored, `seed_generated: true`).
+`window_months` 1..60 (default 3), `seed` 0..2^63-1 (omitted -> drawn by the engine AT SUBMIT TIME with
+`secrets.randbits(63)`, stored in the run row and the config snapshot before the run is queued, returned in the
+202 as `seed` with `seed_generated: true`; the stored `request` stays as sent, without a seed). Resubmitting
+with that seed reproduces the run exactly (same windows, metrics and trades).
 `commission_per_lot_per_side` 0..1000, `fallback_spread_points` 0..100000. The period is validated against the
 cache at POST time with the runner's own functions.
 
 Summary item: `{id, created_at, started_at, finished_at, status, progress (0..100), symbol, mode, from, to
-(manual), windows_count, window_months, seed (the seed used; null until a seedless random run is done),
-seed_generated, strategy, strategy_version, params_version, params_hash, provisional, trade_count, net_profit,
+(manual), windows_count, window_months, seed (random: the seed used, known from submit on; manual: null),
+seed_generated (random: true when the engine drew it; manual: null), strategy, strategy_version, params_version, params_hash, provisional, trade_count, net_profit,
 net_profit_pct, summary_basis: "single_window" | "window_mean" (random: mean window result), elapsed_s,
 error: {code, message_fa} | null}`.
 
 Detail = summary + `{labels_fa, provisional_label_fa, request (as validated), config (RunConfig: symbol, mode,
-start, end, windows_count, window_months, seed as submitted, cost_model {spread, fallback_spread_points,
+start, end, windows_count, window_months, seed (random: the seed used, incl. one drawn at submit), cost_model {spread, fallback_spread_points,
 commission_per_lot_per_side, swap}, account {balance, risk_pct, leverage, rr}, strategy_name,
 strategy_version, params, params_version, params_hash, provisional), plan (WindowPlan: mode, windows [{index,
 start, end}], seed, seed_generated, algorithm "numpy.PCG64", numpy_version, windows_count, window_months,
@@ -412,6 +452,7 @@ WebSocket messages (`/ws/backtests/{id}`, polled every 200 ms, sent only on chan
 ```
 {"type": "progress", "id": 3, "status": "queued|running", "phase": "queued|loading|scanning|simulating|saving",
  "percent": 42.5, "window": 3, "window_index": 2, "windows": 20, "cancel_requested": false}
+{"type": "keepalive", "id": 3, "time_utc": "2026-09-28T10:15:00Z"}
 {"type": "done", "id": 3, "status": "done", "percent": 100.0, "trade_count": 745, "net_profit": 12.3, "net_profit_pct": 1.23}
 {"type": "error"|"cancelled"|"interrupted", "id": 3, "status": ..., "percent": 57.0, "code": "...", "message_fa": "..."}
 {"type": "error", "id": 999, "status": null, "code": "backtest_not_found"|"db_unavailable", "message_fa": "..."}
@@ -419,6 +460,10 @@ WebSocket messages (`/ws/backtests/{id}`, polled every 200 ms, sent only on chan
 
 `percent` is overall: loading 0-3, scanning 3-15, simulating 15-95 (the simulator's own progress), saving
 95-100. A finished run sends its final message immediately. `window` is 1-based (i of `windows`).
+**Keepalive:** while the run is `queued`/`running` and nothing was sent for `WS_KEEPALIVE_S` = 15 s
+(`routes/backtests.py`), the socket sends `{"type": "keepalive", "id", "time_utc"}` (UTC, seconds); it carries
+no progress, clients ignore it (or use it as a liveness signal). Never sent after the final message. Existing
+message types are unchanged.
 
 Errors (`{"detail": {"code", "message_fa", "errors_fa"}}`): 422 `invalid_request` (Persian `errors_fa`),
 `field_not_for_mode`, `missing_period`, `invalid_range`, `window_too_early` (before channel + ATR warm-up),
