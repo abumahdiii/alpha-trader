@@ -127,7 +127,34 @@ target and gap counts.
   and closed on shutdown; only the engine writes it. If it cannot be opened the error is logged, `/health`
   keeps working and the routes below answer 503 `db_unavailable`. Tests always use a temp data dir.
 - **Registry:** `create_app` imports `alpha_engine.strategies`, which registers `stddev_channel` (code
-  version 1). Strategies are Python code; only their parameters are stored.
+  version 1). Strategies are Python code; only their parameters are stored. Built-in names
+  (`strategy.registry.RESERVED_NAMES` and every `source = "builtin"` class) can never be replaced, removed or
+  taken by a plugin; `StrategyRegistry.replace(cls)` / `unregister(name)` exist for plugin versions.
+
+### Strategy contract (S1: the engine is strategy-neutral)
+
+The backtester, the chart and the params store only use these members of `strategy.base.Strategy`, so
+`backtest/*` and `routes/backtests.py` never import a concrete strategy (`/chart/channel` is the only
+StdDev-specific route):
+
+| Member | Default | `stddev_channel` |
+|---|---|---|
+| `evaluate(ctx)` (abstract) | -- | one closed bar |
+| `scan(h1, h4, params, account, *, symbol)` | `evaluate_checked` on every closed prefix (H1 `h1[:t+1]`, H4 closed at `open_t + 1h`); correct, O(n^2) | vectorised, proven equal to per-bar `evaluate` |
+| `first_valid_index(h1, h4, params)` | `history_bars - 1` (class attribute, default 1) | first bar with channel + both Wilder ATRs defined |
+| `warmup_margin_h4_bars(params)` | 0 | `10 * atr_period` (140) |
+| `warmup_texts_fa` | neutral Persian wording | the channel/ATR wording of phase 4 |
+| `identity` | `StrategyIdentity(name, version, code_sha256, source)` from the class attributes (`source` = `builtin` / `plugin`, `code_sha256` = plugin source file hash) | `("stddev_channel", 1, None, "builtin")` |
+
+`SignalCandidate.setup` is any slug `^[a-z][a-z0-9_]{0,47}$`; the six `Setup` values keep the StdDev
+line/direction rules (and `stddev_channel` may only emit them), `line` may be `null`, and `setup_title_fa`
+(omitted while null) carries a non-StdDev title. `strategy.resolve.resolve_active(db, name=None, *, registry,
+version)` returns an `ActiveStrategy` (instance, params record, clean params, identity, params hash);
+`routes.resolve_strategy_or_error` maps unknown name / code version -> 404 `strategy_not_found`, stored params
+that no longer validate -> 409 `stored_params_invalid`. `history.scan_full_history` rejects candidates of another
+strategy / symbol / params hash or two on one bar (`StrategyContractError`). Every scan / first-valid / chart
+LRU key contains `identity.cache_key = (name, version, sha256)`, so two strategies whose params hash alike never
+share cached candidates.
 - **Params versions:** the first read creates params version 1 from the schema defaults; saving a different
   (validated) set creates version n+1 and makes it active; saving the same set keeps the version. Provenance
   = strategy name + code version + params version + `params_hash` (sha256 of the canonical validated JSON).
@@ -166,12 +193,20 @@ projection (`bar_count`, `calendar` for comparison) for the H1 bars decided with
 ## Chart data (phase 3, read-only, cache only)
 
 `alpha_engine/routes/chart.py`. Both routes read only the local cache (never MT5), use the ACTIVE params
-version of `stddev_channel` (`strategy.context.load_active_params`) and reuse the strategy code -- no
-channel/ATR/setup math is re-implemented. Everything is computed on the FULL cached history and then
+version of the selected strategy (optional `strategy` query parameter, default `stddev_channel`;
+`strategy.resolve.resolve_active`) and reuse the strategy code -- no channel/ATR/setup math is re-implemented.
+`/chart/channel` exists for `stddev_channel` only: another strategy -> 409 `channel_not_available` (Persian).
+Everything is computed on the FULL cached history and then
 filtered to `[from, to]` (Wilder ATR and the n-bar channel are path dependent), so a sub-range returns
 exactly the same numbers as the full range. Results are kept in a bounded in-process LRU
-(`app.state.chart_cache`, 16 entries, shared with the backtest jobs) keyed by symbol, cache-file identity, params hash (and R:R for
-setups); a cache write or a params change is a new key.
+(`app.state.chart_cache`, 16 entries, shared with the backtest jobs) keyed by symbol, cache-file identity,
+strategy identity (name, code version, source hash), params hash (and R:R for setups); a cache write or a
+params change is a new key.
+
+Strategy info in both responses: `strategy`, `strategy_version`, `strategy_source` (`builtin` | `plugin`) and,
+for plugins only, `strategy_sha256`. Setup items of a non-StdDev strategy: `setup_type` = its slug, `line` and
+`line_value` null, `setup_title_fa` from the candidate (else the slug), `id` =
+`SYMBOL:YYYYMMDDTHHMMZ:<hash12>:<strategy>` (the `stddev_channel` ids keep the form without the suffix).
 
 `from`/`to`: ISO UTC, optional. Defaults: `to` = last cached bar (setups: its close), `from` = `to - 30
 days`; `from > to` -> 422 `invalid_range`. Unknown symbol -> 404 `symbol_not_configured`, bad symbol ->
@@ -182,8 +217,8 @@ empty/invalid points and a Persian `message_fa`.
 
 | Route | Response |
 |---|---|
-| `GET /chart/channel?symbol&timeframe=H1\|H4&from&to` (default `H1`) | `{symbol, strategy, strategy_version, params_version, params_hash, params: {n, k, sigma_ddof, projection_mode, ...all 15}, timeframe, from, to, count, valid_count, points: [{time, valid, mid, upper, lower, slope, sigma, is_flat, direction: up\|down\|flat\|none, atr_h1, atr_h4, h4_open, bars_ahead}], message_fa}` |
-| `GET /chart/setups?symbol&from&to` | `{symbol, strategy, strategy_version, params_version, params_hash, params, from, to, account: {balance, risk_pct, leverage, rr}, symbol_spec, count, status_counts: {accepted, rejected, pending_entry}, setups: [...], note_fa, message_fa, evaluation: {...}, summary: {...}, backtest_window: {...}}` (phase 5: simulator rules, per-setup outcome and backtest flag) |
+| `GET /chart/channel?symbol&timeframe=H1\|H4&from&to[&strategy]` (default `H1`) | `{symbol, strategy, strategy_version, strategy_source, params_version, params_hash, params: {n, k, sigma_ddof, projection_mode, ...all 15}, timeframe, from, to, count, valid_count, points: [{time, valid, mid, upper, lower, slope, sigma, is_flat, direction: up\|down\|flat\|none, atr_h1, atr_h4, h4_open, bars_ahead}], message_fa}` |
+| `GET /chart/setups?symbol&from&to[&strategy]` | `{symbol, strategy, strategy_version, strategy_source, [strategy_sha256,] params_version, params_hash, params, from, to, account: {balance, risk_pct, leverage, rr}, symbol_spec, count, status_counts: {accepted, rejected, pending_entry}, setups: [...], note_fa, message_fa, evaluation: {...}, summary: {...}, backtest_window: {...}}` (phase 5: simulator rules, per-setup outcome and backtest flag) |
 
 **Channel points.** `H1`: one point per cached H1 bar = the channel of the last H4 bar closed at that
 bar's decision time (`h4_open`), projected `bars_ahead` H4 bars forward -- exactly the values the strategy
@@ -317,8 +352,10 @@ SL before TP inside one bar, open trades closed at the end of the period, no swa
 at a time, every window starts flat with the account balance of `/settings`.
 
 **Execution.** `POST /backtests` validates and stores the run `queued` and returns 202 at once; ONE background
-worker thread (`app.state.backtest_jobs`) runs the runs in submit order. Params (the ACTIVE params version) and
-`/settings` are snapshotted at POST time. Runs left `queued`/`running` by a previous engine process become
+worker thread (`app.state.backtest_jobs`) runs the runs in submit order. The strategy (body `strategy`, default
+`stddev_channel`), its identity, its ACTIVE params version and `/settings` are snapshotted at POST time; the
+worker checks the config against the strategy (`runner.check_config`: name, code version, source hash, params
+hash) before scanning. Runs left `queued`/`running` by a previous engine process become
 `interrupted` at startup; on shutdown the running run is cancelled (-> `interrupted`) before the DB closes.
 Status: `queued -> running -> done | error | cancelled`, `queued -> cancelled`, `* -> interrupted`.
 
@@ -355,7 +392,7 @@ trough. So the stored curve reproduces the stored Sharpe and `max_drawdown_abs` 
 |---|---|
 | `POST /backtests` | 202 `{id, status: "queued", provisional, labels_fa, seed, seed_generated}` (random: the seed the run uses; manual: both null) |
 | `GET /backtests?offset=0&limit=50&symbol&mode&status` | `{count, total, offset, limit, runs: [summary]}`, newest first (below) |
-| `GET /backtests/limits?symbol=XAUUSD.x` | allowed manual period + request bounds for the ACTIVE params (below) |
+| `GET /backtests/limits?symbol=XAUUSD.x[&strategy=]` | allowed manual period + request bounds for the ACTIVE params of the strategy (below) |
 | `GET /backtests/{id}` | detail (below) |
 | `GET /backtests/{id}/trades?window&offset=0&limit=500` (limit 1..5000) | `{run_id, window, total, offset, limit, trades: [trade]}` ordered by window, trade index |
 | `GET /backtests/{id}/equity?window` | `{run_id, window, downsampled: true, rule, count, points: [{window_index, time, balance, equity}]}` |
@@ -373,8 +410,9 @@ are bound SQL parameters. Example: `GET /backtests?symbol=XAUUSD.x&mode=random&o
 `{"count": 10, "total": 37, "offset": 20, "limit": 10, "runs": [...]}` (runs 21..30 of 37, newest first).
 
 **Period limits** (`GET /backtests/limits?symbol=`) are computed by the SAME code `POST /backtests` validates
-with (`routes.backtests.period_limits`: `periods.earliest_start` on the cached history and the first valid
-channel bar of the ACTIVE params, `periods.data_end`, `periods.warmup_h4_bars`). A manual run is accepted iff
+with (`routes.backtests.period_limits`: `periods.earliest_start` on the cached history with the strategy's
+`first_valid_index` and `warmup_margin_h4_bars` for its ACTIVE params, `periods.data_end`). A strategy without
+warm-up (margin 0) may start at the close of the last H4 bar closed at its first valid decision. A manual run is accepted iff
 `earliest_start <= from < to <= data_end` (and at least one H1 bar inside); `from = earliest_start - 1h` gets
 422 `window_too_early`. The bounds change when the active params or the cache change (`params_hash` is
 echoed so the UI can tell).
@@ -400,7 +438,10 @@ data, 0 points). Errors (standard format): 422 `invalid_query` (no symbol), `inv
 `spec_missing`, `data_too_short`; 404 `symbol_not_configured`, `strategy_not_found`; 409 `stored_params_invalid`;
 503 `db_unavailable`, `cache_unreadable` (the same codes and statuses `POST /backtests` returns).
 
-`POST /backtests` body (`null` = not given; fields of the other mode -> 422 `field_not_for_mode`):
+`POST /backtests` body (`null` = not given; fields of the other mode -> 422 `field_not_for_mode`). Optional in
+both modes: `strategy` (registered name, default `stddev_channel`) and `strategy_version` (must equal the
+registered code version); unknown -> 404 `strategy_not_found`. The stored config then carries
+`strategy_source` and, for plugins, `strategy_sha256` (omitted while null, so older configs are unchanged):
 
 ```
 {"symbol": "XAUUSD.x", "mode": "manual", "from": "2023-01-02T00:00:00Z", "to": "2024-01-01T00:00:00Z",
@@ -419,7 +460,8 @@ cache at POST time with the runner's own functions.
 
 Summary item: `{id, created_at, started_at, finished_at, status, progress (0..100), symbol, mode, from, to
 (manual), windows_count, window_months, seed (random: the seed used, known from submit on; manual: null),
-seed_generated (random: true when the engine drew it; manual: null), strategy, strategy_version, params_version, params_hash, provisional, trade_count, net_profit,
+seed_generated (random: true when the engine drew it; manual: null), strategy, strategy_version, strategy_source
+("builtin" | "plugin"; runs stored before S1: "builtin"), strategy_sha256 (plugins; else null), params_version, params_hash, provisional, trade_count, net_profit,
 net_profit_pct, summary_basis: "single_window" | "window_mean" (random: mean window result), elapsed_s,
 error: {code, message_fa} | null}`.
 
