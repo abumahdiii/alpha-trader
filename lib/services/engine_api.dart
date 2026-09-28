@@ -7,7 +7,9 @@ import 'package:dio/dio.dart';
 import '../core/app_logger.dart';
 import '../core/dev_mode.dart';
 import '../models/account_settings.dart';
+import '../models/backtest_models.dart';
 import '../models/chart_models.dart';
+import '../models/json_reader.dart';
 import '../models/market_data.dart';
 import '../models/strategy.dart';
 
@@ -304,6 +306,93 @@ class EngineApi {
         parse: StrategyUpdateResult.fromJson,
       );
 
+  // ----------------------------------------------------------------- backtests
+
+  /// Budget for result reads (a 5-year run: thousands of trades as JSON).
+  static const Duration resultCallTimeout = Duration(seconds: 30);
+
+  /// Most trades one `GET /backtests/{id}/trades` returns (engine `TRADES_LIMIT_MAX`).
+  static const int maxTradesPerPage = 5000;
+
+  /// `POST /backtests` -> 202 `{id, status: "queued", ...}`. The engine
+  /// validates the period against the cache first (slow budget); a bad
+  /// period is a 422 with a Persian `message_fa` (`window_too_early`,
+  /// `window_beyond_data`, ...), bad fields a 422 with `errors_fa`.
+  Future<BacktestSubmitResult> submitBacktest(BacktestRequest request, {Duration? timeout}) => _call(
+        'POST',
+        '/backtests',
+        body: request.toJson(),
+        timeout: timeout ?? slowCallTimeout,
+        parse: BacktestSubmitResult.fromJson,
+      );
+
+  /// `GET /backtests?limit` -- newest first (engine: 1..500, default 50).
+  Future<BacktestRunList> listBacktests({int? limit, Duration? timeout}) => _call(
+        'GET',
+        '/backtests',
+        query: {if (limit != null) 'limit': limit},
+        timeout: timeout,
+        parse: BacktestRunList.fromJson,
+      );
+
+  /// `GET /backtests/{id}` -- config, plan, labels, metrics, windows, live progress.
+  Future<BacktestRunDetail> getBacktest(int id, {Duration? timeout}) =>
+      _call('GET', '/backtests/$id', timeout: timeout, parse: BacktestRunDetail.fromJson);
+
+  /// `GET /backtests/{id}/trades?window&offset&limit` (limit 1..[maxTradesPerPage]).
+  Future<BacktestTradesPage> getBacktestTrades(
+    int id, {
+    int? window,
+    int offset = 0,
+    int limit = maxTradesPerPage,
+    Duration? timeout,
+  }) =>
+      _call(
+        'GET',
+        '/backtests/$id/trades',
+        query: {if (window != null) 'window': window, 'offset': offset, 'limit': limit},
+        timeout: timeout ?? resultCallTimeout,
+        parse: BacktestTradesPage.fromJson,
+      );
+
+  /// `GET /backtests/{id}/equity?window` -- the stored (downsampled) curve.
+  Future<BacktestEquity> getBacktestEquity(int id, {int? window, Duration? timeout}) => _call(
+        'GET',
+        '/backtests/$id/equity',
+        query: {if (window != null) 'window': window},
+        timeout: timeout ?? resultCallTimeout,
+        parse: BacktestEquity.fromJson,
+      );
+
+  /// `GET /backtests/{id}/skipped?window` -- candidates not traded, with Persian reasons.
+  Future<BacktestSkippedList> getBacktestSkipped(int id, {int? window, Duration? timeout}) => _call(
+        'GET',
+        '/backtests/$id/skipped',
+        query: {if (window != null) 'window': window},
+        timeout: timeout ?? resultCallTimeout,
+        parse: BacktestSkippedList.fromJson,
+      );
+
+  /// `POST /backtests/{id}/cancel`; 409 `not_cancellable` when already finished.
+  Future<BacktestCancelResult> cancelBacktest(int id, {Duration? timeout}) =>
+      _call('POST', '/backtests/$id/cancel', timeout: timeout, parse: BacktestCancelResult.fromJson);
+
+  /// `DELETE /backtests/{id}`; 409 `run_active` while queued/running.
+  Future<void> deleteBacktest(int id, {Duration? timeout}) => _call(
+        'DELETE',
+        '/backtests/$id',
+        timeout: timeout,
+        parse: (Object? json) {
+          final JsonReader r = JsonReader(json, 'backtest_delete');
+          if (r.boolOrNull('deleted') != true) {
+            throw const FormatException('backtest_delete.deleted is not true');
+          }
+        },
+      );
+
+  /// `ws://127.0.0.1:<port>/ws/backtests/{id}` -- the run's progress socket.
+  Uri backtestProgressUri(int id) => Uri.parse('ws://127.0.0.1:$port/ws/backtests/$id');
+
   void close() => _dio.close(force: true);
 
   // ------------------------------------------------------------------ plumbing
@@ -362,8 +451,7 @@ class EngineApi {
       throw _logged(_fromDio(e, what, limit), watch);
     } catch (e) {
       throw _logged(
-        EngineApiException(EngineApiErrorKind.unknown, 'درخواست به موتور ناموفق بود.',
-            detail: '$what: $e', cause: e),
+        EngineApiException(EngineApiErrorKind.unknown, 'درخواست به موتور ناموفق بود.', detail: '$what: $e', cause: e),
         watch,
       );
     }
@@ -401,8 +489,7 @@ class EngineApi {
   /// * `{"detail": [{"loc", "msg", "type"}, ...]}` (FastAPI's own
   ///   request validation, e.g. a missing query parameter).
   static EngineApiException errorFromResponse(int status, String raw) {
-    final EngineApiErrorKind kind =
-        status == 422 ? EngineApiErrorKind.validation : EngineApiErrorKind.badStatus;
+    final EngineApiErrorKind kind = status == 422 ? EngineApiErrorKind.validation : EngineApiErrorKind.badStatus;
     Object? detail;
     try {
       final Object? decoded = jsonDecode(raw);
