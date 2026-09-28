@@ -193,6 +193,41 @@ class BacktestController extends ChangeNotifier {
     _dropExactPeriod('symbol changed');
     _clearFieldError(BacktestField.symbol);
     _notify();
+    unawaited(loadLimits());
+  }
+
+  // ------------------------------------------------------------- limits
+
+  BacktestLimits? _limits;
+  int _limitsSerial = 0;
+
+  /// The engine's allowed manual period of the selected symbol
+  /// (`GET /backtests/limits`); null while unknown or when the call failed
+  /// (the form then works unbounded and the engine validates on submit).
+  BacktestLimits? get limits => _limits?.symbol == _symbol ? _limits : null;
+
+  /// Refetches [limits] for the selected symbol. Never throws; a failure
+  /// only leaves [limits] null.
+  Future<void> loadLimits() async {
+    final String? symbol = _symbol;
+    final int serial = ++_limitsSerial;
+    if (symbol == null) {
+      _limits = null;
+      _notify();
+      return;
+    }
+    try {
+      final BacktestLimits l = await api.getBacktestLimits(symbol);
+      if (_disposed || serial != _limitsSerial) return;
+      _limits = l;
+      final days = l.pickableDays;
+      _log('limits $symbol: $l -> pickable days ${days == null ? 'none' : '${days.first} .. ${days.last}'}');
+    } on EngineApiException catch (e) {
+      if (_disposed || serial != _limitsSerial) return;
+      _limits = null;
+      _log('limits $symbol failed (form stays unbounded): $e');
+    }
+    _notify();
   }
 
   void setMode(BacktestMode value) {
@@ -402,7 +437,9 @@ class BacktestController extends ChangeNotifier {
   /// `autoRun` it also submits.
   Future<void> applyPrefill(BacktestPrefill p) async {
     _log('prefill $p');
+    final bool symbolChanged = p.symbol != _symbol;
     _symbol = p.symbol;
+    if (symbolChanged) unawaited(loadLimits());
     _mode = BacktestMode.manual;
     final DateTime? from = p.from?.toUtc();
     final DateTime? to = p.to?.toUtc();
@@ -717,6 +754,7 @@ class BacktestController extends ChangeNotifier {
       _symbols = r.symbols;
       _symbol ??= _symbols.isEmpty ? null : _symbols.first.symbol;
       _log('symbols: ${_symbols.map((s) => s.symbol).toList()}');
+      if (_limits?.symbol != _symbol) unawaited(loadLimits());
     } on EngineApiException catch (e) {
       _log('symbols failed: $e');
       if (_disposed) return;

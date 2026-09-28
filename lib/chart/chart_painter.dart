@@ -1,14 +1,16 @@
 // CustomPainters of the candlestick chart (no chart package).
 //
 // Two layers:
-//  * [ChartPainter] — grid, gaps, candles, channel lines, setups, axes.
+//  * [ChartPainter] — grid, gaps, candles, channel lines, setups, backtest
+//    trades, axes.
 //    Repaints only when data / viewport / scale / selection / style change.
 //  * [CrosshairPainter] — hover crosshair and its axis labels; driven by a
 //    Listenable so mouse moves repaint only this layer.
 //
 // Culling: every loop runs over `viewport.visibleRange` only (plus the few
-// setups whose level segments reach into it), so a 5-year H1 series (~31k
-// bars) costs the same per frame as the ~150 bars on screen.
+// setups whose level segments reach into it, and the trades overlapping it),
+// so a 5-year H1 series (~31k bars, ~700 trades) costs the same per frame as
+// the ~150 bars on screen.
 //
 // Channel lines, entry/SL/TP and markers are drawn at the engine's values;
 // nothing is derived here except screen positions.
@@ -18,6 +20,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../models/backtest_models.dart';
 import '../theme/app_semantic_colors.dart';
 import 'chart_data.dart';
 import 'chart_format.dart';
@@ -160,6 +163,79 @@ abstract final class SetupMarkerGeometry {
   }
 }
 
+/// Geometry of a backtest trade's markers — shared by painting and
+/// hit-testing. Entry: an arrow whose tip is at the engine's entry price on
+/// the entry bar (buy points up, sell down). Exit: a small shape at the
+/// engine's exit price on the exit bar.
+abstract final class TradeMarkerGeometry {
+  static const double exitRadius = 4.5;
+
+  /// Entry arrow tip; null without an entry price.
+  static Offset? entryTip(TradeMark m, ChartViewport v, PriceScale s) {
+    final double? entry = m.trade.entry;
+    return entry == null ? null : Offset(v.xOf(m.entryIndex), s.yOf(entry));
+  }
+
+  static TradeSide side(TradeMark m) => m.isBuy ? TradeSide.buy : TradeSide.sell;
+
+  /// Entry arrow (same shape as a setup marker, pointing away from the tip).
+  static Path entryArrow(Offset tip, TradeMark m) => SetupMarkerGeometry.arrow(tip, side(m));
+
+  static Rect entryBounds(Offset tip, TradeMark m) => SetupMarkerGeometry.bounds(tip, side(m));
+
+  /// Exit marker centre; null without an exit price.
+  static Offset? exitCenter(TradeMark m, ChartViewport v, PriceScale s) {
+    final double? price = m.trade.exitPrice;
+    return price == null ? null : Offset(v.xOf(m.exitIndex), s.yOf(price));
+  }
+
+  static Rect exitBounds(Offset center) => Rect.fromCircle(center: center, radius: exitRadius);
+
+  /// Circle = SL/TP hit inside the bar, diamond = filled at a gapped open,
+  /// square = closed at the end of the period.
+  static Path exitShape(Offset c, TradeMark m) {
+    const double r = exitRadius;
+    if (m.exitKind == TradeExitKind.endOfPeriod) {
+      return Path()..addRect(Rect.fromCircle(center: c, radius: r * 0.85));
+    }
+    if (m.gapExit) {
+      return Path()
+        ..moveTo(c.dx, c.dy - r * 1.25)
+        ..lineTo(c.dx + r * 1.25, c.dy)
+        ..lineTo(c.dx, c.dy + r * 1.25)
+        ..lineTo(c.dx - r * 1.25, c.dy)
+        ..close();
+    }
+    return Path()..addOval(Rect.fromCircle(center: c, radius: r));
+  }
+}
+
+/// The backtest trade whose entry or exit marker is under [p] (plot
+/// coordinates), nearest first; null if none.
+TradeMark? hitTestTrade(ChartData data, ChartViewport v, PriceScale s, Offset p, {double slop = 5}) {
+  final IndexRange? range = v.visibleRange;
+  if (range == null || data.trades.isEmpty) return null;
+  TradeMark? best;
+  double bestDist = double.infinity;
+  void consider(TradeMark m, Rect bounds) {
+    final Rect r = bounds.inflate(slop);
+    if (!r.contains(p)) return;
+    final double d = (r.center - p).distanceSquared;
+    if (d < bestDist) {
+      bestDist = d;
+      best = m;
+    }
+  }
+
+  for (final TradeMark m in data.tradesOverlapping(range.first, range.last)) {
+    final Offset? tip = TradeMarkerGeometry.entryTip(m, v, s);
+    if (tip != null && range.contains(m.entryIndex)) consider(m, TradeMarkerGeometry.entryBounds(tip, m));
+    final Offset? c = TradeMarkerGeometry.exitCenter(m, v, s);
+    if (c != null && range.contains(m.exitIndex)) consider(m, TradeMarkerGeometry.exitBounds(c));
+  }
+  return best;
+}
+
 /// The setup marker under [p] (plot coordinates), nearest first; null if none.
 SetupMark? hitTestSetup(ChartData data, ChartViewport v, PriceScale s, Offset p, {double slop = 5}) {
   final IndexRange? range = v.visibleRange;
@@ -193,6 +269,17 @@ void _dashedVLine(Canvas canvas, double x, double y1, double y2, Paint paint, {d
   }
 }
 
+/// A dashed straight line from [a] to [b].
+void _dashedSegment(Canvas canvas, Offset a, Offset b, Paint paint, {double dash = 4, double space = 3}) {
+  final Offset d = b - a;
+  final double len = d.distance;
+  if (len < 1) return;
+  final Offset u = d / len;
+  for (double s = 0; s < len; s += dash + space) {
+    canvas.drawLine(a + u * s, a + u * math.min(s + dash, len), paint);
+  }
+}
+
 /// Draws [text] in a filled label box centred vertically at [anchor] (left
 /// aligned) or horizontally (top aligned) — used for axis labels.
 void _labelBox(Canvas canvas, String text, Offset anchor, ChartStyle style, {required bool vertical}) {
@@ -216,6 +303,7 @@ class ChartPainter extends CustomPainter {
     required this.scale,
     required this.style,
     this.selectedSetupId,
+    this.selectedTradeKey,
     this.highlightIndex,
   });
 
@@ -225,11 +313,17 @@ class ChartPainter extends CustomPainter {
   final PriceScale scale;
   final ChartStyle style;
   final String? selectedSetupId;
+  final TradeKey? selectedTradeKey;
   final int? highlightIndex;
 
   /// Bars drawn by the last [paint] — evidence that culling works.
   @visibleForTesting
   static int debugLastPaintedBars = 0;
+
+  /// Backtest trades drawn by the last [paint] (only those overlapping the
+  /// visible bars).
+  @visibleForTesting
+  static int debugLastPaintedTrades = 0;
 
   double get _w => viewport.barWidth;
 
@@ -247,9 +341,11 @@ class ChartPainter extends CustomPainter {
       _paintCandles(canvas, range);
       _paintChannel(canvas, range);
       _paintSetups(canvas, range);
+      debugLastPaintedTrades = _paintTrades(canvas, range);
       debugLastPaintedBars = range.length;
     } else {
       debugLastPaintedBars = 0;
+      debugLastPaintedTrades = 0;
     }
     canvas.restore();
     _paintPriceAxis(canvas);
@@ -562,6 +658,109 @@ class ChartPainter extends CustomPainter {
     }
   }
 
+  // ------------------------------------------------------------ backtest trades
+
+  /// Entry arrow, SL/TP segments from the entry bar to the exit bar, a thin
+  /// entry -> exit line and the exit marker (coloured by the engine's exit
+  /// reason) of every trade overlapping [range]. Engine prices only.
+  /// Returns how many trades were drawn.
+  int _paintTrades(Canvas canvas, IndexRange range) {
+    if (data.trades.isEmpty) return 0;
+    int painted = 0;
+    TradeMark? selected;
+    for (final TradeMark m in data.tradesOverlapping(range.first, range.last)) {
+      if (m.key == selectedTradeKey) {
+        selected = m; // on top of the others
+        continue;
+      }
+      _paintTrade(canvas, m, range, selected: false);
+      painted++;
+    }
+    if (selected != null) {
+      _paintTrade(canvas, selected, range, selected: true);
+      painted++;
+    }
+    return painted;
+  }
+
+  Color _exitColor(TradeMark m) => switch (m.exitKind) {
+        TradeExitKind.takeProfit => style.bull,
+        TradeExitKind.stopLoss => style.bear,
+        TradeExitKind.endOfPeriod || TradeExitKind.other => style.muted,
+      };
+
+  void _paintTrade(Canvas canvas, TradeMark m, IndexRange range, {required bool selected}) {
+    final BacktestTrade t = m.trade;
+    final double x1 = viewport.xOf(m.entryIndex) - _w / 2;
+    final double x2 = viewport.xOf(m.exitIndex) + _w / 2;
+    final Paint p = style.strokePaint..strokeWidth = selected ? 2.0 : 1.2;
+
+    void level(double? price, Color color, String tag) {
+      if (price == null) return;
+      final double y = scale.yOf(price);
+      p.color = color.withValues(alpha: selected ? 1 : 0.8);
+      canvas.drawLine(Offset(x1, y), Offset(x2, y), p);
+      if (selected) {
+        final TextPainter tp = TextPainter(
+          text: TextSpan(
+            text: '$tag ${formatChartPrice(price, data.digits)}',
+            style: style.axisTextStyle.copyWith(color: color, fontWeight: FontWeight.bold),
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        tp.paint(canvas, Offset(x2 + 3, y - tp.height / 2));
+      }
+    }
+
+    level(t.stopLoss, style.bear, 'SL');
+    level(t.takeProfit, style.bull, 'TP');
+    if (selected) level(t.entry, style.entry, 'Entry');
+
+    final Offset? tip = TradeMarkerGeometry.entryTip(m, viewport, scale);
+    final Offset? exit = TradeMarkerGeometry.exitCenter(m, viewport, scale);
+    final Color exitColor = _exitColor(m);
+    if (tip != null && exit != null) {
+      _dashedSegment(
+          canvas,
+          tip,
+          exit,
+          style.strokePaint
+            ..color = exitColor.withValues(alpha: 0.75)
+            ..strokeWidth = selected ? 1.6 : 1.0);
+    }
+    if (tip != null && range.contains(m.entryIndex)) {
+      final Path arrow = TradeMarkerGeometry.entryArrow(tip, m);
+      canvas.drawPath(arrow, style.fillPaint..color = m.isBuy ? style.bull : style.bear);
+      canvas.drawPath(
+          arrow,
+          style.strokePaint
+            ..color = style.axisBackground
+            ..strokeWidth = 1);
+    }
+    if (exit != null && range.contains(m.exitIndex)) {
+      final Path shape = TradeMarkerGeometry.exitShape(exit, m);
+      canvas.drawPath(shape, style.fillPaint..color = exitColor);
+      canvas.drawPath(
+          shape,
+          style.strokePaint
+            ..color = style.axisBackground
+            ..strokeWidth = 1);
+    }
+    if (selected) {
+      final List<Rect> boxes = <Rect>[
+        if (tip != null) TradeMarkerGeometry.entryBounds(tip, m),
+        if (exit != null) TradeMarkerGeometry.exitBounds(exit),
+      ];
+      for (final Rect b in boxes) {
+        canvas.drawRect(
+            b.inflate(4),
+            style.strokePaint
+              ..color = style.entry
+              ..strokeWidth = 1.5);
+      }
+    }
+  }
+
   @override
   bool shouldRepaint(ChartPainter old) =>
       !identical(old.data, data) ||
@@ -570,6 +769,7 @@ class ChartPainter extends CustomPainter {
       old.scale != scale ||
       !identical(old.style, style) ||
       old.selectedSetupId != selectedSetupId ||
+      old.selectedTradeKey != selectedTradeKey ||
       old.highlightIndex != highlightIndex;
 }
 

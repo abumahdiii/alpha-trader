@@ -125,12 +125,18 @@ class BacktestFormPanel extends StatelessWidget {
     final BacktestController c = controller;
     final DateTime now = DateTime.now();
     final DateTime? current = isFrom ? c.fromDay : c.toDay;
-    final DateTime initial = current == null ? now : DateTime(current.year, current.month, current.day);
+    // The engine's allowed days (GET /backtests/limits); unbounded when unknown.
+    final ({DateTime first, DateTime last})? days = c.limits?.pickableDays;
+    final DateTime first = days == null ? DateTime(2000) : _calendarDay(days.first);
+    final DateTime last = days == null ? DateTime(now.year + 1, 12, 31) : _calendarDay(days.last);
+    DateTime initial = current == null ? DateTime(now.year, now.month, now.day) : _calendarDay(current);
+    if (initial.isBefore(first)) initial = first;
+    if (initial.isAfter(last)) initial = last;
     final DateTime? picked = await showDatePicker(
       context: context,
       initialDate: initial,
-      firstDate: DateTime(2000),
-      lastDate: DateTime(now.year + 1, 12, 31),
+      firstDate: first,
+      lastDate: last,
       helpText: isFrom ? 'روز شروع بازه (UTC)' : 'روز پایان بازه (UTC)',
     );
     if (picked == null) return;
@@ -165,12 +171,44 @@ class BacktestFormPanel extends StatelessWidget {
         ),
       ]),
       if (c.hasExactPeriod) _exactPeriodNote(context),
+      if (c.limits?.pickableDays != null) _limitsNote(context),
       FieldErrors(c.errorsOf(BacktestField.period), key: const ValueKey<String>('bt-period-errors')),
       _hint(
           context,
           'روزها به وقت UTC هستند و روز پایان هم جزو بازه است. ابتدای بازه باید بعد از زمان لازم برای '
           'آماده شدن کانال و ATR باشد؛ در غیر این صورت موتور پیام خطا می‌دهد.'),
     ]);
+  }
+
+  /// A UTC day as the date picker's calendar date.
+  static DateTime _calendarDay(DateTime utcDay) => DateTime(utcDay.year, utcDay.month, utcDay.day);
+
+  /// «بازه مجاز»: the whole days the pickers allow, with the engine's exact
+  /// instants in the tooltip.
+  Widget _limitsNote(BuildContext context) {
+    final BacktestLimits l = controller.limits!;
+    final ({DateTime first, DateTime last}) days = l.pickableDays!;
+    String minute(DateTime? t) {
+      if (t == null) return kDash;
+      final DateTime u = t.toUtc();
+      return '${fmtDay(u)} ${u.hour.toString().padLeft(2, '0')}:${u.minute.toString().padLeft(2, '0')}';
+    }
+
+    return Tooltip(
+      message: [
+        'موتور: از ${minute(l.earliestStart)} تا ${minute(l.dataEnd)} UTC (پایان باز).',
+        'روز اول بعد از آماده شدن کانال و ATR است و روز آخر، آخرین روز کامل داده کش.',
+        if (l.noteFa != null) l.noteFa!,
+      ].join('\n'),
+      child: Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: Text(
+          'بازه مجاز: ${fmtDay(days.first)} تا ${fmtDay(days.last)} (UTC)',
+          key: const ValueKey<String>('bt-limits-note'),
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: context.appColors.info),
+        ),
+      ),
+    );
   }
 
   /// The exact period a chart prefill will run (instead of the whole days above).
