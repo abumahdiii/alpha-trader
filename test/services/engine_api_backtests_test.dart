@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:alpha_trader/models/backtest_models.dart';
@@ -129,6 +131,59 @@ void main() {
     final EngineApiException e = await _failure(_api(http).getBacktest(99));
     expect(e.statusCode, 404);
     expect(e.messageFa, 'بک‌تستی با این شناسه پیدا نشد.');
+  });
+
+  test('GET /backtests/limits?symbol parses the allowed period', () async {
+    final http = FakeEngineHttp({'GET /backtests/limits': (_) => jsonBody(limitsJson())});
+    final BacktestLimits l = await _api(http).getBacktestLimits('XAUUSD.x');
+    expect(http.sent('GET /backtests/limits').single.uri.queryParameters, {'symbol': 'XAUUSD.x'});
+    expect(l.symbol, 'XAUUSD.x');
+    expect(l.earliestStart, DateTime.utc(2024, 7, 29, 9));
+    expect(l.dataEnd, DateTime.utc(2025, 3, 3));
+    expect(l.paramsHash, kHash);
+    expect(l.warmupH4Bars, 140);
+  });
+
+  group('409 fallback without message_fa is code-aware, never about stored data by default', () {
+    String fallback(Object body) => EngineApi.errorFromResponse(409, jsonEncode(body)).messageFa;
+
+    test('not_cancellable / run_active', () {
+      expect(
+          fallback({
+            'detail': {'code': 'not_cancellable'}
+          }),
+          'این اجرا دیگر در حال انجام نیست و لغو نمی‌شود.');
+      expect(
+          fallback({
+            'detail': {'code': 'run_active', 'message_fa': ''}
+          }),
+          'این اجرا هنوز در حال انجام است؛ اول آن را لغو کنید.');
+    });
+
+    test('unknown code, string detail, no body: neutral', () {
+      const String neutral = 'موتور این درخواست را در وضعیت فعلی نپذیرفت.';
+      expect(
+          fallback({
+            'detail': {'code': 'something_new'}
+          }),
+          neutral);
+      expect(fallback({'detail': 'Conflict'}), neutral);
+      expect(EngineApi.errorFromResponse(409, '').messageFa, neutral);
+      expect(neutral, isNot(contains('ذخیره')));
+    });
+
+    test('stored_params_invalid keeps its storage meaning; the engine message always wins', () {
+      expect(
+          fallback({
+            'detail': {'code': 'stored_params_invalid'}
+          }),
+          contains('ذخیره‌شده'));
+      expect(
+          fallback({
+            'detail': {'code': 'not_cancellable', 'message_fa': 'پیام موتور'}
+          }),
+          'پیام موتور');
+    });
   });
 
   test('progress socket URI on the engine port', () {

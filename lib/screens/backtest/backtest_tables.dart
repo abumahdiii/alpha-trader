@@ -22,9 +22,18 @@ Widget _money(BuildContext context, double? v) =>
     LtrText(fmtMoney(v), style: TextStyle(color: pnlColor(context, v), fontWeight: FontWeight.w600));
 
 /// Sortable list of simulated trades; times in local time (UTC in the
-/// tooltip). A click opens the trade's details.
+/// tooltip). A click opens the trade's details, or calls [onRowTap] (the
+/// chart tab: zoom onto the trade).
 class BacktestTradesTable extends StatelessWidget {
-  const BacktestTradesTable({super.key, required this.trades, this.digits, this.showWindow = false});
+  const BacktestTradesTable({
+    super.key,
+    required this.trades,
+    this.digits,
+    this.showWindow = false,
+    this.onRowTap,
+    this.isSelected,
+    this.keyPrefix = 'bt-trades',
+  });
 
   final List<BacktestTrade> trades;
 
@@ -34,13 +43,21 @@ class BacktestTradesTable extends StatelessWidget {
   /// Random runs: a window column.
   final bool showWindow;
 
+  /// Replaces «open the details» on a row click.
+  final ValueChanged<BacktestTrade>? onRowTap;
+  final bool Function(BacktestTrade t)? isSelected;
+
+  /// Test keys of the table (the chart tab's copy has its own).
+  final String keyPrefix;
+
   @override
   Widget build(BuildContext context) {
     String price(double? p) => formatChartPrice(p, digits);
     return SortableTable<BacktestTrade>(
-      keyPrefix: 'bt-trades',
+      keyPrefix: keyPrefix,
       rows: trades,
-      onRowTap: (BacktestTrade t) => showTradeDetails(context, t, digits),
+      isSelected: isSelected,
+      onRowTap: onRowTap ?? (BacktestTrade t) => showTradeDetails(context, t, digits),
       columns: [
         if (showWindow)
           SortableColumn<BacktestTrade>(

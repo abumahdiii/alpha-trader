@@ -12,8 +12,9 @@ import '../chart_viewport.dart';
 
 /// Interactive candlestick canvas: owns the viewport (it depends on the
 /// pixel width), turns wheel / drag / pinch into zoom and pan, draws the
-/// crosshair under the mouse and reports clicks: a setup marker first, else
-/// the candle under the click, else an empty-area click. Always
+/// crosshair under the mouse and reports clicks: a setup marker first, then a
+/// backtest trade marker, else the candle under the click, else an
+/// empty-area click. Always
 /// left-to-right (time axis), even inside the RTL app.
 class ChartCanvas extends StatefulWidget {
   const ChartCanvas({
@@ -21,8 +22,10 @@ class ChartCanvas extends StatefulWidget {
     required this.data,
     required this.viewRequest,
     this.selectedSetupId,
+    this.selectedTradeKey,
     this.highlightIndex,
     this.onSetupTap,
+    this.onTradeTap,
     this.onCandleTap,
     this.onEmptyTap,
   });
@@ -30,10 +33,15 @@ class ChartCanvas extends StatefulWidget {
   final ChartData data;
   final ChartViewRequest viewRequest;
   final String? selectedSetupId;
+  final TradeKey? selectedTradeKey;
   final int? highlightIndex;
 
-  /// A click on a setup marker (has priority over [onCandleTap]).
+  /// A click on a setup marker (has priority over [onTradeTap] and [onCandleTap]).
   final ValueChanged<SetupMark>? onSetupTap;
+
+  /// A click on a backtest trade's entry or exit marker (has priority over
+  /// [onCandleTap]).
+  final ValueChanged<TradeMark>? onTradeTap;
 
   /// A click on the column of bar `index` (not on a marker).
   final ValueChanged<int>? onCandleTap;
@@ -65,7 +73,8 @@ class ChartCanvasState extends State<ChartCanvas> {
   @override
   void didUpdateWidget(ChartCanvas oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!identical(oldWidget.data, widget.data)) {
+    // Same bars with another trade overlay (ChartData.withTrades): keep the view.
+    if (!identical(oldWidget.data, widget.data) && !identical(oldWidget.data.rates, widget.data.rates)) {
       // New load: start from the newest bars; a pending request re-applies.
       _viewport = null;
       _appliedRequest = -1;
@@ -95,9 +104,11 @@ class ChartCanvasState extends State<ChartCanvas> {
     if (req.serial != _appliedRequest) {
       _appliedRequest = req.serial;
       if (req.reset) v = v.reset();
+      final double? fit = req.fitBars;
+      if (fit != null) v = v.fitBars(fit);
       final int? focus = req.focusIndex;
       if (focus != null && focus >= 0 && focus < widget.data.length) v = v.centerOn(focus);
-      devLog('[Chart] view request #${req.serial}: reset=${req.reset} focus=${req.focusIndex} -> $v');
+      devLog('[Chart] view request #${req.serial}: reset=${req.reset} focus=${req.focusIndex} fit=$fit -> $v');
     }
     return _viewport = v;
   }
@@ -143,6 +154,12 @@ class ChartCanvasState extends State<ChartCanvas> {
     if (hit != null) {
       devLog('[Chart] tap -> setup marker ${hit.item.id} (marker has priority over the candle)');
       widget.onSetupTap?.call(hit);
+      return;
+    }
+    final TradeMark? trade = hitTestTrade(widget.data, v, scale, p);
+    if (trade != null) {
+      devLog('[Chart] tap -> trade marker ${trade.key} (trade has priority over the candle)');
+      widget.onTradeTap?.call(trade);
       return;
     }
     final int? bar = v.barAt(p.dx);
@@ -209,6 +226,7 @@ class ChartCanvasState extends State<ChartCanvas> {
                         scale: scale,
                         style: style,
                         selectedSetupId: widget.selectedSetupId,
+                        selectedTradeKey: widget.selectedTradeKey,
                         highlightIndex: widget.highlightIndex,
                       ),
                     ),

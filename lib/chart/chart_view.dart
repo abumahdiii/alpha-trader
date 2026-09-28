@@ -20,8 +20,20 @@ import 'widgets/setups_pane.dart';
 /// panel, and a resizable / collapsible bottom pane with the range summary
 /// and the full setups table.
 /// Everything is read from [controller]; nothing is computed here.
+///
+/// Embedded (the backtest result's «نمودار» tab): [bottomPane] replaces the
+/// setups pane, [symbolLocked] fixes the series' symbol and [onTradeTap]
+/// opens a backtest trade clicked on the chart.
 class ChartView extends StatefulWidget {
-  const ChartView({super.key, required this.controller, this.onBacktestRange});
+  const ChartView({
+    super.key,
+    required this.controller,
+    this.onBacktestRange,
+    this.bottomPane,
+    this.onTradeTap,
+    this.symbolLocked = false,
+    this.initialShowDataInfo = true,
+  });
 
   final ChartController controller;
 
@@ -29,9 +41,23 @@ class ChartView extends StatefulWidget {
   /// null = the button stays disabled.
   final ValueChanged<BacktestRangeRequest>? onBacktestRange;
 
+  /// Builds the resizable bottom pane instead of the setups pane. It must
+  /// show a [SetupsPane.headerHeight] header with the collapse toggle.
+  final ChartBottomPaneBuilder? bottomPane;
+
+  /// A click on a backtest trade marker (after the controller selected it).
+  final ValueChanged<TradeMark>? onTradeTap;
+
+  /// The symbol dropdown is shown but cannot change.
+  final bool symbolLocked;
+  final bool initialShowDataInfo;
+
   @override
   State<ChartView> createState() => _ChartViewState();
 }
+
+/// Bottom pane of an embedded [ChartView]: [collapsed] shows only its header.
+typedef ChartBottomPaneBuilder = Widget Function(BuildContext context, bool collapsed, VoidCallback onToggleCollapsed);
 
 /// The canvas and the candle panel form one tap region: a click on either
 /// is routed by the canvas / panel itself; any other click closes the panel.
@@ -50,7 +76,7 @@ class _ChartViewState extends State<ChartView> {
   /// Dragged pane height; null = [_defaultPaneFraction].
   double? _paneHeight;
   bool _paneCollapsed = false;
-  bool _showDataInfo = true;
+  late bool _showDataInfo = widget.initialShowDataInfo;
 
   @override
   void dispose() {
@@ -75,6 +101,12 @@ class _ChartViewState extends State<ChartView> {
     );
   }
 
+  void _openTrade(TradeMark m) {
+    devLog('[Chart] trade marker ${m.key} tapped -> details');
+    widget.controller.selectTrade(m.key);
+    widget.onTradeTap?.call(m);
+  }
+
   void _togglePane() {
     setState(() => _paneCollapsed = !_paneCollapsed);
     devLog('[Chart] setups pane ${_paneCollapsed ? 'collapsed' : 'expanded'}');
@@ -94,7 +126,12 @@ class _ChartViewState extends State<ChartView> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            _ChartToolbar(controller: c, showDataInfo: _showDataInfo, onToggleDataInfo: _toggleDataInfo),
+            _ChartToolbar(
+              controller: c,
+              showDataInfo: _showDataInfo,
+              onToggleDataInfo: _toggleDataInfo,
+              symbolLocked: widget.symbolLocked,
+            ),
             if (c.isLoading) const LinearProgressIndicator(minHeight: 2) else const SizedBox(height: 2),
             Expanded(child: LayoutBuilder(builder: (BuildContext context, BoxConstraints box) => _body(c, box))),
             _StatusLine(controller: c),
@@ -136,12 +173,13 @@ class _ChartViewState extends State<ChartView> {
         ),
         SizedBox(
           height: pane,
-          child: SetupsPane(
-            controller: c,
-            collapsed: _paneCollapsed,
-            onToggleCollapsed: _togglePane,
-            onBacktestRange: widget.onBacktestRange,
-          ),
+          child: widget.bottomPane?.call(context, _paneCollapsed, _togglePane) ??
+              SetupsPane(
+                controller: c,
+                collapsed: _paneCollapsed,
+                onToggleCollapsed: _togglePane,
+                onBacktestRange: widget.onBacktestRange,
+              ),
         ),
       ],
     );
@@ -169,8 +207,10 @@ class _ChartViewState extends State<ChartView> {
                   data: data,
                   viewRequest: c.viewRequest,
                   selectedSetupId: c.selectedSetupId,
+                  selectedTradeKey: c.selectedTradeKey,
                   highlightIndex: c.highlightIndex,
                   onSetupTap: _openSetup,
+                  onTradeTap: _openTrade,
                   onCandleTap: _onCandleTap,
                   onEmptyTap: () => c.clearInspection(reason: 'empty chart tap'),
                 ),
@@ -241,11 +281,17 @@ class _StateMessage extends StatelessWidget {
 }
 
 class _ChartToolbar extends StatelessWidget {
-  const _ChartToolbar({required this.controller, required this.showDataInfo, required this.onToggleDataInfo});
+  const _ChartToolbar({
+    required this.controller,
+    required this.showDataInfo,
+    required this.onToggleDataInfo,
+    this.symbolLocked = false,
+  });
 
   final ChartController controller;
   final bool showDataInfo;
   final VoidCallback onToggleDataInfo;
+  final bool symbolLocked;
 
   Future<void> _pickDay(BuildContext context, {required bool isFrom}) async {
     final ChartController c = controller;
@@ -291,9 +337,13 @@ class _ChartToolbar extends StatelessWidget {
               for (final SymbolItem s in c.symbols)
                 DropdownMenuItem<String>(value: s.symbol, child: Text(s.symbol, textDirection: TextDirection.ltr)),
             ],
-            onChanged: (String? s) {
-              if (s != null) c.setSymbol(s);
-            },
+            onChanged: symbolLocked
+                ? null
+                : (String? s) {
+                    if (s != null) c.setSymbol(s);
+                  },
+            // A locked symbol stays readable (the default disabled hint would hide it).
+            disabledHint: c.symbol == null ? null : Text(c.symbol!, textDirection: TextDirection.ltr),
           ),
           ToggleButtons(
             key: const ValueKey<String>('chart-timeframe'),
@@ -355,9 +405,13 @@ class _ChartToolbar extends StatelessWidget {
             icon: const Icon(Icons.dataset_outlined),
           ),
           Tooltip(
-            message: 'چرخ ماوس: زوم روی نشانگر — Shift + چرخ یا کشیدن: جابه‌جایی — کلیک روی فلش: جزئیات ستاپ — '
-                'کلیک روی کندل: اطلاعات کندل (Esc: بستن) — کلیک روی ردیف جدول ستاپ‌ها: رفتن به آن ستاپ؛ '
-                'مرز بالای جدول را برای تغییر اندازه بکشید',
+            message: c.tradeOverlay != null
+                ? 'چرخ ماوس: زوم روی نشانگر — Shift + چرخ یا کشیدن: جابه‌جایی — کلیک روی فلش ورود یا نشانگر خروج: '
+                    'جزئیات معامله — کلیک روی کندل: اطلاعات کندل (Esc: بستن) — کلیک روی ردیف جدول معاملات: زوم روی '
+                    'آن معامله؛ مرز بالای جدول را برای تغییر اندازه بکشید'
+                : 'چرخ ماوس: زوم روی نشانگر — Shift + چرخ یا کشیدن: جابه‌جایی — کلیک روی فلش: جزئیات ستاپ — '
+                    'کلیک روی کندل: اطلاعات کندل (Esc: بستن) — کلیک روی ردیف جدول ستاپ‌ها: رفتن به آن ستاپ؛ '
+                    'مرز بالای جدول را برای تغییر اندازه بکشید',
             child: Icon(Icons.help_outline, size: 20, color: context.appColors.mutedText),
           ),
         ],
@@ -429,11 +483,14 @@ class _StatusLine extends StatelessWidget {
   Widget build(BuildContext context) {
     final ChartData? d = controller.data;
     final AppSemanticColors colors = context.appColors;
+    final bool trades = controller.tradeOverlay != null;
     final List<String> parts = <String>[
-      'زمان‌های محور و پنل کندل: UTC — جدول ستاپ‌ها: وقت محلی (UTC در راهنمای هر خانه)'
+      'زمان‌های محور و پنل کندل: UTC — جدول ${trades ? 'معاملات' : 'ستاپ‌ها'}: وقت محلی (UTC در راهنمای هر خانه)'
     ];
     if (d != null) {
       parts.add('${d.length} کندل');
+      final TradeOverlay? o = d.tradeOverlay;
+      if (o != null) parts.add('${d.trades.length} معامله از ${o.trades.length} در این بازه');
       final StrategyProvenance? p = d.channelResult?.provenance;
       if (p != null) parts.add('پارامترها: نسخه ${p.paramsVersion}');
       if (d.rates.stale) parts.add('MT5 در دسترس نبود؛ ممکن است کندل‌های اخیر در کش نباشند');

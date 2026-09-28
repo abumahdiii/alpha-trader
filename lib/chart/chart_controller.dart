@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 
 import '../core/app_logger.dart';
 import '../core/dev_mode.dart';
 import 'chart_data.dart';
+import '../models/backtest_models.dart';
 import '../models/market_data.dart';
 import '../services/engine_api.dart';
 import 'chart_data_source.dart';
@@ -17,7 +19,7 @@ enum ChartLoadState { idle, loading, ready, empty, error }
 /// depends on its pixel width). [serial] changes on every new request.
 @immutable
 class ChartViewRequest {
-  const ChartViewRequest._(this.serial, {this.focusIndex, this.reset = false});
+  const ChartViewRequest._(this.serial, {this.focusIndex, this.reset = false, this.fitBars});
 
   static const ChartViewRequest none = ChartViewRequest._(0);
 
@@ -25,6 +27,9 @@ class ChartViewRequest {
 
   /// Centre this bar.
   final int? focusIndex;
+
+  /// Zoom so about this many bars fill the plot (before centring).
+  final double? fitBars;
 
   /// Back to the newest bars at the default zoom.
   final bool reset;
@@ -84,9 +89,15 @@ const String kRangeOrderErrorFa = 'تاریخ شروع باید قبل از تا
 /// the data-info / update panel. All data comes from a [ChartDataSource];
 /// this class never computes a trading value.
 class ChartController extends ChangeNotifier {
-  ChartController({required ChartDataSource source}) : _source = source;
+  /// [showSetups] false: no `/chart/setups` request (the backtest chart
+  /// shows the run's trades instead of the scanned setups).
+  ChartController({required ChartDataSource source, this.showSetups = true}) : _source = source;
 
   final ChartDataSource _source;
+  final bool showSetups;
+
+  /// Bars around a trade that [focusTrade] shows at least.
+  static const double minTradeFitBars = 40;
 
   /// Default window when no range is chosen: the last 30 days of data.
   static const Duration defaultWindow = Duration(days: 30);
@@ -110,6 +121,8 @@ class ChartController extends ChangeNotifier {
   bool _updating = false;
   UpdateOutcome? _updateOutcome;
   int? _inspectedIndex;
+  TradeOverlay? _tradeOverlay;
+  TradeKey? _selectedTradeKey;
 
   // Inputs of the last load() that went out (snapshot at its start), for
   // the «به‌روزرسانی نمودار» highlight.
@@ -147,6 +160,12 @@ class ChartController extends ChangeNotifier {
   String? get selectedSetupId => _selectedSetupId;
   SetupMark? get selectedSetup => _data?.setupById(_selectedSetupId);
   int? get highlightIndex => _highlightIndex;
+
+  /// Backtest trades drawn over the bars (null = none, e.g. the chart page).
+  TradeOverlay? get tradeOverlay => _tradeOverlay;
+
+  /// The trade picked by a table row or a marker click (kept across reloads).
+  TradeKey? get selectedTradeKey => _selectedTradeKey;
   ChartViewRequest get viewRequest => _viewRequest;
   DataInfo? get dataInfo => _dataInfo;
   bool get dataInfoLoading => _dataInfoLoading;
@@ -204,6 +223,28 @@ class ChartController extends ChangeNotifier {
       return;
     }
     await _applyDefaultRange();
+    await load();
+    unawaited(refreshDataInfo());
+  }
+
+  /// Opens a fixed series (the backtest chart): symbols (for the price
+  /// digits), then [symbol] over [from]..[to] (UTC), then the data info.
+  Future<void> openSeries({required String symbol, DateTime? from, DateTime? to}) async {
+    final int serial = ++_loadSerial;
+    _symbol = symbol;
+    _from = from?.toUtc();
+    _to = to?.toUtc();
+    _log('open series $symbol ${_fmt(_from)} .. ${_fmt(_to)}');
+    _setState(ChartLoadState.loading);
+    try {
+      final List<SymbolItem> list = await _source.symbols();
+      if (_stale(serial, 'symbols')) return;
+      _symbols = list;
+    } catch (e) {
+      // Only the digits come from here; the bars still load.
+      if (_stale(serial, 'symbols')) return;
+      _log('symbols failed (prices shown with the engine precision): $e');
+    }
     await load();
     unawaited(refreshDataInfo());
   }
@@ -313,7 +354,7 @@ class ChartController extends ChangeNotifier {
         // shifting the window by one H1 bar selects exactly the setups whose
         // confirmation bar is among the loaded bars (incl. a pending setup
         // on the newest bar).
-        if (tf == ChartTimeframe.h1) _source.setups(symbol, from: from?.add(_h1), to: to?.add(_h1)),
+        if (tf == ChartTimeframe.h1 && showSetups) _source.setups(symbol, from: from?.add(_h1), to: to?.add(_h1)),
       ]);
       final RatesResult rates = results[0] as RatesResult;
       final ChannelResult channel = results[1] as ChannelResult;
@@ -324,6 +365,7 @@ class ChartController extends ChangeNotifier {
         timeframe: tf,
         channelResult: channel,
         setupsResult: setups,
+        tradeOverlay: _tradeOverlay,
         digits: digits,
       );
       _data = data;
@@ -332,6 +374,7 @@ class ChartController extends ChangeNotifier {
           '${channel.validCount}/${channel.count} valid channel points, ${data.setups.length} setups, '
           '${data.gaps.length} gaps, source=${rates.source} stale=${rates.stale}');
       if (setups != null) _logSetups(setups);
+      if (_tradeOverlay != null) _logOverlay('load #$serial');
       if (data.isEmpty) {
         _setState(ChartLoadState.empty, message: rates.message ?? channel.messageFa ?? kEmptyRangeFa);
       } else {
@@ -433,13 +476,19 @@ class ChartController extends ChangeNotifier {
 
   /// Centres the bar nearest to [t]. Outside the loaded bars, the range moves
   /// to a [defaultWindow] around [t] first (e.g. a gap from the full list).
-  Future<void> jumpToTime(DateTime t) async {
+  ///
+  /// With [until] (a span such as a trade's entry .. exit), the loaded range
+  /// must cover both ends, the chart centres the middle of the span and
+  /// zooms so the whole span plus a margin fits ([minTradeFitBars] at least).
+  Future<void> jumpToTime(DateTime t, {DateTime? until}) async {
+    final DateTime end = until == null || until.isBefore(t) ? t : until;
     final ChartData? data = _data;
-    if (data == null || !data.covers(t)) {
-      _log('jump to ${formatUtc(t)}: outside loaded bars, reloading around it');
+    if (data == null || !data.covers(t) || !data.covers(end)) {
+      _log('jump to ${formatUtc(t)}${until == null ? '' : ' .. ${formatUtc(end)}'}: outside loaded bars, '
+          'reloading around it');
       final Duration half = Duration(milliseconds: defaultWindow.inMilliseconds ~/ 2);
       _from = t.toUtc().subtract(half);
-      _to = t.toUtc().add(half);
+      _to = end.toUtc().add(half);
       _autoLoadPending = true;
       notifyListeners();
       await load();
@@ -448,10 +497,72 @@ class ChartController extends ChangeNotifier {
     if (now == null || now.isEmpty) return;
     final int? i = now.nearestIndex(t);
     if (i == null) return;
-    _log('jump to ${formatUtc(t)} -> bar $i (${formatUtc(now.candles[i].time)})');
     _highlightIndex = i;
-    _viewRequest = ChartViewRequest._(_viewRequest.serial + 1, focusIndex: i);
+    if (until == null) {
+      _log('jump to ${formatUtc(t)} -> bar $i (${formatUtc(now.candles[i].time)})');
+      _viewRequest = ChartViewRequest._(_viewRequest.serial + 1, focusIndex: i);
+    } else {
+      final int j = now.nearestIndex(end) ?? i;
+      final int span = j - i + 1;
+      final double fit = math.max(minTradeFitBars, span * 1.5 + 10);
+      final int centre = (i + j) ~/ 2;
+      _log('jump to ${formatUtc(t)} .. ${formatUtc(end)} -> bars $i..$j, centre $centre, fit ${fit.round()} bars');
+      _viewRequest = ChartViewRequest._(_viewRequest.serial + 1, focusIndex: centre, fitBars: fit);
+    }
     notifyListeners();
+  }
+
+  // ------------------------------------------------------------ backtest trades
+
+  /// Draws [overlay]'s trades over the bars (null removes them). The loaded
+  /// bars are kept; only the trade placement is rebuilt.
+  void setTradeOverlay(TradeOverlay? overlay) {
+    _tradeOverlay = overlay;
+    if (overlay == null ||
+        _selectedTradeKey == null ||
+        !overlay.trades.any((t) => tradeKeyOf(t) == _selectedTradeKey)) {
+      _selectedTradeKey = null;
+    }
+    final ChartData? d = _data;
+    if (d != null) _data = d.withTrades(overlay);
+    if (overlay == null) {
+      _log('trades overlay removed');
+    } else {
+      _logOverlay('overlay set');
+    }
+    notifyListeners();
+  }
+
+  void _logOverlay(String what) {
+    if (!kDevMode) return;
+    final TradeOverlay? o = _tradeOverlay;
+    final ChartData? d = _data;
+    _log('trades overlay ($what): run #${o?.runId}, ${o?.trades.length ?? 0} trades, '
+        '${d?.trades.length ?? 0} on the loaded bars ${_fmt(_loadedFrom)} .. ${_fmt(_loadedTo)} '
+        '(${d?.length ?? 0} bars)');
+  }
+
+  /// Selects a trade (marker click) without moving the chart.
+  void selectTrade(TradeKey? key) {
+    if (key == _selectedTradeKey) return;
+    _selectedTradeKey = key;
+    _log('select trade ${key ?? '-'}');
+    notifyListeners();
+  }
+
+  /// A trade row: select it and zoom the chart onto its entry .. exit bars
+  /// (reloading around it when it is outside the loaded bars).
+  Future<void> focusTrade(BacktestTrade t) async {
+    final DateTime? entry = t.entryTime;
+    final TradeKey key = tradeKeyOf(t);
+    if (entry == null) {
+      _log('focus trade $key ignored: no entry time');
+      return;
+    }
+    _selectedTradeKey = key;
+    final DateTime? exit = t.exitBarTime ?? t.exitTime;
+    _log('trade row $key -> zoom to ${formatUtc(entry)} .. ${exit == null ? '-' : formatUtc(exit)}');
+    await jumpToTime(entry, until: exit ?? entry);
   }
 
   void resetView() {

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../chart/chart_data_source.dart';
 import '../../models/account_settings.dart';
 import '../../models/backtest_models.dart';
 import '../../theme/app_semantic_colors.dart';
@@ -9,17 +10,21 @@ import '../../widgets/status_message.dart';
 import 'backtest_controller.dart';
 import 'backtest_format.dart';
 import 'backtest_tables.dart';
+import 'backtest_trades_chart.dart';
 import 'equity_chart.dart';
 import 'metric_cards.dart';
 
 /// The opened run: a header with everything that defines it (period or
 /// windows + seed, strategy version / params hash, account, costs) and the
 /// engine's honest labels, then tabs with metrics, windows (random),
-/// trades, equity curve and skipped candidates.
+/// trades, equity curve, skipped candidates and the trades on the chart.
 class BacktestResultView extends StatelessWidget {
-  const BacktestResultView({super.key, required this.controller});
+  const BacktestResultView({super.key, required this.controller, this.chartSource});
 
   final BacktestController controller;
+
+  /// Bars / channel of the «نمودار» tab; null = the engine ([EngineChartDataSource]).
+  final ChartDataSource? chartSource;
 
   static const String noRunsFa = 'هنوز بک‌تستی اجرا نشده است. فرم «اجرای جدید» را پر کنید و «اجرای بک‌تست» را بزنید.';
   static const String pickRunFa = 'یک اجرا را از «اجراهای قبلی» باز کنید یا اجرای جدیدی بسازید.';
@@ -92,6 +97,7 @@ class BacktestResultView extends StatelessWidget {
       ('trades', 'معاملات ($trades)', _tradesTab(context, d)),
       ('equity', 'منحنی سرمایه', _equityTab(context, d)),
       ('skipped', 'ردشده‌ها${c.skipped == null ? '' : ' (${c.skipped!.skipped.length})'}', _skippedTab(context, d)),
+      ('chart', 'نمودار', _chartTab(context, d)),
     ];
     return DefaultTabController(
       key: ValueKey<String>('bt-tabs-${d.id}-${tabs.length}'),
@@ -102,7 +108,13 @@ class BacktestResultView extends StatelessWidget {
           tabAlignment: TabAlignment.start,
           tabs: [for (final (String k, String label, _) in tabs) Tab(key: ValueKey<String>('bt-tab-$k'), text: label)],
         ),
-        Expanded(child: TabBarView(children: [for (final (_, _, Widget w) in tabs) w])),
+        // No swipe between tabs: a drag on the chart pans the chart.
+        Expanded(
+          child: TabBarView(
+            physics: const NeverScrollableScrollPhysics(),
+            children: [for (final (_, _, Widget w) in tabs) w],
+          ),
+        ),
       ]),
     );
   }
@@ -215,6 +227,53 @@ class BacktestResultView extends StatelessWidget {
                 title: kZeroTradesFa,
               )
             : BacktestTradesTable(trades: rows, digits: c.openRunDigits, showWindow: random),
+      ),
+    ]);
+  }
+
+  /// Trades of the run (a random run: of the selected window) on the
+  /// candlestick chart of its symbol.
+  Widget _chartTab(BuildContext context, BacktestRunDetail d) {
+    final BacktestController c = controller;
+    final Widget? state = _resultsState(context, c.trades);
+    if (state != null) return state;
+    final bool random = d.mode == BacktestMode.random;
+    final int? w = c.selectedWindow;
+    final List<BacktestTrade> all = c.trades!.trades;
+    final List<BacktestTrade> rows = random && w != null
+        ? [
+            for (final BacktestTrade t in all)
+              if (t.windowIndex == w) t
+          ]
+        : all;
+    BacktestWindowResult? window;
+    for (final BacktestWindowResult x in d.windows) {
+      if (x.index == (w ?? 0)) window = x;
+    }
+    final DateTime? start = random ? window?.start : (d.summary.from ?? d.config?.start ?? window?.start);
+    final DateTime? end = random ? window?.end : (d.summary.to ?? d.config?.end ?? window?.end);
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      if (random) _windowFilter(context, d),
+      if (c.trades!.isPartial)
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          child: Text(
+            'روی نمودار ${c.trades!.trades.length} معامله از ${c.trades!.total} (سقف هر درخواست موتور).',
+            style: TextStyle(color: context.appColors.warning),
+          ),
+        ),
+      Expanded(
+        child: BacktestTradesChart(
+          key: ValueKey<String>('bt-trades-chart-${d.id}'),
+          source: chartSource ?? EngineChartDataSource(c.api),
+          runId: d.id,
+          symbol: d.summary.symbol,
+          trades: rows,
+          periodStart: start,
+          periodEnd: end,
+          digits: c.openRunDigits,
+          showWindow: random,
+        ),
       ),
     ]);
   }

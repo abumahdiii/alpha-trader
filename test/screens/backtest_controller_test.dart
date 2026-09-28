@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:dio/dio.dart';
@@ -368,5 +369,54 @@ void main() {
     c.dispose();
     await until(() => s.closed, reason: 'socket closed');
     c = make(); // for tearDown
+  });
+
+  test('limits: first symbol, refetch on symbol change / prefill, stale answers dropped, failure -> null', () async {
+    final Map<String, Completer<void>> gates = {};
+    int failures = 0;
+    c = make(
+      withHttp: engine.http(extra: {
+        'GET /backtests/limits': (RequestOptions r) async {
+          final String symbol = r.uri.queryParameters['symbol']!;
+          await gates[symbol]?.future;
+          if (symbol == 'BAD.x') {
+            failures++;
+            return engineError(503, 'cache_unreadable', 'کش خوانده نشد.');
+          }
+          return jsonBody(limitsJson(symbol: symbol));
+        },
+      }),
+    );
+    await c.init();
+    await until(() => c.limits != null, reason: 'limits of the first symbol');
+    expect(c.limits!.symbol, 'XAUUSD.x');
+
+    // A slow answer for BRENT.x arrives after the user moved on to XAUUSD.x again: dropped.
+    gates['BRENT.x'] = Completer<void>();
+    c.setSymbol('BRENT.x');
+    expect(c.limits, isNull, reason: 'the XAUUSD.x bounds are not shown for BRENT.x');
+    c.setSymbol('XAUUSD.x');
+    await until(() => c.limits?.symbol == 'XAUUSD.x');
+    gates['BRENT.x']!.complete();
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(c.limits!.symbol, 'XAUUSD.x');
+
+    // A failure leaves no bounds; the form is not blocked.
+    c.setSymbol('BAD.x');
+    await until(() => failures == 1);
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(c.limits, isNull);
+    expect(c.submitError, isNull);
+
+    // A chart prefill of another symbol refetches; its exact period stays exact.
+    await c.applyPrefill(
+        BacktestPrefill(symbol: 'BRENT.x', from: DateTime.utc(2026, 8, 9, 23), to: DateTime.utc(2026, 9, 25, 21)));
+    await until(() => c.limits?.symbol == 'BRENT.x');
+    expect(c.hasExactPeriod, isTrue);
+    final BacktestRequest req = c.buildRequest();
+    expect(req.toJson()['from'], '2026-08-09T23:00:00.000Z');
+    expect(req.toJson()['to'], '2026-09-25T21:00:00.000Z');
+    expect(http.sent('GET /backtests/limits').map((r) => r.uri.queryParameters['symbol']),
+        ['XAUUSD.x', 'BRENT.x', 'XAUUSD.x', 'BAD.x', 'BRENT.x']);
   });
 }

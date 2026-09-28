@@ -10,6 +10,7 @@ import 'dart:ui' show Offset, Rect, Size;
 
 import 'package:flutter/foundation.dart';
 
+import '../models/backtest_models.dart';
 import 'chart_data.dart';
 import '../models/chart_models.dart';
 
@@ -134,6 +135,15 @@ class ChartViewport {
   /// Centre bar [index] in the plot.
   ChartViewport centerOn(int index) => _withStart(index + 0.5 - visibleBars / 2);
 
+  /// Zoom so about [bars] bar slots fill the plot (bar width clamped to
+  /// [minBarWidth]..[maxBarWidth]); the start is re-clamped.
+  ChartViewport fitBars(double bars) {
+    if (!(bars > 0)) return this;
+    final double w = (width / bars).clamp(minBarWidth, maxBarWidth).toDouble();
+    return ChartViewport._(barCount: barCount, width: width, barWidth: w, startIndex: startIndex)
+        ._withStart(startIndex);
+  }
+
   /// Newest bars at the default zoom.
   ChartViewport reset() => ChartViewport(barCount: barCount, width: width);
 
@@ -193,7 +203,8 @@ class PriceScale {
 const int kSetupLevelBars = 10;
 
 /// Price range over the visible bars: highs/lows, the channel lines of those
-/// bars and the levels of setups whose segments reach into the range, plus
+/// bars, the levels of setups whose segments reach into the range and the
+/// prices of backtest trades overlapping it, plus
 /// [padFraction] headroom. Values are only compared, never computed.
 PriceScale autoscalePrice(
   ChartData data,
@@ -228,6 +239,13 @@ PriceScale autoscalePrice(
     take(s.stopLoss);
     take(s.entry ?? s.referencePrice);
     take(s.takeProfit ?? s.indicativeTakeProfit);
+  }
+  for (final TradeMark m in data.tradesOverlapping(range.first, range.last)) {
+    final BacktestTrade t = m.trade;
+    take(t.entry);
+    take(t.stopLoss);
+    take(t.takeProfit);
+    take(t.exitPrice);
   }
   if (!lo.isFinite || !hi.isFinite) {
     lo = 0;

@@ -7,6 +7,7 @@ import 'dart:math' as math;
 
 import 'package:alpha_trader/chart/chart_data_source.dart';
 import 'package:alpha_trader/chart/chart_format.dart';
+import 'package:alpha_trader/models/backtest_models.dart';
 import 'package:alpha_trader/models/chart_models.dart';
 import 'package:alpha_trader/models/market_data.dart';
 import 'package:alpha_trader/services/engine_api.dart';
@@ -457,4 +458,56 @@ class FakeChartDataSource implements ChartDataSource {
     return updateResult ??
         RatesUpdateResult(symbol: symbol, updated: const <TimeframeUpdate>[], messageFa: 'کش $symbol به‌روز شد.');
   }
+}
+
+/// Fixture backtest trade on the synthetic bars: entry at the open of
+/// [bars][entry], exit on [bars][exit] at the SL / TP level for sl / tp
+/// reasons, else at that bar's close. The prices are fixtures, not trading
+/// math.
+BacktestTrade fakeTrade(List<Candle> bars, int n, int entry, int exit,
+    {String direction = 'buy', String exitReason = 'tp', int window = 0}) {
+  final bool buy = direction == 'buy';
+  final double open = bars[entry].open;
+  final double sl = buy ? open - 5 : open + 5;
+  final double tp = buy ? open + 10 : open - 10;
+  final double exitPrice = switch (exitReason) {
+    'tp' || 'tp_gap' => tp,
+    'sl' || 'sl_gap' => sl,
+    _ => bars[exit].close,
+  };
+  final double net = switch (exitReason) {
+    'tp' || 'tp_gap' => 50,
+    'sl' || 'sl_gap' => -25,
+    _ => 3.5,
+  };
+  return BacktestTrade(
+    windowIndex: window,
+    tradeIndex: n,
+    direction: direction,
+    setupType: 'bounce',
+    line: 'lower',
+    pattern: 'pin_bar',
+    confirmationBarTime: bars[math.max(0, entry - 1)].time,
+    decisionTime: bars[entry].time,
+    entryTime: bars[entry].time,
+    entry: open,
+    stopLoss: sl,
+    takeProfit: tp,
+    rr: 2,
+    volume: 0.05,
+    riskAmount: 25,
+    balanceBefore: 2500,
+    exitBarTime: bars[exit].time,
+    exitTime: bars[exit].time.add(const Duration(hours: 1)),
+    exitPrice: exitPrice,
+    exitReason: exitReason,
+    exitReasonFa: 'دلیل خروج $exitReason',
+    grossPnl: net,
+    commission: 0,
+    netPnl: net,
+    rMultiple: net / 25,
+    balanceAfter: 2500 + net,
+    barsHeld: exit - entry,
+    reasonFa: 'دلیل آزمایشی معامله $n',
+  );
 }
