@@ -5,6 +5,7 @@ import 'package:alpha_trader/chart/chart_controller.dart';
 import 'package:alpha_trader/chart/chart_view.dart';
 import 'package:alpha_trader/chart/widgets/chart_canvas.dart';
 import 'package:alpha_trader/providers/shell_navigation.dart';
+import 'package:alpha_trader/screens/backtest/backtest_screen.dart';
 import 'package:alpha_trader/screens/chart/chart_screen.dart';
 import 'package:alpha_trader/services/engine_api.dart';
 import 'package:alpha_trader/widgets/engine_gate.dart';
@@ -13,6 +14,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../helpers/backtest_fixtures.dart';
 import '../helpers/engine_fakes.dart';
 
 final DateTime _t0 = DateTime.utc(2026, 9, 21); // Monday
@@ -116,7 +118,7 @@ Map<String, Object?> _setup(int i) => {
     };
 
 const String _windowFrom = '2026-08-23T23:00:00Z';
-const String _windowTo = '2026-09-22T23:00:00Z';
+const String _windowTo = '2026-09-22T21:00:00Z';
 
 Map<String, Object?> _phase5Blocks() => {
       'evaluation': {
@@ -343,8 +345,35 @@ void main() {
     final BacktestPrefill p = h.navigation.pendingBacktest!;
     expect(p.symbol, 'XAUUSD.x');
     expect(p.from, DateTime.utc(2026, 8, 23, 23), reason: 'backtest_window.from as sent by the engine');
-    expect(p.to, DateTime.utc(2026, 9, 22, 23), reason: 'backtest_window.to as sent by the engine');
+    expect(p.to, DateTime.utc(2026, 9, 22, 21), reason: 'backtest_window.to as sent by the engine');
     expect(p.autoRun, isTrue);
+    await h.dispose(tester);
+  });
+
+  testWidgets('end to end: chart button -> ShellNavigation -> backtest page submits the engine window exactly',
+      (WidgetTester tester) async {
+    tester.view.physicalSize = const Size(3000, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final FakeSocketConnector sockets = FakeSocketConnector();
+    final EngineHarness h = EngineHarness(http: FakeBacktestEngine().http(extra: _http().routes));
+    await tester.pumpWidget(h.wrap(Row(children: <Widget>[
+      const Expanded(child: ChartScreen()),
+      Expanded(child: BacktestScreen(watcherFactory: sockets.watcher)),
+    ])));
+    await h.start(tester);
+    await settle(tester, 20);
+
+    await tester.tap(find.byKey(const ValueKey<String>('setups-backtest-range')));
+    await settle(tester, 20);
+    expect(h.navigation.page, ShellPage.backtest);
+    expect(h.navigation.pendingBacktest, isNull, reason: 'consumed by the backtest page');
+    final Map<String, Object?> body =
+        FakeEngineHttp.bodyOf(h.http.sent('POST /backtests').single)! as Map<String, Object?>;
+    expect(body['symbol'], 'XAUUSD.x');
+    expect(body['mode'], 'manual');
+    expect(DateTime.parse(body['from']! as String), DateTime.parse(_windowFrom), reason: 'not rounded to a day');
+    expect(DateTime.parse(body['to']! as String), DateTime.parse(_windowTo), reason: 'not the next midnight');
     await h.dispose(tester);
   });
 
