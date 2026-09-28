@@ -15,6 +15,19 @@ The ``.env`` file is located from this file's path (``<repo>/.env``, the parent 
 from the current working directory. ``ALPHA_TRADER_ENV_FILE`` overrides the path (tests and the smoke
 run point it at a temporary fake file).
 
+Frozen (PyInstaller) builds: ``__file__`` then lives inside the bundle's ``_internal`` folder, so the
+repo-relative defaults would point into the bundle. When ``sys.frozen`` is set the defaults are derived
+from the *executable* instead (package layout, see ``engine/packaging/README.md``)::
+
+    <app>/alpha_trader.exe                       Flutter release build (its own data/ = flutter_assets)
+    <app>/engine/alpha_engine/alpha_engine.exe   this engine  -> install root = <app>
+    <app>/user_data/                             default data dir (cache, alpha.db, results)
+    <app>/.env                                   default env file (optional; never shipped)
+
+The user data folder is ``user_data`` rather than ``data`` because Flutter's Windows bundle already owns
+``<app>/data`` (``flutter_assets``, ``icudtl.dat``, ``app.so``). ``ALPHA_TRADER_DATA_DIR`` and
+``ALPHA_TRADER_ENV_FILE`` still override both defaults; the release launcher passes them explicitly.
+
 Secrets: ``mt5_password`` is a :class:`pydantic.SecretStr`; ``mt5_login`` is excluded from ``repr``.
 Use :meth:`Settings.safe_summary` for anything displayed or logged. See
 ``.claude/rules/03_trading_safety.md`` section 2.
@@ -23,6 +36,7 @@ Use :meth:`Settings.safe_summary` for anything displayed or logged. See
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
@@ -31,10 +45,50 @@ from typing import Any
 from dotenv import dotenv_values
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
+# Source layout (dev). Meaningless inside a frozen bundle -- use the default_*() helpers below.
 ENGINE_DIR: Path = Path(__file__).resolve().parents[1]
 REPO_ROOT: Path = ENGINE_DIR.parent
-DEFAULT_ENV_FILE: Path = REPO_ROOT / ".env"
-DEFAULT_DATA_DIR: Path = REPO_ROOT / "data"
+
+# Frozen layout: <install_root>/engine/alpha_engine/alpha_engine.exe
+FROZEN_EXE_DEPTH = 2  # exe -> alpha_engine/ -> engine/ -> install root
+FROZEN_DATA_DIRNAME = "user_data"
+FROZEN_ENV_FILENAME = ".env"
+
+
+def is_frozen() -> bool:
+    """True inside a PyInstaller (or similar) bundle."""
+    return bool(getattr(sys, "frozen", False))
+
+
+def install_root() -> Path:
+    """Root that plays the role of the repo: the repo root in dev, the package folder when frozen.
+
+    Frozen: two levels above the executable's folder (``<app>/engine/alpha_engine/alpha_engine.exe``
+    -> ``<app>``). If the executable sits too close to the drive root for that layout, its own
+    folder is used instead of guessing further.
+    """
+    if not is_frozen():
+        return REPO_ROOT
+    exe_dir = Path(sys.executable).resolve().parent
+    parents = [exe_dir, *exe_dir.parents]
+    if len(parents) > FROZEN_EXE_DEPTH:
+        return parents[FROZEN_EXE_DEPTH]
+    return exe_dir
+
+
+def default_env_file() -> Path:
+    """``<repo>/.env`` in dev; ``<app>/.env`` when frozen."""
+    return install_root() / (FROZEN_ENV_FILENAME if is_frozen() else ".env")
+
+
+def default_data_dir() -> Path:
+    """``<repo>/data`` in dev; ``<app>/user_data`` when frozen (Flutter owns ``<app>/data``)."""
+    return install_root() / (FROZEN_DATA_DIRNAME if is_frozen() else "data")
+
+
+# Import-time snapshots (dev: the repo paths). Resolution at runtime goes through the helpers above.
+DEFAULT_ENV_FILE: Path = default_env_file()
+DEFAULT_DATA_DIR: Path = default_data_dir()
 DEFAULT_ENGINE_PORT = 8765
 DEFAULT_SYMBOLS: tuple[str, ...] = ("XAUUSD.x", "BRNUSD.x")
 
@@ -81,7 +135,7 @@ class Settings(BaseModel):
     engine_port: int = Field(default=DEFAULT_ENGINE_PORT, ge=1024, le=65535)
     dev_mode: bool = False
     mt5_server_utc_offset: float | None = Field(default=None, ge=-14, le=14)
-    data_dir: Path = DEFAULT_DATA_DIR
+    data_dir: Path = Field(default_factory=default_data_dir)
     # Connect to MT5 in the background when the app starts (tests set ENGINE_MT5_AUTOCONNECT=false).
     engine_mt5_autoconnect: bool = True
     # Symbols served by /symbols and /rates (ENGINE_SYMBOLS, comma-separated).
@@ -155,10 +209,10 @@ class Settings(BaseModel):
 
 
 def resolve_env_file(environ: Mapping[str, str] | None = None) -> Path:
-    """Path of the ``.env`` to load: ``$ALPHA_TRADER_ENV_FILE`` if set, else ``<repo>/.env``."""
+    """Path of the ``.env`` to load: ``$ALPHA_TRADER_ENV_FILE`` if set, else :func:`default_env_file`."""
     env = os.environ if environ is None else environ
     override = _clean(env.get(ENV_FILE_OVERRIDE_VAR))
-    return Path(override) if override else DEFAULT_ENV_FILE
+    return Path(override) if override else default_env_file()
 
 
 def load_settings(
@@ -198,7 +252,7 @@ def load_settings(
         "mt5_server": _clean(merged.get("MT5_SERVER")),
         "dev_mode": merged.get("DEV_MODE", "false"),
         "alpha_data_check_confirmed": merged.get("ALPHA_DATA_CHECK_CONFIRMED", "false"),
-        "data_dir": Path(data_dir) if data_dir else DEFAULT_DATA_DIR,
+        "data_dir": Path(data_dir) if data_dir else default_data_dir(),
         "env_file": path,
         "env_file_loaded": loaded,
     }
