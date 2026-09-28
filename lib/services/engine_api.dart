@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 
 import '../core/app_logger.dart';
 import '../core/dev_mode.dart';
 import '../models/account_settings.dart';
+import '../models/backtest_export.dart';
 import '../models/backtest_models.dart';
 import '../models/chart_models.dart';
 import '../models/json_reader.dart';
@@ -401,6 +403,62 @@ class EngineApi {
         },
       );
 
+  /// `GET /backtests/{id}/export?format&table&header` -- the run's STORED
+  /// results as a file (nothing is recomputed by the engine or here).
+  ///
+  /// [format] xlsx = every table (one sheet each; [table] ignored), csv =
+  /// the one [table] (default trades). Errors (Persian): 404
+  /// `backtest_not_found`, 409 `run_not_finished` (queued/running), 422
+  /// `invalid_query`.
+  Future<BacktestExportFile> exportBacktest(
+    int id, {
+    BacktestExportFormat format = BacktestExportFormat.xlsx,
+    BacktestExportTable table = BacktestExportTable.trades,
+    BacktestExportHeader header = BacktestExportHeader.fa,
+    Duration? timeout,
+  }) async {
+    final BacktestExportTable sent = format == BacktestExportFormat.xlsx ? BacktestExportTable.all : table;
+    final (Response<List<int>> response, String what, Stopwatch watch) = await _send<List<int>>(
+      'GET',
+      '/backtests/$id/export',
+      query: {'format': format.code, 'table': sent.code, 'header': header.code},
+      timeout: timeout ?? resultCallTimeout,
+      responseType: ResponseType.bytes,
+    );
+    final int status = response.statusCode ?? 0;
+    final List<int> data = response.data ?? const <int>[];
+    final Uint8List bytes = data is Uint8List ? data : Uint8List.fromList(data);
+    _log('<- $what HTTP $status (${watch.elapsedMilliseconds} ms, ${bytes.length} bytes)');
+
+    if (status < 200 || status >= 300) {
+      final String raw = utf8.decode(bytes, allowMalformed: true);
+      _log('   error body: ${_clip(raw)}');
+      throw _logged(errorFromResponse(status, raw), watch);
+    }
+    if (bytes.isEmpty) {
+      throw _logged(
+        EngineApiException(
+          EngineApiErrorKind.malformedBody,
+          'موتور فایل خروجی خالی فرستاد.',
+          statusCode: status,
+          detail: what,
+        ),
+        watch,
+      );
+    }
+    final String? disposition = response.headers.value('content-disposition');
+    final String fileName = BacktestExportFile.fileNameFromContentDisposition(disposition) ??
+        BacktestExportFile.fallbackName(id, format, sent);
+    _log('   export file "$fileName" (${bytes.length} bytes, disposition=${disposition ?? '-'})');
+    return BacktestExportFile(
+      bytes: bytes,
+      fileName: fileName,
+      format: format,
+      contentType: response.headers.value(Headers.contentTypeHeader),
+      runStatus: response.headers.value('x-alpha-run-status'),
+    );
+  }
+
   /// `ws://127.0.0.1:<port>/ws/backtests/{id}` -- the run's progress socket.
   Uri backtestProgressUri(int id) => Uri.parse('ws://127.0.0.1:$port/ws/backtests/$id');
 
@@ -416,6 +474,44 @@ class EngineApi {
     Duration? timeout,
     required T Function(Object? json) parse,
   }) async {
+    final (Response<String> response, String what, Stopwatch watch) =
+        await _send<String>(method, path, query: query, body: body, timeout: timeout);
+    final int status = response.statusCode ?? 0;
+    final String raw = response.data ?? '';
+    _log('<- $what HTTP $status (${watch.elapsedMilliseconds} ms, ${raw.length} chars)');
+
+    if (status < 200 || status >= 300) {
+      _log('   error body: ${_clip(raw)}');
+      throw _logged(errorFromResponse(status, raw), watch);
+    }
+    try {
+      return parse(jsonDecode(raw));
+    } on FormatException catch (e) {
+      _log('   unparsable body: ${_clip(raw)}');
+      throw _logged(
+        EngineApiException(
+          EngineApiErrorKind.malformedBody,
+          'پاسخ موتور با این نسخه برنامه سازگار نیست.',
+          statusCode: status,
+          detail: '$what: ${e.message}',
+          cause: e,
+        ),
+        watch,
+      );
+    }
+  }
+
+  /// Sends one request with the per-call hard time budget and maps
+  /// transport failures to [EngineApiException]. The status is NOT checked
+  /// here (error bodies carry the Persian messages): callers do that.
+  Future<(Response<R>, String what, Stopwatch watch)> _send<R>(
+    String method,
+    String path, {
+    Map<String, Object>? query,
+    Object? body,
+    Duration? timeout,
+    ResponseType responseType = ResponseType.plain,
+  }) async {
     final Duration limit = timeout ?? defaultTimeout;
     final String queryText = query == null || query.isEmpty
         ? ''
@@ -427,10 +523,10 @@ class EngineApi {
 
     final Stopwatch watch = Stopwatch()..start();
     final CancelToken cancel = CancelToken();
-    final Response<String> response;
+    final Response<R> response;
     try {
       response = await _dio
-          .request<String>(
+          .request<R>(
         path,
         data: encodedBody,
         queryParameters: query,
@@ -439,6 +535,7 @@ class EngineApi {
           method: method,
           receiveTimeout: limit,
           sendTimeout: limit,
+          responseType: responseType,
           contentType: encodedBody != null ? Headers.jsonContentType : null,
         ),
       )
@@ -466,30 +563,7 @@ class EngineApi {
         watch,
       );
     }
-
-    final int status = response.statusCode ?? 0;
-    final String raw = response.data ?? '';
-    _log('<- $what HTTP $status (${watch.elapsedMilliseconds} ms, ${raw.length} chars)');
-
-    if (status < 200 || status >= 300) {
-      _log('   error body: ${_clip(raw)}');
-      throw _logged(errorFromResponse(status, raw), watch);
-    }
-    try {
-      return parse(jsonDecode(raw));
-    } on FormatException catch (e) {
-      _log('   unparsable body: ${_clip(raw)}');
-      throw _logged(
-        EngineApiException(
-          EngineApiErrorKind.malformedBody,
-          'پاسخ موتور با این نسخه برنامه سازگار نیست.',
-          statusCode: status,
-          detail: '$what: ${e.message}',
-          cause: e,
-        ),
-        watch,
-      );
-    }
+    return (response, what, watch);
   }
 
   /// Turns a non-2xx body into an [EngineApiException]. Handles the three
@@ -555,6 +629,7 @@ class EngineApi {
   static const Map<String?, String> _conflictFa = {
     'not_cancellable': 'این اجرا دیگر در حال انجام نیست و لغو نمی‌شود.',
     'run_active': 'این اجرا هنوز در حال انجام است؛ اول آن را لغو کنید.',
+    'run_not_finished': 'این اجرا هنوز تمام نشده است؛ خروجی بعد از پایان اجرا گرفته می‌شود.',
     'stored_params_invalid': 'پارامترهای ذخیره‌شده استراتژی با نسخه فعلی موتور سازگار نیستند.',
   };
 

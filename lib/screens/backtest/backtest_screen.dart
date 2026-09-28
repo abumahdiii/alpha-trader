@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../../chart/chart_data_source.dart';
 import '../../core/dev_mode.dart';
 import '../../providers/shell_navigation.dart';
+import '../../services/backtest_exporter.dart';
 import '../../services/engine_api.dart';
 import '../../theme/app_semantic_colors.dart';
 import '../../widgets/engine_gate.dart';
@@ -23,7 +24,7 @@ import 'backtest_runs_list.dart';
 /// `GET /backtests`. A pending [ShellNavigation] prefill (chart «بک‌تست همین
 /// بازه») fills the form and may run it.
 class BacktestScreen extends StatelessWidget {
-  const BacktestScreen({super.key, this.watcherFactory, this.chartSource});
+  const BacktestScreen({super.key, this.watcherFactory, this.chartSource, this.exportSaver});
 
   /// Progress watcher of a run (tests inject a fake socket).
   final BacktestWatcherFactory? watcherFactory;
@@ -31,19 +32,27 @@ class BacktestScreen extends StatelessWidget {
   /// Bars of the result's «نمودار» tab (tests inject a fake); null = the engine.
   final ChartDataSource? chartSource;
 
+  /// Save dialog + file write of the «خروجی» menu (tests inject a fake); null = the native dialog.
+  final ExportFileSaver? exportSaver;
+
   @override
   Widget build(BuildContext context) => EngineGate(
-        builder: (BuildContext context, EngineApi api) =>
-            BacktestPage(api: api, watcherFactory: watcherFactory, chartSource: chartSource),
+        builder: (BuildContext context, EngineApi api) => BacktestPage(
+          api: api,
+          watcherFactory: watcherFactory,
+          chartSource: chartSource,
+          exportSaver: exportSaver,
+        ),
       );
 }
 
 class BacktestPage extends StatefulWidget {
-  const BacktestPage({super.key, required this.api, this.watcherFactory, this.chartSource});
+  const BacktestPage({super.key, required this.api, this.watcherFactory, this.chartSource, this.exportSaver});
 
   final EngineApi api;
   final BacktestWatcherFactory? watcherFactory;
   final ChartDataSource? chartSource;
+  final ExportFileSaver? exportSaver;
 
   static const String formTab = 'اجرای جدید';
   static const String runsTab = 'اجراهای قبلی';
@@ -55,6 +64,9 @@ class BacktestPage extends StatefulWidget {
 class _BacktestPageState extends State<BacktestPage> {
   late final BacktestController _controller =
       BacktestController(api: widget.api, watcherFactory: widget.watcherFactory);
+
+  /// One saver per page: it remembers the last save folder of the session.
+  late final ExportFileSaver _exportSaver = widget.exportSaver ?? FileSelectorExportSaver();
   ShellNavigation? _navigation;
   bool _ready = false;
 
@@ -122,7 +134,13 @@ class _BacktestPageState extends State<BacktestPage> {
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
             BacktestProgressPanel(controller: _controller),
-            Expanded(child: BacktestResultView(controller: _controller, chartSource: widget.chartSource)),
+            Expanded(
+              child: BacktestResultView(
+                controller: _controller,
+                chartSource: widget.chartSource,
+                exportSaver: _exportSaver,
+              ),
+            ),
           ]),
         ),
       ]),
