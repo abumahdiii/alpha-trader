@@ -273,7 +273,7 @@ def decode_source(data: str | bytes, report: StaticReport) -> str | None:
     """UTF-8 text of ``data`` (size, encoding and NUL checks recorded in ``report``); ``None`` on failure."""
     raw = data.encode("utf-8", errors="surrogatepass") if isinstance(data, str) else bytes(data)
     report.size_bytes = len(raw)
-    report.sha256 = hashlib.sha256(raw).hexdigest()
+    report.sha256 = hashlib.sha256(raw).hexdigest()  # replaced by the hash of the decoded text below
     if len(raw) == 0:
         report.add(None, "فایل خالی است.")
         return None
@@ -290,13 +290,14 @@ def decode_source(data: str | bytes, report: StaticReport) -> str | None:
         return None
     if text.startswith("﻿"):
         text = text[1:]
+    report.sha256 = source_sha256(text)
     return text
 
 
-def source_sha256(data: str | bytes) -> str:
-    """SHA-256 of the exact UTF-8 bytes (the plugin's identity; ``str`` is encoded as UTF-8)."""
-    raw = data.encode("utf-8", errors="surrogatepass") if isinstance(data, str) else bytes(data)
-    return hashlib.sha256(raw).hexdigest()
+def source_sha256(text: str) -> str:
+    """The plugin's identity: SHA-256 of the UTF-8 bytes of its decoded text (BOM removed) -- exactly the bytes
+    stored under ``data/strategies/plugins/``."""
+    return hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
 def _literal(node: ast.expr | None) -> tuple[bool, object]:

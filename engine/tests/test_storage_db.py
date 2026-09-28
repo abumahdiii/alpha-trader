@@ -67,7 +67,8 @@ def test_tables_and_schema_version(conn: EngineConnection) -> None:
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"schema_version", "strategies", "strategy_versions", "account_settings"} <= tables
     assert {"backtest_runs", "backtest_windows", "backtest_trades", "backtest_equity"} <= tables
-    assert current_schema_version(conn) == SCHEMA_VERSION == 2
+    assert "strategy_plugins" in tables  # v3
+    assert current_schema_version(conn) == SCHEMA_VERSION == 3
 
 
 def test_migrations_idempotent(tmp_path: Path) -> None:
@@ -322,8 +323,8 @@ def test_v1_database_upgrades_to_v2_keeping_user_data(tmp_path: Path) -> None:
     _open_v1(path)
     conn = open_db(path)
     try:
-        assert current_schema_version(conn) == 2
-        assert [r[0] for r in conn.execute("SELECT version FROM schema_version ORDER BY version")] == [1, 2]
+        assert current_schema_version(conn) == 3  # v2 (backtests) and v3 (strategy plugins) applied in order
+        assert [r[0] for r in conn.execute("SELECT version FROM schema_version ORDER BY version")] == [1, 2, 3]
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert set(BACKTEST_TABLES) <= tables
         assert AccountSettingsRepo(conn).get() == AccountSettings(balance=5000.0, risk_pct=0.5, leverage=200, rr=3.0)
@@ -333,7 +334,7 @@ def test_v1_database_upgrades_to_v2_keeping_user_data(tmp_path: Path) -> None:
     finally:
         conn.close()
     again = open_db(path)  # idempotent
-    assert current_schema_version(again) == 2 and migrate(again) == []
+    assert current_schema_version(again) == 3 and migrate(again) == []
     again.close()
 
 
