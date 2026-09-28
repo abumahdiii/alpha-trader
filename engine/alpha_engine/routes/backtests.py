@@ -15,6 +15,9 @@
   with metrics, overall metrics, distribution, labels, provisional, fingerprint, status/progress/error),
   ``GET /backtests/{id}/trades?window&offset&limit``, ``GET /backtests/{id}/equity?window``,
   ``GET /backtests/{id}/skipped?window``, ``POST /backtests/{id}/cancel``, ``DELETE /backtests/{id}``.
+* ``GET /backtests/{id}/export?format=xlsx|csv&table=&header=en|fa`` -- the stored results as an attachment
+  (``backtest/export.py``): xlsx = every table as a sheet, csv = one table (default ``trades``); 409
+  ``run_not_finished`` while queued/running.
 * ``WS /ws/backtests/{id}`` -- ``{"type": "progress", ...}`` on every change (polled every
   ``WS_POLL_S``), ``{"type": "keepalive", "id", "time_utc"}`` after ``WS_KEEPALIVE_S`` seconds without any
   message while the run is queued/running, then ONE final ``{"type": "done"|"error"|"cancelled"|
@@ -35,10 +38,11 @@ from typing import Annotated, Any, Literal
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Body, Depends, Query, Request, WebSocket
+from fastapi import APIRouter, Body, Depends, Query, Request, Response, WebSocket
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
+from ..backtest import export
 from ..backtest.costs import resolve_fallback_points
 from ..backtest.history import HistoryUnavailable
 from ..backtest.jobs import BacktestJobs, JobsClosed, PreparedHistory, first_valid_index, prepare_history
@@ -710,6 +714,46 @@ def get_backtest_skipped(
     _check_window(row, window)
     items = repo.get_skipped(run_id, window)
     return {"run_id": run_id, "window": window, "count": len(items), "skipped": items}
+
+
+# ---------------------------------------------------------------------------------------------- export
+EXPORT_TABLE_ALL = "all"
+
+
+@router.get("/backtests/{run_id}/export", response_class=Response,
+            responses={200: {"content": {export.CSV_MEDIA_TYPE: {}, export.XLSX_MEDIA_TYPE: {}},
+                             "description": "CSV (one table) or xlsx workbook (all tables) as an attachment"},
+                       404: {"description": "Unknown run"}, 409: {"description": "Run is queued/running"},
+                       422: {"description": "Invalid format/table/header"}})
+def export_backtest(
+    run_id: int,
+    format: Annotated[str | None, Query()] = None,  # noqa: A002 - the public query parameter name
+    table: Annotated[str | None, Query()] = None,
+    header: Annotated[str | None, Query()] = None,
+    db: EngineConnection = Depends(get_db),
+) -> Response:
+    """Stored results as a file: ``format=xlsx`` (default; every table as a sheet, ``table`` ignored unless
+    invalid) or ``format=csv`` (one ``table``, default ``trades``). ``header=en`` (default, stable snake_case
+    keys) | ``fa`` (Persian labels). Values exactly as stored (``backtest/export.py``)."""
+    repo = BacktestsRepo(db)
+    row = _run_or_404(repo, run_id)
+    fmt = "xlsx" if format is None else format
+    _check_choice(fmt, "format", export.EXPORT_FORMATS)
+    if fmt == "csv":
+        _check_choice(table, "table", export.CSV_TABLES)
+    else:
+        _check_choice(table, "table", (*export.CSV_TABLES, EXPORT_TABLE_ALL))
+    lang = "en" if header is None else header
+    _check_choice(lang, "header", export.HEADER_LANGS)
+    if row["status"] in ACTIVE_STATUSES:
+        if is_dev_mode():
+            logger.debug("GET /backtests/%d/export rejected: run is %s", run_id, row["status"])
+        raise api_error(409, "run_not_finished",
+                        "این اجرا هنوز در صف یا در حال اجراست؛ پس از پایان آن دوباره خروجی بگیرید.")
+    out = export.export_run(repo, row, fmt, table or "trades", lang)
+    headers = {"Content-Disposition": f'attachment; filename="{out.filename}"', "Cache-Control": "no-store",
+               "X-Alpha-Run-Status": row["status"]}
+    return Response(content=out.content, media_type=out.media_type, headers=headers)
 
 
 # ---------------------------------------------------------------------------------------------- cancel / delete
