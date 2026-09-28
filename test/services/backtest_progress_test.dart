@@ -57,6 +57,33 @@ void main() {
     expect(got.single.isDone, isTrue);
   });
 
+  test('keepalive and unknown informational frames are ignored, not final', () async {
+    final FakeSocketConnector sockets = FakeSocketConnector();
+    final BacktestProgressWatcher w = sockets.watcher(EngineApi(port: 1, httpClientAdapter: FakeEngineHttp()), 3)
+      ..start();
+    final List<BacktestProgress> got = [];
+    final Future<void> done = w.events.forEach(got.add);
+    sockets.last.send(progressMsg(3, 'loading', 1.0));
+    sockets.last.send(<String, Object?>{'type': 'keepalive', 'id': 3, 'time_utc': '2026-09-28T10:15:00Z'});
+    sockets.last.send(<String, Object?>{'type': 'some_future_info', 'id': 3});
+    expect(w.isFinished, isFalse);
+    sockets.last.send(progressMsg(3, 'simulating', 60.0));
+    sockets.last.send(doneMsg(3));
+    await done;
+    expect(got.map((p) => p.type), ['progress', 'progress', 'done']);
+    expect(got[1].percent, 60.0);
+    expect(w.isPolling, isFalse);
+  });
+
+  test('BacktestProgress.isFinal is a whitelist', () {
+    for (final String t in ['done', 'error', 'cancelled', 'interrupted', 'lost']) {
+      expect(BacktestProgress.fromJson({'type': t, 'id': 1}).isFinal, isTrue, reason: t);
+    }
+    for (final String t in ['progress', 'keepalive', 'whatever']) {
+      expect(BacktestProgress.fromJson({'type': t, 'id': 1}).isFinal, isFalse, reason: t);
+    }
+  });
+
   test('socket cannot connect -> polls GET /backtests/{id} until terminal', () async {
     int polls = 0;
     final http = FakeEngineHttp({
