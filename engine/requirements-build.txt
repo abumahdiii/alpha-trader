@@ -1,0 +1,7 @@
+# Build-only tooling for packaging the engine (engine/packaging/README.md). NOT needed to run or test
+# the engine, and never installed automatically (Rule 8: the user installs it explicitly):
+#   engine\.venv\Scripts\python.exe -m pip install -r engine\requirements-build.txt
+# Record the exact versions that produced a release (pip freeze) in the build notes.
+-r requirements.txt
+pyinstaller>=6.16.0,<7
+pyinstaller-hooks-contrib>=2025.8
