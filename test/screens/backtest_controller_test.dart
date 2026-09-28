@@ -275,7 +275,64 @@ void main() {
     expect(c.symbol, 'BRENT.x');
     expect(c.fromDay, DateTime.utc(2024, 2, 1));
     expect(c.toDay, DateTime.utc(2024, 3, 1));
-    expect(FakeEngineHttp.bodyOf(http.sent('POST /backtests').single), containsPair('to', '2024-03-02T00:00:00.000Z'));
+    // A full prefill runs its exact instants (not the whole days shown in the fields).
+    final Map<String, Object?> body =
+        FakeEngineHttp.bodyOf(http.sent('POST /backtests').single)! as Map<String, Object?>;
+    expect(body, containsPair('from', '2024-02-01T00:00:00.000Z'));
+    expect(body, containsPair('to', '2024-03-01T23:59:59.000Z'));
+  });
+
+  test('chart prefill (23:00 .. 21:00): the request carries exactly the engine window', () async {
+    c = make();
+    await c.init();
+    await c.applyPrefill(BacktestPrefill(
+      symbol: 'XAUUSD.x',
+      from: DateTime.utc(2026, 8, 9, 23),
+      to: DateTime.utc(2026, 9, 25, 21),
+      autoRun: true,
+    ));
+    expect(c.hasExactPeriod, isTrue);
+    expect(c.fromDay, DateTime.utc(2026, 8, 9), reason: 'the day fields only show it');
+    expect(c.toDay, DateTime.utc(2026, 9, 25));
+    final Map<String, Object?> body =
+        FakeEngineHttp.bodyOf(http.sent('POST /backtests').single)! as Map<String, Object?>;
+    expect(body['mode'], 'manual');
+    expect(body['from'], '2026-08-09T23:00:00.000Z');
+    expect(body['to'], '2026-09-25T21:00:00.000Z');
+  });
+
+  test('editing a period day, the mode, the symbol or «حذف» drops the exact period (day semantics)', () async {
+    c = make();
+    await c.init();
+    Future<void> prefill() => c.applyPrefill(
+        BacktestPrefill(symbol: 'XAUUSD.x', from: DateTime.utc(2026, 8, 9, 23), to: DateTime.utc(2026, 9, 25, 21)));
+
+    await prefill();
+    c.setFromDay(DateTime(2026, 8, 10));
+    expect(c.hasExactPeriod, isFalse);
+    expect(c.buildRequest().toJson()['from'], '2026-08-10T00:00:00.000Z');
+    expect(c.buildRequest().toJson()['to'], '2026-09-26T00:00:00.000Z', reason: 'end day included');
+
+    await prefill();
+    c.setToDay(DateTime(2026, 9, 20));
+    expect(c.hasExactPeriod, isFalse);
+    expect(c.buildRequest().toJson()['to'], '2026-09-21T00:00:00.000Z');
+
+    await prefill();
+    c.setMode(BacktestMode.random);
+    expect(c.hasExactPeriod, isFalse);
+    c.setMode(BacktestMode.manual);
+    expect(c.buildRequest().toJson()['from'], '2026-08-09T00:00:00.000Z');
+
+    await prefill();
+    c.setSymbol('BRENT.x');
+    expect(c.hasExactPeriod, isFalse);
+
+    await prefill();
+    c.clearExactPeriod();
+    expect(c.hasExactPeriod, isFalse);
+    expect(c.buildRequest().toJson()['to'], '2026-09-26T00:00:00.000Z');
+    expect(http.sent('POST /backtests'), isEmpty);
   });
 
   test('prefill with an exclusive midnight end keeps the day before as the last day', () async {

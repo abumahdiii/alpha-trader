@@ -164,12 +164,43 @@ class BacktestFormPanel extends StatelessWidget {
           ),
         ),
       ]),
+      if (c.hasExactPeriod) _exactPeriodNote(context),
       FieldErrors(c.errorsOf(BacktestField.period), key: const ValueKey<String>('bt-period-errors')),
       _hint(
           context,
           'روزها به وقت UTC هستند و روز پایان هم جزو بازه است. ابتدای بازه باید بعد از زمان لازم برای '
           'آماده شدن کانال و ATR باشد؛ در غیر این صورت موتور پیام خطا می‌دهد.'),
     ]);
+  }
+
+  /// The exact period a chart prefill will run (instead of the whole days above).
+  Widget _exactPeriodNote(BuildContext context) {
+    final BacktestController c = controller;
+    String minute(DateTime t) {
+      final DateTime u = t.toUtc();
+      return '${fmtDay(u)} ${u.hour.toString().padLeft(2, '0')}:${u.minute.toString().padLeft(2, '0')}';
+    }
+
+    final AppSemanticColors colors = context.appColors;
+    return Container(
+      key: const ValueKey<String>('bt-exact-period'),
+      margin: const EdgeInsets.only(top: 6),
+      padding: const EdgeInsetsDirectional.only(start: 8, end: 2, top: 2, bottom: 2),
+      decoration: BoxDecoration(color: colors.warningContainer, borderRadius: BorderRadius.circular(6)),
+      child: Row(children: [
+        Expanded(
+          child: Text(
+            'بازه دقیق از چارت: ${minute(c.exactFrom!)} تا ${minute(c.exactTo!)} UTC (پایان باز)',
+            style: TextStyle(fontSize: 12, color: colors.onWarningContainer),
+          ),
+        ),
+        TextButton(
+          key: const ValueKey<String>('bt-exact-period-clear'),
+          onPressed: c.clearExactPeriod,
+          child: const Text('حذف'),
+        ),
+      ]),
+    );
   }
 
   Widget _randomFields(BuildContext context) {

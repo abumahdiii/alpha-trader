@@ -114,6 +114,12 @@ class BacktestController extends ChangeNotifier {
   BacktestMode _mode = BacktestMode.manual;
   DateTime? _fromDay;
   DateTime? _toDay;
+
+  /// Exact manual period `[from, to)` from a prefill (the chart's engine
+  /// `backtest_window`), sent verbatim until the user edits the period,
+  /// mode or symbol (then the day fields apply again).
+  DateTime? _exactFrom;
+  DateTime? _exactTo;
   int _windowsCount = 20;
   int _windowMonths = 3;
   late String _seedText;
@@ -137,6 +143,32 @@ class BacktestController extends ChangeNotifier {
 
   /// Last day of the manual period, INCLUDED (the request's `to` is the next midnight).
   DateTime? get toDay => _toDay;
+
+  /// Exact period start from a prefill (UTC), or null.
+  DateTime? get exactFrom => _exactFrom;
+
+  /// Exact period end from a prefill (UTC, exclusive), or null.
+  DateTime? get exactTo => _exactTo;
+
+  /// The manual run will use [exactFrom] .. [exactTo] instead of the day fields.
+  bool get hasExactPeriod => _exactFrom != null && _exactTo != null;
+
+  /// «حذف» on the exact-period note: back to the day fields.
+  void clearExactPeriod() {
+    if (!_dropExactPeriod('removed by the user')) return;
+    _notify();
+  }
+
+  /// Returns true when an exact period was active.
+  bool _dropExactPeriod(String why) {
+    if (!hasExactPeriod) return false;
+    _log('form: exact period ${_exactFrom!.toIso8601String()} .. ${_exactTo!.toIso8601String()} cleared ($why); '
+        'day fields apply');
+    _exactFrom = null;
+    _exactTo = null;
+    return true;
+  }
+
   int get windowsCount => _windowsCount;
   int get windowMonths => _windowMonths;
   String get seedText => _seedText;
@@ -158,6 +190,7 @@ class BacktestController extends ChangeNotifier {
     if (value == _symbol) return;
     _log('form: symbol $_symbol -> $value');
     _symbol = value;
+    _dropExactPeriod('symbol changed');
     _clearFieldError(BacktestField.symbol);
     _notify();
   }
@@ -166,6 +199,7 @@ class BacktestController extends ChangeNotifier {
     if (value == _mode) return;
     _log('form: mode ${_mode.code} -> ${value.code}');
     _mode = value;
+    _dropExactPeriod('mode changed');
     _fieldErrors = const {};
     _submitError = null;
     _generalErrors = const [];
@@ -176,6 +210,7 @@ class BacktestController extends ChangeNotifier {
   void setFromDay(DateTime? day) {
     _fromDay = day == null ? null : DateTime.utc(day.year, day.month, day.day);
     _log('form: fromDay -> ${_fromDay?.toIso8601String()}');
+    _dropExactPeriod('start day edited');
     _clearFieldError(BacktestField.period);
     _notify();
   }
@@ -183,6 +218,7 @@ class BacktestController extends ChangeNotifier {
   void setToDay(DateTime? day) {
     _toDay = day == null ? null : DateTime.utc(day.year, day.month, day.day);
     _log('form: toDay -> ${_toDay?.toIso8601String()}');
+    _dropExactPeriod('end day edited');
     _clearFieldError(BacktestField.period);
     _notify();
   }
@@ -247,7 +283,9 @@ class BacktestController extends ChangeNotifier {
     final Map<String, List<String>> errors = {};
     void add(String field, String message) => (errors[field] ??= []).add(message);
     if (_symbol == null) add(BacktestField.symbol, 'نماد را انتخاب کنید.');
-    if (_mode == BacktestMode.manual) {
+    if (_mode == BacktestMode.manual && hasExactPeriod) {
+      if (!_exactFrom!.isBefore(_exactTo!)) add(BacktestField.period, 'ابتدای بازه باید قبل از انتهای آن باشد.');
+    } else if (_mode == BacktestMode.manual) {
       if (_fromDay == null) add(BacktestField.period, 'ابتدای بازه را انتخاب کنید.');
       if (_toDay == null) add(BacktestField.period, 'انتهای بازه را انتخاب کنید.');
       if (_fromDay != null && _toDay != null && _fromDay!.isAfter(_toDay!)) {
@@ -274,10 +312,12 @@ class BacktestController extends ChangeNotifier {
       SpreadChoice.custom => _customSpreadPoints,
     };
     if (_mode == BacktestMode.manual) {
+      final bool exact = hasExactPeriod;
       return BacktestRequest.manual(
         symbol: _symbol!,
-        from: _fromDay!,
-        to: _toDay!.add(const Duration(days: 1)),
+        // Exact prefill instants verbatim; otherwise whole UTC days, the end day included.
+        from: exact ? _exactFrom! : _fromDay!,
+        to: exact ? _exactTo! : _toDay!.add(const Duration(days: 1)),
         commissionPerLotPerSide: _commission,
         fallbackSpreadPoints: fallback,
       );
@@ -373,6 +413,10 @@ class BacktestController extends ChangeNotifier {
       final bool midnight = to == day;
       _toDay = midnight && (from == null || day.isAfter(from)) ? day.subtract(const Duration(days: 1)) : day;
     }
+    // The days above are only shown; a full [from, to) is run exactly as given.
+    _exactFrom = from != null && to != null ? from : null;
+    _exactTo = from != null && to != null ? to : null;
+    if (hasExactPeriod) _log('prefill: exact period ${from!.toIso8601String()} .. ${to!.toIso8601String()}');
     _fieldErrors = const {};
     _submitError = null;
     _generalErrors = const [];

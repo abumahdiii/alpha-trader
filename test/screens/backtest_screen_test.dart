@@ -124,6 +124,26 @@ void main() {
     await p.h.dispose(tester);
   });
 
+  testWidgets('chart prefill: the exact period note is shown; «حذف» goes back to whole days', (tester) async {
+    final _Page p = await _pump(tester);
+    p.h.navigation
+        .openBacktest(symbol: 'XAUUSD.x', from: DateTime.utc(2026, 8, 9, 23), to: DateTime.utc(2026, 9, 25, 21));
+    await settle(tester, 12);
+    expect(
+      find.descendant(
+          of: _key('bt-exact-period'),
+          matching: find.text('بازه دقیق از چارت: 2026-08-09 23:00 تا 2026-09-25 21:00 UTC (پایان باز)')),
+      findsOneWidget,
+    );
+    expect(find.text('از 2026-08-09'), findsOneWidget);
+    expect(find.text('تا 2026-09-25'), findsOneWidget);
+    await tester.tap(_key('bt-exact-period-clear'));
+    await settle(tester);
+    expect(_key('bt-exact-period'), findsNothing);
+    expect(p.h.http.sent('POST /backtests'), isEmpty);
+    await p.h.dispose(tester);
+  });
+
   testWidgets('run: live progress with «لغو», then done shows the result', (tester) async {
     final _Page p = await _pump(tester);
     p.h.navigation.openBacktest(

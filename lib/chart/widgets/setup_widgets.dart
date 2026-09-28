@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import '../../core/number_format.dart';
 import '../../theme/app_semantic_colors.dart';
 import '../../widgets/scrollable_dialog.dart';
-import '../chart_data.dart';
 import '../chart_format.dart';
 import '../../models/chart_models.dart';
 
@@ -17,19 +16,34 @@ Color setupStatusColor(BuildContext context, SetupStatus s) {
   };
 }
 
-/// Full details of one setup, exactly as the engine reported it. Display
+/// Buy green, sell red.
+Color tradeSideColor(BuildContext context, TradeSide side) =>
+    side == TradeSide.buy ? context.appColors.success : context.appColors.error;
+
+/// Colour of an engine P&L / R value: green above zero, red below.
+Color? pnlColor(BuildContext context, double? v) {
+  if (v == null || v == 0) return null;
+  return v > 0 ? context.appColors.success : context.appColors.error;
+}
+
+/// Full details of one setup, exactly as the engine reported it (levels,
+/// sizing, the independent outcome and the range-backtest flag). Display
 /// only — there is deliberately no "send order" action.
 class SetupDetails extends StatelessWidget {
-  const SetupDetails({super.key, required this.setup, this.digits});
+  const SetupDetails({super.key, required this.setup, this.digits, this.endOfDataLabelFa});
 
   final SetupItem setup;
   final int? digits;
 
-  static Future<void> show(BuildContext context, SetupItem setup, {int? digits}) => ScrollableDialog.show<void>(
+  /// The engine's explanation of a «پایان داده» result.
+  final String? endOfDataLabelFa;
+
+  static Future<void> show(BuildContext context, SetupItem setup, {int? digits, String? endOfDataLabelFa}) =>
+      ScrollableDialog.show<void>(
         context: context,
         title: Text('${setup.setupTitleFa} — ${setup.direction.titleFa}'),
         showCloseButton: true,
-        content: SetupDetails(setup: setup, digits: digits),
+        content: SetupDetails(setup: setup, digits: digits, endOfDataLabelFa: endOfDataLabelFa),
       );
 
   @override
@@ -38,7 +52,10 @@ class SetupDetails extends StatelessWidget {
     final TextTheme tt = Theme.of(context).textTheme;
     final AppSemanticColors colors = context.appColors;
     final bool pending = s.status == SetupStatus.pendingEntry;
+    final SetupOutcome? o = s.outcome;
+    final SetupBacktestFlag? bt = s.backtest;
     String price(double? v) => formatChartPrice(v, digits);
+    String money(double? v) => formatSigned(v, 2);
 
     return Column(
       key: const ValueKey<String>('setup-details'),
@@ -63,8 +80,15 @@ class SetupDetails extends StatelessWidget {
         if (pending) ...<Widget>[
           _kv('قیمت مرجع (تقریبی)', price(s.referencePrice)),
           _kv('حد سود تقریبی', price(s.indicativeTakeProfit)),
-        ] else
-          _kv('ورود', price(s.entry)),
+        ] else ...<Widget>[
+          _kv('ورود (fill؛ خرید با ask، فروش با bid)', price(s.entry)),
+          if (s.entryBidOpen != null) _kv('open کندل ورود (bid)', price(s.entryBidOpen)),
+          if (s.spreadAtEntryPoints != null)
+            _kv(
+              'اسپرد ورود (پوینت)${s.entrySpreadSource == null ? '' : ' — ${s.entrySpreadSource!.titleFa}'}',
+              '${s.spreadAtEntryPoints}',
+            ),
+        ],
         _kv('حد ضرر', price(s.stopLoss)),
         if (!pending) _kv('حد سود', price(s.takeProfit)),
         _kv('R:R', formatValue(s.rr, 2)),
@@ -77,6 +101,39 @@ class SetupDetails extends StatelessWidget {
         _kv('مارجین', s.margin == null ? '—' : formatNumber(s.margin!, decimals: 2)),
         if (s.volumeNoteFa != null) _Note(text: s.volumeNoteFa!, color: colors.warning),
         for (final String w in s.sizingWarningsFa) _Note(text: w, color: colors.warning),
+        if (o != null) ...<Widget>[
+          const Divider(),
+          Text('نتیجه (ارزیابی مستقل این ستاپ)', style: tt.labelLarge),
+          const SizedBox(height: 4),
+          _kvFa('نتیجه', o.result.titleFa),
+          _kvFa('دلیل خروج', o.exitReasonFa),
+          _kv('زمان خروج (UTC)', formatMt5Time(o.exitTime)),
+          _kv('قیمت خروج', price(o.exitPrice)),
+          _kv('تغییر قیمت به نفع معامله', formatSigned(o.pnlPrice, digits ?? 5)),
+          _kv('سود ناخالص (\$)', money(o.grossPnl)),
+          _kv('کمیسیون (\$)', formatValue(o.commission, 2)),
+          _kv('سود خالص (\$)', money(o.netPnl), color: pnlColor(context, o.netPnl)),
+          _kv('R', formatSigned(o.rMultiple, 2), color: pnlColor(context, o.rMultiple)),
+          _kv('تعداد کندل نگهداری', '${o.barsHeld}'),
+          _kvFa('نگهداری در آخر هفته', o.heldOverWeekend ? 'بله' : 'خیر'),
+          if (o.flags.isNotEmpty) _kv('پرچم‌ها', o.flags.join(', ')),
+          // The engine's end-of-data explanation, unless «دلیل خروج» above already says exactly that.
+          if (o.result == SetupResult.endOfData &&
+              (endOfDataLabelFa ?? '').isNotEmpty &&
+              endOfDataLabelFa != o.exitReasonFa)
+            _Note(text: endOfDataLabelFa!, color: colors.warning),
+        ],
+        if (bt != null) ...<Widget>[
+          const Divider(),
+          _kvFa(
+            'در بک‌تست همین بازه',
+            bt.traded
+                ? 'معامله شد${bt.tradeIndex == null ? '' : ' (معامله ${bt.tradeIndex})'}'
+                    '${bt.netPnl == null ? '' : '، سود خالص بک‌تست ${money(bt.netPnl)}'}'
+                : 'معامله نشد: ${bt.reasonFa ?? bt.reason ?? '—'}',
+            color: bt.traded ? colors.success : colors.mutedText,
+          ),
+        ],
         const Divider(),
         Text('دلیل', style: tt.labelLarge),
         const SizedBox(height: 4),
@@ -96,11 +153,22 @@ class SetupDetails extends StatelessWidget {
     );
   }
 
-  Widget _kv(String k, String v) => Padding(
+  /// A number (Latin digits, left-to-right).
+  Widget _kv(String k, String v, {Color? color}) => Padding(
         padding: const EdgeInsets.symmetric(vertical: 2),
         child: Row(children: <Widget>[
           Expanded(child: Text(k)),
-          Text(v, textDirection: TextDirection.ltr),
+          Text(v, textDirection: TextDirection.ltr, style: TextStyle(color: color)),
+        ]),
+      );
+
+  /// A Persian text value (may wrap).
+  Widget _kvFa(String k, String v, {Color? color}) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+          Expanded(child: Text(k)),
+          const SizedBox(width: 8),
+          Flexible(flex: 2, child: Text(v, textAlign: TextAlign.end, style: TextStyle(color: color))),
         ]),
       );
 }
@@ -116,115 +184,4 @@ class _Note extends StatelessWidget {
         padding: const EdgeInsets.only(top: 6),
         child: Text(text, style: TextStyle(color: color)),
       );
-}
-
-/// Side table of the setups in the loaded range. Tapping a row selects the
-/// setup and jumps the chart to it.
-class SetupTable extends StatelessWidget {
-  const SetupTable({
-    super.key,
-    required this.setups,
-    required this.onSelect,
-    this.selectedId,
-    this.digits,
-    this.emptyText,
-    this.noteFa,
-  });
-
-  final List<SetupMark> setups;
-  final String? selectedId;
-  final int? digits;
-  final ValueChanged<SetupMark> onSelect;
-
-  /// Shown instead of the list when there is nothing to show.
-  final String? emptyText;
-  final String? noteFa;
-
-  @override
-  Widget build(BuildContext context) {
-    final TextTheme tt = Theme.of(context).textTheme;
-    final AppSemanticColors colors = context.appColors;
-    if (setups.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Text(
-            emptyText ?? 'در این بازه ستاپی پیدا نشد.',
-            textAlign: TextAlign.center,
-            style: tt.bodyMedium?.copyWith(color: colors.mutedText),
-          ),
-        ),
-      );
-    }
-    String price(double? v) => formatChartPrice(v, digits);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        Padding(
-          padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
-          child: Text('${setups.length} ستاپ در بازه (زمان‌ها UTC)', style: tt.labelLarge),
-        ),
-        Expanded(
-          child: ListView.separated(
-            key: const ValueKey<String>('setup-table'),
-            itemCount: setups.length,
-            separatorBuilder: (_, __) => const Divider(height: 1),
-            itemBuilder: (BuildContext context, int i) {
-              final SetupMark m = setups[i];
-              final SetupItem s = m.item;
-              final bool selected = s.id == selectedId;
-              final bool pending = s.status == SetupStatus.pendingEntry;
-              final Color sideColor = s.direction == TradeSide.buy ? colors.success : colors.error;
-              return Material(
-                color: selected ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.12) : Colors.transparent,
-                child: InkWell(
-                  key: ValueKey<String>('setup-row-${s.id}'),
-                  onTap: () => onSelect(m),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                    child: DefaultTextStyle.merge(
-                      style: const TextStyle(fontSize: 12),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: <Widget>[
-                          Row(children: <Widget>[
-                            Text(s.direction.titleFa, style: TextStyle(color: sideColor, fontWeight: FontWeight.bold)),
-                            const SizedBox(width: 6),
-                            Expanded(child: Text(s.setupTitleFa, overflow: TextOverflow.ellipsis)),
-                            Text(s.status.titleFa, style: TextStyle(color: setupStatusColor(context, s.status))),
-                          ]),
-                          const SizedBox(height: 2),
-                          Row(children: <Widget>[
-                            Text(formatMt5Time(s.confirmationBarTime), textDirection: TextDirection.ltr),
-                            const Spacer(),
-                            Text(
-                              s.volume == null ? 'حجم: —' : 'حجم: ${formatNumber(s.volume!, decimals: 2)}',
-                            ),
-                          ]),
-                          const SizedBox(height: 2),
-                          Text(
-                            pending
-                                ? 'Ref* ${price(s.referencePrice)}  SL ${price(s.stopLoss)}  '
-                                    'TP* ${price(s.indicativeTakeProfit)}'
-                                : 'Entry ${price(s.entry)}  SL ${price(s.stopLoss)}  TP ${price(s.takeProfit)}',
-                            textDirection: TextDirection.ltr,
-                            textAlign: TextAlign.right,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-        if (noteFa != null)
-          Padding(
-            padding: const EdgeInsets.all(8),
-            child: Text(noteFa!, style: tt.bodySmall?.copyWith(color: colors.mutedText)),
-          ),
-      ],
-    );
-  }
 }

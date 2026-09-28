@@ -1,11 +1,14 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
+import '../../chart/backtest_range_request.dart';
 import '../../chart/chart_controller.dart';
 import '../../chart/chart_data_source.dart';
 import '../../chart/chart_view.dart';
 import '../../core/dev_mode.dart';
+import '../../providers/shell_navigation.dart';
 import '../../services/engine_api.dart';
 import '../../widgets/engine_gate.dart';
 
@@ -45,6 +48,13 @@ class _ChartPageState extends State<_ChartPage> {
     super.dispose();
   }
 
+  /// «بک‌تست همین بازه»: the backtest page, prefilled with the symbol and the
+  /// engine's backtest_window (exactly as received), runs it at once.
+  void _openBacktest(BacktestRangeRequest r) {
+    devLog('[ChartScreen] backtest this range -> $r');
+    context.read<ShellNavigation>().openBacktest(symbol: r.symbol, from: r.from, to: r.to, autoRun: true);
+  }
+
   @override
-  Widget build(BuildContext context) => ChartView(controller: _controller);
+  Widget build(BuildContext context) => ChartView(controller: _controller, onBacktestRange: _openBacktest);
 }
