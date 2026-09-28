@@ -1,12 +1,15 @@
 """``/backtests`` REST routes and the ``/ws/backtests/{id}`` progress WebSocket (phase 4, wave 2).
 
-* ``POST /backtests`` -- validate, snapshot the ACTIVE params version and the account settings at request
-  time, validate the period against the cached data (cheap: bars + first valid channel bar, shared LRU;
-  :func:`period_limits`), draw the seed of a seedless random run, store the run ``queued`` and hand it to
-  ``app.state.backtest_jobs`` -> 202 ``{id, status, provisional, labels_fa, seed, seed_generated}``.
-* ``GET /backtests/limits?symbol=`` -- the allowed manual period for the ACTIVE params, computed by the SAME
-  :func:`period_limits` the POST validates with (earliest start, data start/end, warm-up), the request bounds
-  and the auto fallback spread.
+* ``POST /backtests`` -- validate, resolve the strategy (body ``strategy``, default ``stddev_channel``; optional
+  ``strategy_version`` must be the registered code version; unknown -> 404 ``strategy_not_found``), snapshot
+  its ACTIVE params version, identity (``strategy_sha256`` / ``strategy_source``) and the account settings at
+  request time, validate the period against the cached data (cheap: bars + the strategy's first valid bar,
+  shared LRU; :func:`period_limits`), draw the seed of a seedless random run, store the run ``queued`` and hand
+  it (with the resolved strategy instance) to ``app.state.backtest_jobs`` -> 202 ``{id, status, provisional,
+  labels_fa, seed, seed_generated}``.
+* ``GET /backtests/limits?symbol=[&strategy=]`` -- the allowed manual period for the ACTIVE params of the
+  strategy, computed by the SAME :func:`period_limits` the POST validates with (earliest start, data start/end,
+  warm-up), the request bounds and the auto fallback spread.
 * ``GET /backtests?offset&limit&symbol&mode&status`` (newest first; ``total`` = matching runs),
   ``GET /backtests/{id}`` (config, plan incl. seed, windows
   with metrics, overall metrics, distribution, labels, provisional, fingerprint, status/progress/error),
@@ -47,7 +50,6 @@ from ..backtest.periods import (
     manual_window,
     new_seed,
     random_windows,
-    warmup_h4_bars,
 )
 from ..backtest.results import EQUITY_STORAGE_RULE
 from ..logging_setup import get_logger, is_dev_mode
@@ -55,10 +57,11 @@ from ..market_data import MarketDataService
 from ..storage.account_settings import AccountSettingsRepo
 from ..storage.backtests_repo import ACTIVE_STATUSES, TERMINAL_STATUSES, BacktestsRepo, api_time
 from ..storage.db import EngineConnection
-from ..strategy.base import bar_open_times
+from ..strategy.base import WarmupTextsFa, bar_open_times
 from ..strategy.registry import StrategyRegistry
-from . import DB_UNAVAILABLE_FA, api_error, get_db, get_market_data
-from .chart import ChartCache, _Active, _active_params, _check_symbol, get_chart_cache
+from ..strategy.resolve import ActiveStrategy
+from . import DB_UNAVAILABLE_FA, api_error, get_db, get_market_data, resolve_strategy_or_error
+from .chart import ChartCache, _check_symbol, get_chart_cache
 from .strategies import get_registry
 
 logger = get_logger(__name__)
@@ -84,6 +87,8 @@ FIELD_LABELS_FA: dict[str, str] = {
     "seed": "seed",
     "commission_per_lot_per_side": "کمیسیون هر لات در هر طرف",
     "fallback_spread_points": "اسپرد جایگزین (پوینت)",
+    "strategy": "سیستم معاملاتی",
+    "strategy_version": "نسخه سیستم",
 }
 MANUAL_ONLY = ("from_", "to")
 RANDOM_ONLY = ("windows_count", "window_months", "seed")
@@ -105,16 +110,20 @@ class BacktestRequest(BaseModel):
     commission_per_lot_per_side: float | None = Field(default=None, ge=0.0, le=1000.0)
     # spread (points) for bars without an earlier broker spread: omitted = auto (median observed), 0 = zero cost
     fallback_spread_points: int | None = Field(default=None, ge=0, le=100_000)
+    # registered strategy name (omitted = stddev_channel) and, optionally, its expected code version
+    strategy: str | None = Field(default=None, min_length=1, max_length=64)
+    strategy_version: int | None = Field(default=None, ge=1)
 
     @field_validator("windows_count", "window_months", "seed", "commission_per_lot_per_side", "fallback_spread_points",
-                     mode="before")
+                     "strategy_version", mode="before")
     @classmethod
     def _no_bool(cls, value: Any) -> Any:
         if isinstance(value, bool):
             raise ValueError("boolean is not a number")
         return value
 
-    @field_validator("windows_count", "window_months", "seed", "fallback_spread_points", mode="before")
+    @field_validator("windows_count", "window_months", "seed", "fallback_spread_points", "strategy_version",
+                     mode="before")
     @classmethod
     def _whole(cls, value: Any) -> Any:
         if isinstance(value, float):
@@ -173,6 +182,8 @@ class RunSummary(BaseModel):
     seed_generated: bool | None
     strategy: str
     strategy_version: int
+    strategy_source: Literal["builtin", "plugin"]  # runs stored before the field existed: "builtin"
+    strategy_sha256: str | None  # uploaded plugins: SHA-256 of the source file; built-in: null
     params_version: int | None
     params_hash: str
     provisional: bool
@@ -305,11 +316,14 @@ def _errors_fa(exc: ValidationError) -> list[str]:
             messages.append(f"{label} نباید {word} از {bound} باشد.")
         elif kind.startswith("datetime") or kind.startswith("date"):
             messages.append(f"{label} باید یک تاریخ-زمان ISO-8601 باشد (مثل 2024-01-01T00:00:00Z).")
+        elif kind.startswith("string") and field == "strategy":
+            messages.append(f"{label} باید نام یک سیستم ثبت‌شده (۱ تا ۶۴ نویسه) باشد.")
         elif kind.startswith("string"):
             messages.append(f"{label} باید یک متن معتبر (۱ تا ۳۲ نویسه) باشد.")
         elif kind == "model_type" or kind == "dict_type":
             messages.append("بدنه درخواست باید یک شیء JSON باشد.")
-        elif kind.startswith("int") or field in ("windows_count", "window_months", "seed", "fallback_spread_points"):
+        elif kind.startswith("int") or field in ("windows_count", "window_months", "seed", "fallback_spread_points",
+                                                 "strategy_version"):
             messages.append(f"{label} باید عدد صحیح باشد.")
         elif kind.startswith("float") or kind == "finite_number" or field == "commission_per_lot_per_side":
             messages.append(f"{label} باید یک عدد معتبر باشد.")
@@ -343,41 +357,46 @@ def _run_labels(cost: CostModel, provisional: bool) -> list[str]:
 
 @dataclass(frozen=True)
 class PeriodLimits:
-    """The allowed manual period of one symbol for the ACTIVE params: what ``POST /backtests`` validates
-    against and what ``GET /backtests/limits`` reports (one computation, :func:`period_limits`)."""
+    """The allowed manual period of one symbol for the ACTIVE params of a strategy: what ``POST /backtests``
+    validates against and what ``GET /backtests/limits`` reports (one computation, :func:`period_limits`)."""
 
     prepared: PreparedHistory
-    earliest: pd.Timestamp  # periods.earliest_start (first valid channel bar + ATR warm-up margin)
+    earliest: pd.Timestamp  # periods.earliest_start (strategy's first valid bar + its warm-up margin)
     data_start: pd.Timestamp  # open of the first cached H1 bar
     data_end: pd.Timestamp  # periods.data_end (close of the last cached H1 bar)
-    warmup_bars: int  # periods.warmup_h4_bars(atr_period)
+    warmup_bars: int  # Strategy.warmup_margin_h4_bars(params)
+    texts: WarmupTextsFa  # Strategy.warmup_texts_fa
 
 
-def period_limits(service: MarketDataService, name: str, active: _Active, lru: ChartCache) -> PeriodLimits:
-    """Cached history (shared LRU) + ``periods.earliest_start`` / ``data_end`` / ``warmup_h4_bars``, the same
-    functions the runner uses. Raises the API errors: ``HistoryUnavailable`` -> 422 ``no_data`` /
-    ``spec_missing`` (503 ``cache_unreadable``), ``PeriodError`` -> 422 ``data_too_short``."""
+def period_limits(service: MarketDataService, name: str, active: ActiveStrategy, lru: ChartCache) -> PeriodLimits:
+    """Cached history (shared LRU) + ``periods.earliest_start`` / ``data_end`` with the strategy's first valid
+    bar and warm-up margin, the same functions the runner uses. Raises the API errors: ``HistoryUnavailable`` ->
+    422 ``no_data`` / ``spec_missing`` (503 ``cache_unreadable``), ``PeriodError`` -> 422 ``data_too_short``."""
     try:
         prepared = prepare_history(service.cache, name, lru)
     except HistoryUnavailable as exc:
         if is_dev_mode():
             logger.debug("backtest period limits %s: history unavailable %s", name, exc.code)
         raise _history_error(exc) from None
-    fv = first_valid_index(prepared, active.params, active.params_hash, lru)
+    strategy = active.strategy
+    fv = first_valid_index(prepared, strategy, active.params, active.params_hash, lru)
+    warm = int(strategy.warmup_margin_h4_bars(active.params))
+    texts = strategy.warmup_texts_fa
     h4_ns = bar_open_times(prepared.history.h4).as_unit("ns").asi8
     times_ns = prepared.bars.times_ns
     try:
-        earliest = earliest_start(times_ns, h4_ns, fv, active.p.atr_period)
+        earliest = earliest_start(times_ns, h4_ns, fv, warm, texts=texts)
     except PeriodError as exc:
         if is_dev_mode():
             logger.debug("backtest period limits %s: %s", name, exc.code)
         raise _period_error(exc) from None
     limits = PeriodLimits(prepared=prepared, earliest=earliest, data_start=pd.Timestamp(int(times_ns[0]), tz="UTC"),
-                          data_end=data_end(times_ns), warmup_bars=warmup_h4_bars(active.p.atr_period))
+                          data_end=data_end(times_ns), warmup_bars=warm, texts=texts)
     if is_dev_mode():
-        logger.debug("backtest period limits %s (params %s): first valid H1 bar #%s, earliest=%s data=%s..%s "
-                     "warm-up=%d H4 bars", name, active.params_hash[:12], fv, earliest.isoformat(),
-                     limits.data_start.isoformat(), limits.data_end.isoformat(), limits.warmup_bars)
+        logger.debug("backtest period limits %s (%s, params %s): first valid H1 bar #%s, earliest=%s data=%s..%s "
+                     "warm-up=%d H4 bars", name, active.identity.label(), active.params_hash[:12], fv,
+                     earliest.isoformat(), limits.data_start.isoformat(), limits.data_end.isoformat(),
+                     limits.warmup_bars)
     return limits
 
 
@@ -422,7 +441,8 @@ def submit_backtest(
         if not start < end:
             raise api_error(422, "invalid_range", "ابتدای بازه باید قبل از انتهای آن باشد.")
     name = _check_symbol(service, body.symbol)
-    active = _active_params(db, registry)  # 404 strategy_not_found / 409 stored_params_invalid
+    # 404 strategy_not_found (unknown name / code version) / 409 stored_params_invalid
+    active = resolve_strategy_or_error(db, registry, body.strategy, body.strategy_version)
     account = AccountSettingsRepo(db).get()
     settings = request.app.state.settings
     provisional = not bool(getattr(settings, "alpha_data_check_confirmed", False))
@@ -435,7 +455,8 @@ def submit_backtest(
     try:
         if body.mode == "manual":
             assert start is not None and end is not None
-            manual_window(start, end, limits.prepared.bars.times_ns, limits.earliest, warmup_bars=limits.warmup_bars)
+            manual_window(start, end, limits.prepared.bars.times_ns, limits.earliest, warmup_bars=limits.warmup_bars,
+                          texts=limits.texts)
         else:  # seed-independent check that at least one window fits (seed 0: nothing is generated)
             random_windows(limits.prepared.bars.times_ns, limits.earliest, count=1, months=window_months, seed=0,
                            warmup_bars=limits.warmup_bars)
@@ -456,7 +477,8 @@ def submit_backtest(
         symbol=name, mode=body.mode, start=start, end=end,
         windows_count=body.windows_count if body.windows_count is not None else 20,
         window_months=window_months, seed=seed, cost_model=cost, account=account,
-        strategy_name=active.strategy.name, strategy_version=active.code_version, params=active.params,
+        strategy_name=active.identity.name, strategy_version=active.code_version,
+        strategy_sha256=active.identity.sha256, strategy_source=active.identity.source, params=active.params,
         params_version=active.record_version, params_hash=active.params_hash, provisional=provisional,
     )
     labels = _run_labels(cost, provisional)
@@ -472,25 +494,36 @@ def submit_backtest(
         params_hash=config.params_hash, provisional=provisional, labels_fa=labels,
     )
     try:
-        jobs.submit(run_id, config, seed_generated=bool(seed_generated))
+        jobs.submit(run_id, config, strategy=active.strategy, seed_generated=bool(seed_generated))
     except JobsClosed:
         repo.finish(run_id, "interrupted", error_code="engine_closing", error_message_fa="engine در حال بسته شدن بود.")
         raise api_error(503, "engine_closing", "engine در حال بسته شدن است؛ اجرای جدید پذیرفته نمی‌شود.") from None
     if is_dev_mode():
         logger.debug("POST /backtests -> run %d: %s %s from=%s to=%s windows=%s months=%s seed=%s (generated=%s) "
-                     "commission=%g params v%d hash=%s account=%s earliest=%s provisional=%s", run_id, name,
-                     body.mode, start, end, config.windows_count, config.window_months, seed, seed_generated,
-                     cost.commission_per_lot_per_side, active.record_version, active.params_hash[:12],
-                     account.model_dump(), limits.earliest.isoformat(), provisional)
+                     "commission=%g strategy %s params v%d hash=%s account=%s earliest=%s provisional=%s", run_id,
+                     name, body.mode, start, end, config.windows_count, config.window_months, seed, seed_generated,
+                     cost.commission_per_lot_per_side, active.identity.label(), active.record_version,
+                     active.params_hash[:12], account.model_dump(), limits.earliest.isoformat(), provisional)
     return SubmitResponse(id=run_id, status="queued", provisional=provisional, labels_fa=labels, seed=seed,
                           seed_generated=seed_generated)
 
 
 # ---------------------------------------------------------------------------------------------- GET
+def _strategy_identity(row: dict[str, Any]) -> tuple[str | None, str]:
+    """``(sha256, source)`` of a run: the list query extracts them from the stored config
+    (``BacktestsRepo`` summary columns), a full row carries the parsed ``config``. Older configs lack both:
+    built-in, no hash."""
+    config = row.get("config") if isinstance(row.get("config"), dict) else {}
+    sha = row["strategy_sha256"] if "strategy_sha256" in row else config.get("strategy_sha256")
+    source = row["strategy_source"] if "strategy_source" in row else config.get("strategy_source")
+    return sha, source or "builtin"
+
+
 def _summary(row: dict[str, Any]) -> dict[str, Any]:
     error = None
     if row.get("error_code") or row.get("error_message_fa"):
         error = {"code": row.get("error_code"), "message_fa": row.get("error_message_fa")}
+    sha, source = _strategy_identity(row)
     return {
         "id": row["id"], "created_at": api_time(row["created_utc"]), "started_at": api_time(row["started_utc"]),
         "finished_at": api_time(row["finished_utc"]), "status": row["status"], "progress": row["progress"],
@@ -499,6 +532,7 @@ def _summary(row: dict[str, Any]) -> dict[str, Any]:
         "window_months": row["window_months"], "seed": row["seed"],
         "seed_generated": None if row["seed_generated"] is None else bool(row["seed_generated"]),
         "strategy": row["strategy_name"], "strategy_version": row["strategy_version"],
+        "strategy_source": source, "strategy_sha256": sha,
         "params_version": row["params_version"], "params_hash": row["params_hash"],
         "provisional": bool(row["provisional"]), "trade_count": row["trade_count"], "net_profit": row["net_profit"],
         "net_profit_pct": row["net_profit_pct"],
@@ -558,9 +592,11 @@ def list_backtests(
             "runs": [_summary(r) for r in rows]}
 
 
+# {why} = the strategy's WarmupTextsFa.limits with the margin filled in (StdDev: "کانال به داده کافی H4 و حاشیه
+# گرم شدن ATR (140 کندل H4 = ۱۰ برابر دوره ATR) نیاز دارد").
 LIMITS_NOTE_FA = (
-    "بازه دستی نیم‌باز [ابتدا، انتها) و به وقت UTC است. ابتدای بازه نباید زودتر از «اولین زمان مجاز» باشد: کانال "
-    "به داده کافی H4 و حاشیه گرم شدن ATR ({warm} کندل H4 = ۱۰ برابر دوره ATR) نیاز دارد. انتهای بازه نباید بعد از "
+    "بازه دستی نیم‌باز [ابتدا، انتها) و به وقت UTC است. ابتدای بازه نباید زودتر از «اولین زمان مجاز» باشد: "
+    "{why}. انتهای بازه نباید بعد از "
     "آخرین داده کش باشد. این مرزها به پارامترهای فعال سیستم بستگی دارند و با تغییر آن‌ها یا به‌روزرسانی کش عوض "
     "می‌شوند.")
 
@@ -571,17 +607,19 @@ LIMITS_NOTE_FA = (
                        503: {"description": "DB/cache unavailable"}})
 def backtest_limits(
     symbol: Annotated[str | None, Query()] = None,
+    strategy: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
     service: MarketDataService = Depends(get_market_data),
     db: EngineConnection = Depends(get_db),
     registry: StrategyRegistry = Depends(get_registry),
     lru: ChartCache = Depends(get_chart_cache),
 ) -> dict[str, Any]:
-    """Allowed manual period of ``symbol`` for the ACTIVE params (exactly what ``POST /backtests`` accepts:
-    ``from >= earliest_start``, ``to <= data_end``) plus the request bounds and the auto fallback spread."""
+    """Allowed manual period of ``symbol`` for the ACTIVE params of ``strategy`` (default ``stddev_channel``;
+    exactly what ``POST /backtests`` accepts: ``from >= earliest_start``, ``to <= data_end``) plus the request
+    bounds and the auto fallback spread."""
     if symbol is None or not symbol.strip():
         raise api_error(422, "invalid_query", "«symbol» الزامی است.")
     name = _check_symbol(service, symbol)
-    active = _active_params(db, registry)
+    active = resolve_strategy_or_error(db, registry, strategy)
     limits = period_limits(service, name, active, lru)
     h1 = limits.prepared.history.h1
     points, source = resolve_fallback_points(h1["spread"].to_numpy() if "spread" in h1.columns else None, None)
@@ -591,7 +629,7 @@ def backtest_limits(
         "window_months_max": WINDOW_MONTHS_MAX, "windows_count_max": WINDOWS_COUNT_MAX, "seed_max": SEED_MAX,
         "default_fallback_spread_points": {"points": points, "source": source},
         "params_version": active.record_version, "params_hash": active.params_hash,
-        "note_fa": LIMITS_NOTE_FA.format(warm=limits.warmup_bars),
+        "note_fa": LIMITS_NOTE_FA.format(why=limits.texts.limits.format(margin=limits.warmup_bars)),
     }
 
 

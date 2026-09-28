@@ -1,12 +1,17 @@
 """Run a whole backtest: plan the windows, simulate each one, attach provenance (phase 4).
 
-``run_backtest(config, history, scan=None, *, bars=None, progress_cb=None, cancel_event=None)``
+``run_backtest(config, history, scan=None, *, strategy=None, bars=None, progress_cb=None, cancel_event=None)``
 
-1. checks that the config is internally consistent (strategy name/code version, ``params_hash`` of the
-   validated params) and that a given ``scan`` belongs to the same symbol / params / R:R;
+0. the strategy is ``strategy`` if given, else the one that made ``scan`` (``ScanResult.strategy``), else the
+   registered strategy named ``config.strategy_name`` (``strategy.resolve.strategy_for``; an unknown name ->
+   :class:`RunConfigError`). Nothing here is specific to one strategy;
+1. checks that the config is internally consistent with that strategy (:func:`check_config`: name, code
+   version, source SHA-256, ``params_hash`` of the params the strategy validates) and that a given ``scan``
+   belongs to the same strategy / symbol / params / R:R;
 2. scans the FULL history once when no ``scan`` is given (``history.scan_full_history``);
-3. plans the windows (``periods``): manual = one validated window, random = ``windows_count`` seeded
-   windows of ``window_months`` months (seed generated and stored when missing);
+3. plans the windows (``periods``) with the strategy's first valid bar and warm-up margin: manual = one
+   validated window, random = ``windows_count`` seeded windows of ``window_months`` months (seed generated
+   and stored when missing);
 4. simulates every window independently, each starting flat with the initial balance
    (``simulator.simulate_window``);
 5. returns a :class:`~alpha_engine.backtest.models.RunResult` with the plan (seed, algorithm, numpy
@@ -35,9 +40,10 @@ import threading
 from collections.abc import Callable
 
 from ..logging_setup import get_logger, is_dev_mode
-from ..strategies.stddev_channel import StdDevChannelStrategy, resolve_params
-from ..strategy.base import bar_open_times
+from ..strategy.base import Strategy, bar_open_times
 from ..strategy.params import params_hash
+from ..strategy.registry import StrategyRegistry, UnknownStrategyError
+from ..strategy.resolve import StrategyVersionMismatchError, strategy_for
 from .history import HistoryData, ScanResult, build_bar_arrays, data_fingerprint, scan_full_history
 from .costs import observed_spread, resolve_fallback_points
 from .models import (
@@ -48,7 +54,7 @@ from .models import (
     SpreadFallback,
     spread_label_fa,
 )
-from .periods import earliest_start, manual_window, random_windows, warmup_h4_bars
+from .periods import earliest_start, manual_window, random_windows
 from .simulator import BacktestCancelled, BarArrays, scan_provider, simulate_window, window_bar_range
 
 logger = get_logger(__name__)
@@ -60,18 +66,37 @@ class RunConfigError(ValueError):
     """The run config does not match the strategy / params / scan it is run with."""
 
 
-def check_config(config: RunConfig) -> None:
-    if config.strategy_name != StdDevChannelStrategy.name:
-        raise RunConfigError(f"unsupported strategy {config.strategy_name!r} (only {StdDevChannelStrategy.name!r})")
-    if config.strategy_version != StdDevChannelStrategy.version:
-        raise RunConfigError(f"strategy code version {config.strategy_version} != {StdDevChannelStrategy.version}")
-    _, clean = resolve_params(config.params)
+def strategy_for_config(config: RunConfig, registry: StrategyRegistry | None = None) -> Strategy:
+    """The registered strategy named ``config.strategy_name`` (:class:`RunConfigError` if unknown)."""
+    try:
+        return strategy_for(config.strategy_name, registry=registry)
+    except (UnknownStrategyError, StrategyVersionMismatchError) as exc:
+        raise RunConfigError(f"strategy {config.strategy_name!r} is not available: {exc}") from None
+
+
+def check_config(config: RunConfig, strategy: Strategy) -> None:
+    """``config`` was made for ``strategy`` (name, code version, source hash) with params it accepts."""
+    ident = strategy.identity
+    if config.strategy_name != ident.name:
+        raise RunConfigError(f"config is for strategy {config.strategy_name!r}, not {ident.name!r}")
+    if config.strategy_version != ident.version:
+        raise RunConfigError(f"strategy code version {config.strategy_version} != {ident.version}")
+    if config.strategy_sha256 != ident.sha256:
+        raise RunConfigError(f"strategy source hash {config.strategy_sha256} != {ident.sha256}")
+    if config.strategy_source is not None and config.strategy_source != ident.source:
+        raise RunConfigError(f"strategy source {config.strategy_source!r} != {ident.source!r}")
+    clean, errors = strategy.validate_params(config.params)
+    if errors:
+        raise RunConfigError("params rejected by the strategy: " + "; ".join(errors))
     if params_hash(clean) != config.params_hash:
         raise RunConfigError("params_hash does not match the params")
 
 
-def _check_scan(config: RunConfig, history: HistoryData, scan: ScanResult) -> None:
+def _check_scan(config: RunConfig, history: HistoryData, scan: ScanResult, strategy: Strategy) -> None:
     problems = []
+    if (scan.strategy_name, scan.strategy_version) != (config.strategy_name, config.strategy_version) or \
+            (scan.identity is not None and scan.identity != strategy.identity):
+        problems.append("strategy")
     if scan.symbol != config.symbol or history.symbol != config.symbol:
         problems.append("symbol")
     if scan.params_hash != config.params_hash:
@@ -89,18 +114,21 @@ def run_backtest(
     history: HistoryData,
     scan: ScanResult | None = None,
     *,
+    strategy: Strategy | None = None,
     bars: BarArrays | None = None,
     progress_cb: ProgressCallback | None = None,
     cancel_event: threading.Event | None = None,
 ) -> RunResult:
-    check_config(config)
+    if strategy is None:
+        strategy = scan.strategy if scan is not None and scan.strategy is not None else strategy_for_config(config)
+    check_config(config, strategy)
     dev = is_dev_mode()
     if cancel_event is not None and cancel_event.is_set():
         raise BacktestCancelled("cancelled before start")
     if scan is None:
-        scan = scan_full_history(StdDevChannelStrategy(), history.h1, history.h4, config.params, config.account,
+        scan = scan_full_history(strategy, history.h1, history.h4, config.params, config.account,
                                  symbol=config.symbol)
-    _check_scan(config, history, scan)
+    _check_scan(config, history, scan, strategy)
     raw_spread = history.h1["spread"].to_numpy() if "spread" in history.h1.columns else None
     fb_points, fb_source = resolve_fallback_points(raw_spread, config.cost_model.fallback_spread_points)
     if bars is None:
@@ -111,13 +139,13 @@ def run_backtest(
         raise RunConfigError(f"bar arrays were built with fallback spread {bars.spread.fallback_points} points, "
                              f"the cost model resolves to {fb_points}")
 
-    p, _ = resolve_params(config.params)
     h4_ns = bar_open_times(history.h4).as_unit("ns").asi8
-    earliest = earliest_start(bars.times_ns, h4_ns, scan.first_valid_index, p.atr_period)
-    warm = warmup_h4_bars(p.atr_period)
+    warm = int(strategy.warmup_margin_h4_bars(config.params))
+    texts = strategy.warmup_texts_fa
+    earliest = earliest_start(bars.times_ns, h4_ns, scan.first_valid_index, warm, texts=texts)
     if config.mode == "manual":
         assert config.start is not None and config.end is not None
-        plan = manual_window(config.start, config.end, bars.times_ns, earliest, warmup_bars=warm)
+        plan = manual_window(config.start, config.end, bars.times_ns, earliest, warmup_bars=warm, texts=texts)
     else:
         plan = random_windows(bars.times_ns, earliest, count=config.windows_count, months=config.window_months,
                               seed=config.seed, warmup_bars=warm)
@@ -125,10 +153,11 @@ def run_backtest(
     sizes = [window_bar_range(bars.times_ns, w) for w in plan.windows]
     total = sum(max(1, hi - lo) for lo, hi in sizes)
     if dev:
-        logger.debug("backtest run %s %s: %d window(s), %d bars, seed=%s, params %s, account %s, costs %s, "
-                     "fallback spread %d pts (%s), candidates=%d provisional=%s", config.symbol, config.mode,
-                     len(plan.windows), total, plan.seed, config.params_hash[:12], config.account.model_dump(),
-                     config.cost_model.model_dump(), fb_points, fb_source, len(scan.candidates), config.provisional)
+        logger.debug("backtest run %s %s: strategy %s, %d window(s), %d bars, seed=%s, params %s, account %s, "
+                     "costs %s, fallback spread %d pts (%s), candidates=%d warm-up=%d H4 bars provisional=%s",
+                     config.symbol, config.mode, strategy.identity.label(), len(plan.windows), total, plan.seed,
+                     config.params_hash[:12], config.account.model_dump(), config.cost_model.model_dump(), fb_points,
+                     fb_source, len(scan.candidates), warm, config.provisional)
     last_pct = 0.0
 
     def report(pct: float, index: int) -> None:
@@ -180,4 +209,5 @@ def run_backtest(
     return result
 
 
-__all__ = ["BacktestCancelled", "ProgressCallback", "RunConfigError", "check_config", "run_backtest"]
+__all__ = ["BacktestCancelled", "ProgressCallback", "RunConfigError", "check_config", "run_backtest",
+           "strategy_for_config"]

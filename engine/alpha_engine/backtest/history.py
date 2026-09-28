@@ -4,10 +4,12 @@
   :class:`~alpha_engine.data.cache.OhlcvCache` (never MT5; the cache is only read).
 * :func:`data_fingerprint` identifies the data a run used: first/last bar and rows per timeframe, the cache
   ``source`` (``mt5`` / ``seed``), fetch time, a SHA-256 of the bar content and the symbol spec.
-* :func:`scan_full_history` runs ``StdDevChannelStrategy.scan`` ONCE over the FULL history (warm-up
-  consistency: Wilder ATR is a recursion over the whole series and the channel needs ``n`` H4 bars, so the
-  history is never sliced before scanning -- slicing would change the ATR values and thus the decisions).
-  Candidates are indexed by their confirmation H1 bar for the simulator.
+* :func:`scan_full_history` runs ``strategy.scan`` of ANY registered strategy ONCE over the FULL history
+  (warm-up consistency: path-dependent indicators -- e.g. the StdDev channel's Wilder ATR, a recursion over the
+  whole series -- would change if the history were sliced first, and thus the decisions). Candidates are
+  checked against the strategy's identity / symbol / params hash (one per confirmation bar) and indexed by
+  their confirmation H1 bar for the simulator; the strategy's ``first_valid_index`` and
+  ``warmup_margin_h4_bars`` travel with the scan (``periods.earliest_start``).
 * :func:`build_bar_arrays` prepares the arrays the simulator walks: OHLC, the causal spread series and the
   ``missing`` gaps (``data.gaps.find_gaps``).
 
@@ -31,10 +33,8 @@ from ..data.schema import Timeframe
 from ..data.symbols import SymbolSpec
 from ..logging_setup import get_logger, is_dev_mode
 from ..storage.account_settings import AccountSettings
-from ..strategies.stddev_channel import StdDevChannelStrategy, resolve_params
-from ..strategies.stddev_channel.setups import compute_channel_bars
-from ..strategy.base import Strategy, bar_open_times
-from ..strategy.params import params_hash
+from ..strategy.base import Strategy, StrategyContractError, StrategyIdentity, WarmupTextsFa, bar_open_times
+from ..strategy.params import ParamValue, params_hash
 from ..strategy.signal import SignalCandidate
 from .costs import spread_from_frame
 from .models import DataFingerprint
@@ -136,8 +136,14 @@ class ScanResult:
     rr: float
     candidates: list[SignalCandidate]
     by_bar: dict[int, SignalCandidate]  # confirmation H1 bar index -> candidate
-    first_valid_index: int | None  # first H1 bar whose channel/ATRs are all defined
+    first_valid_index: int | None  # Strategy.first_valid_index (StdDev: first bar with channel + ATRs defined)
     h1_count: int
+    # strategy contract S1: who scanned, and the warm-up the period planner needs
+    strategy: Strategy | None = None
+    identity: StrategyIdentity | None = None
+    params: dict[str, ParamValue] | None = None  # the validated params the scan used
+    warmup_margin_h4_bars: int = 0
+    warmup_texts_fa: WarmupTextsFa | None = None
 
 
 def scan_full_history(
@@ -149,30 +155,43 @@ def scan_full_history(
     *,
     symbol: str,
 ) -> ScanResult:
-    """``strategy.scan`` over the FULL history (never sliced first), indexed by confirmation bar."""
-    if not isinstance(strategy, StdDevChannelStrategy):
-        raise TypeError(f"backtests support the stddev_channel strategy only, got {type(strategy).__name__}")
-    p, clean = resolve_params(params)
+    """``strategy.scan`` over the FULL history (never sliced first), indexed by confirmation bar.
+
+    Raises ``StrategyParamsError`` for params the strategy rejects and ``StrategyContractError`` when a
+    candidate does not belong to this strategy / symbol / params, is not on a bar of ``h1``, or shares its
+    confirmation bar with another candidate."""
+    clean = strategy.clean_params(params)
+    phash = params_hash(clean)
+    identity = strategy.identity
     candidates = strategy.scan(h1, h4, clean, account, symbol=symbol)
     times_ns = bar_open_times(h1).as_unit("ns").asi8
     by_bar: dict[int, SignalCandidate] = {}
     for cand in candidates:
+        if not isinstance(cand, SignalCandidate):
+            raise StrategyContractError(f"{identity.label()} scan returned {type(cand).__name__}, not SignalCandidate")
+        if (cand.strategy_name, cand.strategy_version) != (identity.name, identity.version) \
+                or cand.symbol != symbol or cand.params_hash != phash:
+            raise StrategyContractError(
+                f"{identity.label()} scan: candidate at {cand.confirmation_bar_open_utc} is for "
+                f"{cand.strategy_name} v{cand.strategy_version} / {cand.symbol} / params {cand.params_hash[:12]}")
         conf_ns = pd.Timestamp(cand.confirmation_bar_open_utc).as_unit("ns").value
         t = int(np.searchsorted(times_ns, conf_ns))
-        if t >= len(times_ns) or times_ns[t] != conf_ns:  # pragma: no cover - scan returns bars of h1
-            raise RuntimeError(f"confirmation bar {cand.confirmation_bar_open_utc} not in the H1 frame")
+        if t >= len(times_ns) or times_ns[t] != conf_ns:
+            raise StrategyContractError(f"confirmation bar {cand.confirmation_bar_open_utc} not in the H1 frame")
+        if t in by_bar:
+            raise StrategyContractError(f"{identity.label()} scan: two candidates on bar "
+                                        f"{cand.confirmation_bar_open_utc}")
         by_bar[t] = cand
-    # Same indicator code as the strategy (no duplicated math): first bar where every input is defined.
-    cb = compute_channel_bars(h1, h4, p, pattern_from=None)
-    valid = np.flatnonzero(cb.valid)
-    first_valid = int(valid[0]) if len(valid) else None
+    first_valid = strategy.first_valid_index(h1, h4, clean)
+    margin = int(strategy.warmup_margin_h4_bars(clean))
     if is_dev_mode():
-        logger.debug("backtest scan %s: %s v%d hash=%s rr=%g h1=%d candidates=%d first_valid=%s", symbol,
-                     strategy.name, strategy.version, params_hash(clean)[:12], account.rr, len(h1), len(candidates),
-                     None if first_valid is None else ns_to_dt(int(times_ns[first_valid])).isoformat())
-    return ScanResult(symbol=symbol, strategy_name=strategy.name, strategy_version=strategy.version,
-                      params_hash=params_hash(clean), rr=account.rr, candidates=candidates, by_bar=by_bar,
-                      first_valid_index=first_valid, h1_count=len(h1))
+        logger.debug("backtest scan %s: %s hash=%s rr=%g h1=%d candidates=%d first_valid=%s warm-up=%d H4 bars",
+                     symbol, identity.label(), phash[:12], account.rr, len(h1), len(candidates),
+                     None if first_valid is None else ns_to_dt(int(times_ns[first_valid])).isoformat(), margin)
+    return ScanResult(symbol=symbol, strategy_name=identity.name, strategy_version=identity.version,
+                      params_hash=phash, rr=account.rr, candidates=candidates, by_bar=by_bar,
+                      first_valid_index=first_valid, h1_count=len(h1), strategy=strategy, identity=identity,
+                      params=dict(clean), warmup_margin_h4_bars=margin, warmup_texts_fa=strategy.warmup_texts_fa)
 
 
 def build_bar_arrays(h1: pd.DataFrame, spec: SymbolSpec, fallback_spread_points: int | None = None) -> BarArrays:

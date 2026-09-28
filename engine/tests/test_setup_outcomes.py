@@ -342,7 +342,7 @@ def walk_scan(walk: HistoryData):
 
 def _full_config(walk: HistoryData, scan, costs: CostModel) -> RunConfig:
     times = pd.DatetimeIndex(walk.h1["time"]).as_unit("ns").asi8
-    earliest = earliest_start(times, pd.DatetimeIndex(walk.h4["time"]).as_unit("ns").asi8, scan.first_valid_index, 14)
+    earliest = earliest_start(times, pd.DatetimeIndex(walk.h4["time"]).as_unit("ns").asi8, scan.first_valid_index, 140)
     end = pd.Timestamp(int(times[-1]), tz="UTC") + pd.Timedelta(hours=1)
     return RunConfig(symbol=walk.symbol, mode="manual", start=earliest.to_pydatetime(), end=end.to_pydatetime(),
                      cost_model=costs, account=ACCOUNT, strategy_name=STRATEGY.name, strategy_version=STRATEGY.version,
@@ -428,41 +428,41 @@ def test_candidates_are_never_mutated(walk: HistoryData, walk_scan) -> None:
 def test_backtest_window_for_range_mapping_and_clipping(walk: HistoryData, walk_scan) -> None:
     times = pd.DatetimeIndex(walk.h1["time"]).as_unit("ns").asi8
     h4 = pd.DatetimeIndex(walk.h4["time"]).as_unit("ns").asi8
-    earliest = earliest_start(times, h4, walk_scan.first_valid_index, 14)
+    earliest = earliest_start(times, h4, walk_scan.first_valid_index, 140)
     last = pd.Timestamp(int(times[-1]), tz="UTC") + pd.Timedelta(hours=1)
     # decisions [from, to] -> bars [from - 1h, to): hour-aligned range inside the data
     lo = (earliest + pd.Timedelta(days=7)).normalize()
     while lo.dayofweek != 1:  # a Tuesday, 10:00 UTC (the walk has no weekend bars)
         lo += pd.Timedelta(days=1)
     lo += pd.Timedelta(hours=10)
-    w = backtest_window_for_range(lo, lo + pd.Timedelta(days=3), times, h4, walk_scan.first_valid_index, 14)
+    w = backtest_window_for_range(lo, lo + pd.Timedelta(days=3), times, h4, walk_scan.first_valid_index, 140)
     assert w.available and not w.clipped and w.note_fa is None
     assert pd.Timestamp(w.start) == lo - pd.Timedelta(hours=1) and pd.Timestamp(w.end) == lo + pd.Timedelta(days=3)
     # not hour-aligned: from 10:30 -> first decision 11:00 -> bar 10:00; to 15:30 -> last decision 15:00 -> end 15:00
     w = backtest_window_for_range(lo + pd.Timedelta(minutes=30), lo + pd.Timedelta(hours=5, minutes=30), times, h4,
-                                  walk_scan.first_valid_index, 14)
+                                  walk_scan.first_valid_index, 140)
     assert pd.Timestamp(w.start) == lo and pd.Timestamp(w.end) == lo + pd.Timedelta(hours=5)
     # partly before the earliest start / after the data -> clipped with a Persian note
     w = backtest_window_for_range(earliest - pd.Timedelta(days=5), last + pd.Timedelta(days=5), times, h4,
-                                  walk_scan.first_valid_index, 14)
+                                  walk_scan.first_valid_index, 140)
     assert w.available and w.clipped and pd.Timestamp(w.start) == earliest and pd.Timestamp(w.end) == last
     assert "اولین زمان مجاز" in w.note_fa and "آخرین داده" in w.note_fa
     # entirely before the earliest start -> unavailable with the POST error
     w = backtest_window_for_range(earliest - pd.Timedelta(days=9), earliest - pd.Timedelta(days=2), times, h4,
-                                  walk_scan.first_valid_index, 14)
+                                  walk_scan.first_valid_index, 140)
     assert not w.available and w.code == "window_too_early" and "اولین زمان مجاز" in w.message_fa
     assert w.start is None and w.requested_start is not None
     w = backtest_window_for_range(last + pd.Timedelta(days=1), last + pd.Timedelta(days=2), times, h4,
-                                  walk_scan.first_valid_index, 14)
+                                  walk_scan.first_valid_index, 140)
     assert not w.available and w.code == "window_beyond_data"
 
 
 def test_flags_match_a_manual_backtest_of_the_same_window(walk: HistoryData, walk_scan) -> None:
     times = pd.DatetimeIndex(walk.h1["time"]).as_unit("ns").asi8
     h4 = pd.DatetimeIndex(walk.h4["time"]).as_unit("ns").asi8
-    earliest = earliest_start(times, h4, walk_scan.first_valid_index, 14)
+    earliest = earliest_start(times, h4, walk_scan.first_valid_index, 140)
     frm, to = earliest - pd.Timedelta(days=3), earliest + pd.Timedelta(days=40)
-    w = backtest_window_for_range(frm, to, times, h4, walk_scan.first_valid_index, 14)
+    w = backtest_window_for_range(frm, to, times, h4, walk_scan.first_valid_index, 140)
     assert w.available and w.clipped
     config = RunConfig(symbol=walk.symbol, mode="manual", start=w.start, end=w.end, account=ACCOUNT,
                        strategy_name=STRATEGY.name, strategy_version=STRATEGY.version, params=CLEAN, params_hash=HASH)

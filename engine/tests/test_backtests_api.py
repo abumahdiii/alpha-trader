@@ -143,11 +143,11 @@ def scan_gate(monkeypatch: pytest.MonkeyPatch) -> Iterator[Gate]:
     original = jobs_module.full_scan
     calls = {"n": 0}
 
-    def gated(prepared, config, lru=None):
+    def gated(prepared, config, lru=None, strategy=None):
         calls["n"] += 1
         if calls["n"] == 1:
             gate.wait()
-        return original(prepared, config, lru)
+        return original(prepared, config, lru, strategy)
 
     monkeypatch.setattr(jobs_module, "full_scan", gated)
     yield gate

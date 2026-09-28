@@ -1,9 +1,13 @@
-"""``/chart`` -- read-only chart data for the StdDev-channel system (phase 3): channel lines and setups.
+"""``/chart`` -- read-only chart data (phase 3): channel lines (StdDev system) and setups (any strategy).
 
 Both routes read ONLY the local OHLCV cache (never MT5) and reuse the strategy's own code, so what the
-chart shows is exactly what a backtest / live scan over the same cache decides:
+chart shows is exactly what a backtest / live scan over the same cache decides. Both take an optional
+``strategy`` query parameter (a registered strategy name; default ``stddev_channel``; unknown -> 404
+``strategy_not_found``); the response's strategy info carries its identity (``strategy``,
+``strategy_version``, ``strategy_source`` and, for uploaded plugins, ``strategy_sha256``).
 
-* ``GET /chart/channel?symbol&timeframe=H1|H4&from&to``
+* ``GET /chart/channel?symbol&timeframe=H1|H4&from&to[&strategy]`` -- the ONLY StdDev-specific route: another
+  strategy has no channel -> 409 ``channel_not_available`` (Persian message).
 
   - ``H1``: one point per cached H1 bar: the H4 channel projected to that bar, exactly as the strategy
     uses it (``setups.compute_channel_bars`` -- the arrays behind ``StdDevChannelStrategy.indicator_frame``).
@@ -13,8 +17,12 @@ chart shows is exactly what a backtest / live scan over the same cache decides:
     ``indicators.atr.wilder_atr`` and ``indicators.regression_channel.is_flat`` -- the same functions
     ``compute_channel_bars`` calls.
 
-* ``GET /chart/setups?symbol&from&to`` -- the backtest's full-history scan (``backtest.jobs.scan_for``,
-  the same cached candidate objects a backtest run uses), filtered by decision time. Status, entry, levels
+* ``GET /chart/setups?symbol&from&to[&strategy]`` -- the backtest's full-history scan of the selected strategy
+  (``backtest.jobs.scan_for``, the same cached candidate objects a backtest run uses), filtered by decision
+  time. ``setup_title_fa`` is the StdDev title table for the channel setups, else the candidate's own
+  ``setup_title_fa`` (else its slug); ``line`` is null for strategies without channel lines; the item ``id``
+  keeps its ``SYMBOL:YYYYMMDDTHHMMZ:<params hash 12>`` form for ``stddev_channel`` and gets ``:<strategy>``
+  appended for any other strategy. Status, entry, levels
   and volume follow the BACKTEST SIMULATOR's rules (``backtest.simulator`` helpers via
   ``backtest.setup_outcomes.simulate_setup``): buy fills at the ask open (bid open + spread * point), sell
   at the bid open; a ``missing`` gap, a gap through the stop (buy: bid open <= SL, sell: ask open >= SL),
@@ -32,13 +40,13 @@ numbers to the full range for the overlapping bars (tests/test_chart_routes.py).
 
 A small in-process LRU (:class:`ChartCache`, ``app.state.chart_cache``, 16 entries, shared with the
 backtest jobs) keeps the computed series, keyed by symbol, cache-file identity (file id/``mtime_ns``/size
-of the Parquet files and the spec JSON), params hash and -- for the scan -- the account R:R (the only
-account field a candidate carries). Any cache update or params change gives a new key; the least recently
+of the Parquet files and the spec JSON), strategy identity (name, code version, source SHA-256), params
+hash and -- for the scan -- the account R:R (the only account field a candidate carries). Any cache update or params change gives a new key; the least recently
 used entries are dropped beyond ``maxsize``. Outcomes, backtest flags and the summary depend on every
 account field and on the cost model, so they are computed per request and never cached or stored in a
 scan entry.
 
-Stored params come from the active params version (``strategy.context.load_active_params``); params
+Stored params come from the active params version (``strategy.resolve.resolve_active``); params
 that no longer fit the schema -> 409 ``stored_params_invalid``. Errors use
 ``{"detail": {"code", "message_fa", "errors_fa"}}``. All times are ISO-8601 UTC with ``Z``.
 """
@@ -91,17 +99,17 @@ from ..market_data import MarketDataService, SymbolNotConfigured
 from ..risk.sizing import size_from_spec
 from ..storage.account_settings import AccountSettings, AccountSettingsRepo
 from ..storage.db import EngineConnection
-from ..storage.strategies_repo import StoredParamsInvalidError
 from ..strategies.stddev_channel import StdDevChannelStrategy
 from ..strategies.stddev_channel.levels import entry_price_for, resolve_trade_levels
 from ..strategies.stddev_channel.params import InvalidParamsError, StdDevParams, resolve_params
 from ..strategies.stddev_channel.setups import SETUP_TITLE_FA, ChannelBars, compute_channel_bars
 from ..strategy.base import bar_open_times
-from ..strategy.context import DEFAULT_STRATEGY, load_active_params
+from ..strategy.context import DEFAULT_STRATEGY
 from ..strategy.params import ParamValue
-from ..strategy.registry import StrategyRegistry, UnknownStrategyError
-from ..strategy.signal import SignalCandidate
-from . import api_error, get_db, get_market_data
+from ..strategy.registry import StrategyRegistry
+from ..strategy.resolve import ActiveStrategy
+from ..strategy.signal import Setup, SignalCandidate
+from . import STORED_PARAMS_INVALID_FA, api_error, get_db, get_market_data, resolve_strategy_or_error
 from .strategies import get_registry
 
 logger = get_logger(__name__)
@@ -152,6 +160,9 @@ class _StrategyInfo(BaseModel):
     symbol: str
     strategy: str
     strategy_version: int  # code version
+    strategy_source: Literal["builtin", "plugin"] = "builtin"
+    # SHA-256 of an uploaded plugin's source file; omitted for built-in strategies.
+    strategy_sha256: str | None = Field(default=None, exclude_if=lambda v: v is None)
     params_version: int
     params_hash: str
     params: dict[str, ParamValue]
@@ -214,7 +225,7 @@ class SetupItem(BaseModel):
     setup_title_fa: str
     direction: Literal["buy", "sell"]
     pattern: str
-    line: Literal["lower", "mid", "upper"]
+    line: Literal["lower", "mid", "upper"] | None  # None: the strategy has no channel lines
     line_value: float | None  # value of that channel line at the confirmation bar
     channel_direction: str | None
     confirmation_bar_time: str  # OPEN time of the confirmation H1 bar t
@@ -401,37 +412,27 @@ def _read_frame(cache: OhlcvCache, symbol: str, tf: Timeframe) -> pd.DataFrame |
     return None if cached is None else cached[0]
 
 
-@dataclass(frozen=True)
-class _Active:
-    record_version: int
-    code_version: int
-    params_hash: str
-    params: dict[str, ParamValue]
-    p: StdDevParams
-    strategy: StdDevChannelStrategy
+CHANNEL_NOT_AVAILABLE_FA = ("کانال فقط برای سیستم «کانال انحراف معیار» (stddev_channel) نمایش داده می‌شود؛ "
+                            "سیستم «{title}» ({name}) خط کانال ندارد.")
 
 
-def _active_params(db: EngineConnection, registry: StrategyRegistry) -> _Active:
+def _channel_params(active: ActiveStrategy) -> StdDevParams:
+    """The StdDev params of ``active`` (the channel route is the only StdDev-specific path): another strategy ->
+    409 ``channel_not_available``."""
+    if not isinstance(active.strategy, StdDevChannelStrategy):
+        raise api_error(409, "channel_not_available",
+                        CHANNEL_NOT_AVAILABLE_FA.format(title=active.strategy.title_fa, name=active.name))
     try:
-        cls, record = load_active_params(db, DEFAULT_STRATEGY, registry=registry)
-    except UnknownStrategyError:
-        raise api_error(404, "strategy_not_found", f"استراتژی «{DEFAULT_STRATEGY}» پیدا نشد.") from None
-    except StoredParamsInvalidError as exc:
-        raise api_error(409, "stored_params_invalid",
-                        "پارامترهای ذخیره‌شده سیستم با نسخه فعلی سازگار نیستند؛ پارامترها را دوباره ذخیره کنید.",
-                        exc.errors_fa) from None
-    if not (isinstance(cls, type) and issubclass(cls, StdDevChannelStrategy)):
-        raise api_error(404, "strategy_not_found", f"استراتژی «{DEFAULT_STRATEGY}» از نوع کانال انحراف معیار نیست.")
-    try:
-        p, clean = resolve_params(record.params)
+        p, _ = resolve_params(active.params)
     except InvalidParamsError as exc:
-        raise api_error(409, "stored_params_invalid", "پارامترهای ذخیره‌شده سیستم نامعتبر هستند.",
-                        list(exc.errors_fa)) from None
-    return _Active(record.version, cls.version, record.params_hash, dict(clean), p, cls())
+        raise api_error(409, "stored_params_invalid", STORED_PARAMS_INVALID_FA, list(exc.errors_fa)) from None
+    return p
 
 
-def _info(symbol: str, active: _Active) -> dict[str, Any]:
-    return {"symbol": symbol, "strategy": active.strategy.name, "strategy_version": active.code_version,
+def _info(symbol: str, active: ActiveStrategy) -> dict[str, Any]:
+    ident = active.identity
+    return {"symbol": symbol, "strategy": ident.name, "strategy_version": ident.version,
+            "strategy_source": ident.source, "strategy_sha256": ident.sha256,
             "params_version": active.record_version, "params_hash": active.params_hash, "params": active.params}
 
 
@@ -563,6 +564,7 @@ def get_channel(
     timeframe: Annotated[str, Query()] = "H1",
     from_: Annotated[datetime | None, Query(alias="from")] = None,
     to: Annotated[datetime | None, Query()] = None,
+    strategy: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
     service: MarketDataService = Depends(get_market_data),
     db: EngineConnection = Depends(get_db),
     registry: StrategyRegistry = Depends(get_registry),
@@ -575,10 +577,13 @@ def get_channel(
     name = _check_symbol(service, symbol)
     start, end = _utc(from_), _utc(to)
     _check_range(start, end)
-    active = _active_params(db, registry)
+    active = resolve_strategy_or_error(db, registry, strategy)
+    p = _channel_params(active)
+    ident_key = active.identity.cache_key
     if is_dev_mode():
-        logger.debug("GET /chart/channel %s %s from=%s to=%s params v%d hash=%s", name, tf.value, iso_z(start),
-                     iso_z(end), active.record_version, active.params_hash[:12])
+        logger.debug("GET /chart/channel %s %s from=%s to=%s strategy %s params v%d hash=%s", name, tf.value,
+                     iso_z(start), iso_z(end), active.identity.label(), active.record_version,
+                     active.params_hash[:12])
     cache = service.cache
     h1_sig, h4_sig = _file_sig(cache, name, Timeframe.H1), _file_sig(cache, name, Timeframe.H4)
     message: str | None = None
@@ -588,13 +593,13 @@ def get_channel(
             return _empty_channel(name, tf, active, start, end, f"داده H1 نماد {name} در کش نیست.")
         if h4_sig is None:
             message = f"داده H4 نماد {name} در کش نیست؛ کانال ساخته نمی‌شود."
-        key = ("h1_channel", str(cache.data_dir), name, h1_sig, h4_sig, active.params_hash)
+        key = ("h1_channel", str(cache.data_dir), name, h1_sig, h4_sig, ident_key, active.params_hash)
 
         def compute_h1() -> ChannelBars:
             h1 = _read_frame(cache, name, Timeframe.H1)
             h4 = _read_frame(cache, name, Timeframe.H4)
             return compute_channel_bars(h1 if h1 is not None else empty_frame(),
-                                        h4 if h4 is not None else empty_frame(), active.p, pattern_from=None)
+                                        h4 if h4 is not None else empty_frame(), p, pattern_from=None)
 
         cb, hit = chart_cache.get_or_compute(key, compute_h1)
         times_ns = cb.times.as_unit("ns").asi8
@@ -605,11 +610,11 @@ def get_channel(
     else:
         if h4_sig is None:
             return _empty_channel(name, tf, active, start, end, f"داده H4 نماد {name} در کش نیست.")
-        key = ("h4_channel", str(cache.data_dir), name, h4_sig, active.params_hash)
+        key = ("h4_channel", str(cache.data_dir), name, h4_sig, ident_key, active.params_hash)
 
         def compute_h4() -> _H4Channel:
             h4 = _read_frame(cache, name, Timeframe.H4)
-            return compute_h4_channel(h4 if h4 is not None else empty_frame(), active.p)
+            return compute_h4_channel(h4 if h4 is not None else empty_frame(), p)
 
         ch, hit = chart_cache.get_or_compute(key, compute_h4)
         last = pd.Timestamp(int(ch.times_ns[-1]), tz="UTC") if len(ch.times_ns) else None
@@ -619,7 +624,7 @@ def get_channel(
 
     valid_count = sum(1 for pt in points if pt.valid)
     if message is None and total and not valid_count and points:
-        message = f"داده کافی برای ساخت کانال (n = {active.p.n} کندل H4 و ATR) در این بازه وجود ندارد."
+        message = f"داده کافی برای ساخت کانال (n = {p.n} کندل H4 و ATR) در این بازه وجود ندارد."
     if is_dev_mode():
         logger.debug("chart channel %s %s: cache %s, series=%d points=%d valid=%d window=%s..%s", name, tf.value,
                      "hit" if hit else "miss", total, len(points), valid_count, iso_z(eff_start), iso_z(eff_end))
@@ -627,7 +632,8 @@ def get_channel(
                            count=len(points), valid_count=valid_count, points=points, message_fa=message)
 
 
-def _empty_channel(name: str, tf: Timeframe, active: _Active, start: pd.Timestamp | None, end: pd.Timestamp | None,
+def _empty_channel(name: str, tf: Timeframe, active: ActiveStrategy, start: pd.Timestamp | None,
+                   end: pd.Timestamp | None,
                    message: str) -> ChannelResponse:
     if is_dev_mode():
         logger.debug("chart channel %s %s: no cached data (%s)", name, tf.value, message)
@@ -645,17 +651,27 @@ class _Scan:
 
 
 def setup_id(candidate: SignalCandidate) -> str:
-    """Stable id: symbol, confirmation bar open (UTC) and the params hash prefix."""
+    """Stable id: symbol, confirmation bar open (UTC) and the params hash prefix; for any strategy other than
+    the default ``stddev_channel`` the strategy name is appended (two strategies can share a params hash), so
+    the ids of the default strategy keep their phase-3 form."""
     stamp = candidate.confirmation_bar_open_utc.strftime("%Y%m%dT%H%MZ")
-    return f"{candidate.symbol}:{stamp}:{candidate.params_hash[:12]}"
+    base = f"{candidate.symbol}:{stamp}:{candidate.params_hash[:12]}"
+    return base if candidate.strategy_name == DEFAULT_STRATEGY else f"{base}:{candidate.strategy_name}"
+
+
+def setup_title_fa(candidate: SignalCandidate) -> str:
+    """StdDev title table for the channel setups, else the candidate's own title, else its slug."""
+    if isinstance(candidate.setup, Setup):
+        return SETUP_TITLE_FA[candidate.setup]
+    return candidate.setup_title_fa or candidate.setup_slug
 
 
 def _base_item(candidate: SignalCandidate) -> dict[str, Any]:
     """Fields known at decision time (never depend on bars after the confirmation bar)."""
     extra = dict(candidate.extra)  # a copy: nothing is ever written back into the candidate
     return dict(
-        id=setup_id(candidate), symbol=candidate.symbol, setup_type=candidate.setup.value,
-        setup_title_fa=SETUP_TITLE_FA[candidate.setup], direction=candidate.direction, pattern=candidate.pattern,
+        id=setup_id(candidate), symbol=candidate.symbol, setup_type=candidate.setup_slug,
+        setup_title_fa=setup_title_fa(candidate), direction=candidate.direction, pattern=candidate.pattern,
         line=candidate.line, line_value=extra.get("line_value"), channel_direction=extra.get("channel_direction"),
         confirmation_bar_time=iso_z(pd.Timestamp(candidate.confirmation_bar_open_utc)),
         decision_time=iso_z(pd.Timestamp(candidate.decision_time_utc)), stop_loss=candidate.stop_loss,
@@ -774,15 +790,17 @@ def _provisional(request: Request) -> bool:
     return not bool(getattr(settings, "alpha_data_check_confirmed", False))
 
 
-def _evaluate_setups(name: str, active: _Active, account: AccountSettings, cache: OhlcvCache, lru: ChartCache,
-                     start: pd.Timestamp | None, end: pd.Timestamp | None, provisional: bool) -> _Evaluated:
+def _evaluate_setups(name: str, active: ActiveStrategy, account: AccountSettings, cache: OhlcvCache,
+                     lru: ChartCache, start: pd.Timestamp | None, end: pd.Timestamp | None,
+                     provisional: bool) -> _Evaluated:
     """Simulator-rule evaluation of the setups in ``[start, end]`` (raises ``HistoryUnavailable``)."""
     cost = CostModel()  # what «بک‌تست همین بازه» submits by default (auto fallback spread, no commission)
     prepared = prepare_history(cache, name, lru)
     history = prepared.history
     bars = bars_for_cost(prepared, cost)
-    scan = scan_for(prepared, symbol=name, params=active.params, params_hash=active.params_hash, account=account,
-                    lru=lru)
+    strategy = active.strategy
+    scan = scan_for(prepared, strategy=strategy, symbol=name, params=active.params, params_hash=active.params_hash,
+                    account=account, lru=lru)
     times_ns = bars.times_ns
     decision_ns = np.array([pd.Timestamp(c.decision_time_utc).as_unit("ns").value for c in scan.candidates],
                            dtype=np.int64)
@@ -793,9 +811,10 @@ def _evaluate_setups(name: str, active: _Active, account: AccountSettings, cache
     outcomes = simulate_setups(bars, selected, spec=history.spec, account=account, cost_model=cost)
 
     # backtest of the same range (exactly what POST /backtests would run)
-    fv = first_valid_index(prepared, active.params, active.params_hash, lru)
+    fv = first_valid_index(prepared, strategy, active.params, active.params_hash, lru)
     h4_ns = bar_open_times(history.h4).as_unit("ns").asi8
-    rw = backtest_window_for_range(eff_start, eff_end, times_ns, h4_ns, fv, active.p.atr_period)
+    rw = backtest_window_for_range(eff_start, eff_end, times_ns, h4_ns, fv,
+                                   strategy.warmup_margin_h4_bars(active.params), texts=strategy.warmup_texts_fa)
     flags: list[BacktestFlag] | None = None
     bt = BacktestWindowOut(from_=iso_z(pd.Timestamp(rw.start)) if rw.start else None,
                            to=iso_z(pd.Timestamp(rw.end)) if rw.end else None, clipped=rw.clipped, note_fa=rw.note_fa,
@@ -804,7 +823,7 @@ def _evaluate_setups(name: str, active: _Active, account: AccountSettings, cache
         try:
             result = run_range_backtest(
                 rw, history, scan, bars, account=account, params=active.params, params_hash=active.params_hash,
-                params_version=active.record_version, strategy_name=active.strategy.name,
+                params_version=active.record_version, strategy_name=active.identity.name,
                 strategy_version=active.code_version, cost_model=cost, provisional=provisional)
             flags = backtest_flags(result, selected)
             bt = bt.model_copy(update={"trades": len(result.trades), "net_profit": result.net_profit})
@@ -857,6 +876,7 @@ def get_setups(
     symbol: Annotated[str, Query(min_length=1, max_length=32)],
     from_: Annotated[datetime | None, Query(alias="from")] = None,
     to: Annotated[datetime | None, Query()] = None,
+    strategy: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
     service: MarketDataService = Depends(get_market_data),
     db: EngineConnection = Depends(get_db),
     registry: StrategyRegistry = Depends(get_registry),
@@ -865,7 +885,7 @@ def get_setups(
     name = _check_symbol(service, symbol)
     start, end = _utc(from_), _utc(to)
     _check_range(start, end)
-    active = _active_params(db, registry)
+    active = resolve_strategy_or_error(db, registry, strategy)
     account = AccountSettingsRepo(db).get()
     cache = service.cache
     try:
@@ -875,9 +895,9 @@ def get_setups(
         spec_entry = None
     spec = spec_entry[0] if spec_entry else None
     if is_dev_mode():
-        logger.debug("GET /chart/setups %s from=%s to=%s params v%d hash=%s account=%s spec=%s", name, iso_z(start),
-                     iso_z(end), active.record_version, active.params_hash[:12], account.model_dump(),
-                     "cached" if spec else "missing")
+        logger.debug("GET /chart/setups %s from=%s to=%s strategy %s params v%d hash=%s account=%s spec=%s", name,
+                     iso_z(start), iso_z(end), active.identity.label(), active.record_version, active.params_hash[:12],
+                     account.model_dump(), "cached" if spec else "missing")
     h1_sig, h4_sig = _file_sig(cache, name, Timeframe.H1), _file_sig(cache, name, Timeframe.H4)
     info = _info(name, active)
     if h1_sig is None or h4_sig is None:
@@ -916,7 +936,8 @@ def get_setups(
         evaluation, summary, window = evaluated.evaluation, evaluated.summary, evaluated.backtest_window
         hit = None
     else:
-        key = ("setups", str(cache.data_dir), name, h1_sig, h4_sig, active.params_hash, account.rr)
+        key = ("setups", str(cache.data_dir), name, h1_sig, h4_sig, active.identity.cache_key, active.params_hash,
+               account.rr)
 
         def compute() -> _Scan:
             h1 = _read_frame(cache, name, Timeframe.H1)

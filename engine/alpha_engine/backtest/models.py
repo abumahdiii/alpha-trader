@@ -128,6 +128,11 @@ class RunConfig(BaseModel):
     account: AccountSettings  # balance = initial balance of EVERY window; risk_pct, leverage, rr
     strategy_name: str = Field(min_length=1)
     strategy_version: int = Field(ge=1)  # code version
+    # Strategy identity beyond name/version (strategy contract S1): SHA-256 of an uploaded plugin's source file
+    # and builtin/plugin. Omitted from dumps while None, so configs of the built-in strategy stored before these
+    # fields existed (and the golden snapshots) are unchanged.
+    strategy_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda v: v is None)
+    strategy_source: Literal["builtin", "plugin"] | None = Field(default=None, exclude_if=lambda v: v is None)
     params: dict[str, Any]
     params_version: int | None = Field(default=None, ge=1)  # params-store version (None = ad hoc)
     params_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -194,8 +199,8 @@ class Trade(BaseModel):
     window_index: int
     trade_index: int  # 0-based within the window
     direction: Literal["buy", "sell"]
-    setup_type: str
-    line: str
+    setup_type: str  # SignalCandidate.setup_slug
+    line: str | None  # channel line (StdDev setups); None for strategies without channel lines
     pattern: str
     confirmation_bar_time: datetime  # OPEN of bar t
     decision_time: datetime  # CLOSE of bar t
