@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../chart/chart_data_source.dart';
 import '../../core/dev_mode.dart';
 import '../../providers/shell_navigation.dart';
 import '../../services/engine_api.dart';
@@ -22,22 +23,27 @@ import 'backtest_runs_list.dart';
 /// `GET /backtests`. A pending [ShellNavigation] prefill (chart «بک‌تست همین
 /// بازه») fills the form and may run it.
 class BacktestScreen extends StatelessWidget {
-  const BacktestScreen({super.key, this.watcherFactory});
+  const BacktestScreen({super.key, this.watcherFactory, this.chartSource});
 
   /// Progress watcher of a run (tests inject a fake socket).
   final BacktestWatcherFactory? watcherFactory;
 
+  /// Bars of the result's «نمودار» tab (tests inject a fake); null = the engine.
+  final ChartDataSource? chartSource;
+
   @override
   Widget build(BuildContext context) => EngineGate(
-        builder: (BuildContext context, EngineApi api) => BacktestPage(api: api, watcherFactory: watcherFactory),
+        builder: (BuildContext context, EngineApi api) =>
+            BacktestPage(api: api, watcherFactory: watcherFactory, chartSource: chartSource),
       );
 }
 
 class BacktestPage extends StatefulWidget {
-  const BacktestPage({super.key, required this.api, this.watcherFactory});
+  const BacktestPage({super.key, required this.api, this.watcherFactory, this.chartSource});
 
   final EngineApi api;
   final BacktestWatcherFactory? watcherFactory;
+  final ChartDataSource? chartSource;
 
   static const String formTab = 'اجرای جدید';
   static const String runsTab = 'اجراهای قبلی';
@@ -116,7 +122,7 @@ class _BacktestPageState extends State<BacktestPage> {
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
             BacktestProgressPanel(controller: _controller),
-            Expanded(child: BacktestResultView(controller: _controller)),
+            Expanded(child: BacktestResultView(controller: _controller, chartSource: widget.chartSource)),
           ]),
         ),
       ]),
