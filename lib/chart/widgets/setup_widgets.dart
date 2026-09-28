@@ -117,7 +117,11 @@ class SetupDetails extends StatelessWidget {
           _kv('تعداد کندل نگهداری', '${o.barsHeld}'),
           _kvFa('نگهداری در آخر هفته', o.heldOverWeekend ? 'بله' : 'خیر'),
           if (o.flags.isNotEmpty) _kv('پرچم‌ها', o.flags.join(', ')),
-          if (o.result == SetupResult.endOfData) _Note(text: endOfDataLabelFa ?? o.exitReasonFa, color: colors.warning),
+          // The engine's end-of-data explanation, unless «دلیل خروج» above already says exactly that.
+          if (o.result == SetupResult.endOfData &&
+              (endOfDataLabelFa ?? '').isNotEmpty &&
+              endOfDataLabelFa != o.exitReasonFa)
+            _Note(text: endOfDataLabelFa!, color: colors.warning),
         ],
         if (bt != null) ...<Widget>[
           const Divider(),

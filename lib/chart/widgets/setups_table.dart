@@ -10,6 +10,8 @@ import 'setup_widgets.dart';
 /// Columns of the full setups table. [outcome] columns exist only when the
 /// engine evaluated the setups (`evaluation.available`).
 enum SetupColumn {
+  // First (right-most in RTL): the details dialog is reachable without scrolling sideways.
+  details('', 40),
   time('زمان تصمیم (محلی)', 124,
       sortKey: SetupSortKey.time, tooltip: 'بسته شدن کندل تایید، به وقت محلی؛ UTC در راهنمای هر خانه'),
   direction('جهت', 56, sortKey: SetupSortKey.direction),
@@ -29,8 +31,7 @@ enum SetupColumn {
   netPnl('سود/زیان \$', 92, sortKey: SetupSortKey.netPnl, outcome: true, tooltip: 'سود خالص به دلار (بعد از کمیسیون)'),
   backtest('در بک‌تست', 170,
       outcome: true, tooltip: 'آیا بک‌تست همین بازه (با قید یک معامله باز) این ستاپ را معامله کرد؟'),
-  why('چرا؟', 300, tooltip: 'دلیل باز شدن ستاپ (مقادیر کانال، ATR، شیب و الگو) و دلیل رد'),
-  details('', 40);
+  why('چرا؟', 300, tooltip: 'دلیل باز شدن ستاپ (مقادیر کانال، ATR، شیب و الگو) و دلیل رد');
 
   const SetupColumn(this.titleFa, this.width, {this.sortKey, this.outcome = false, this.tooltip});
 
@@ -341,6 +342,7 @@ class _SetupsTableState extends State<SetupsTable> {
     final SetupsSummary? s = r.summary;
     final bool evaluated = r.evaluationAvailable && s != null;
     const Set<SetupColumn> labelSpan = <SetupColumn>{
+      SetupColumn.details,
       SetupColumn.time,
       SetupColumn.direction,
       SetupColumn.type,
