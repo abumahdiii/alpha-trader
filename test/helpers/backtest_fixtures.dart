@@ -479,6 +479,28 @@ class FakeBacktestEngine {
   /// Response of POST /backtests (null = 202 queued with [nextId]).
   ResponseBody Function(RequestOptions r)? onSubmit;
 
+  /// Response of GET /backtests/{id}/export (null = [defaultExport]).
+  ResponseBody Function(int id, RequestOptions r)? onExport;
+
+  /// Like the engine: 404 unknown run, 409 `run_not_finished` while
+  /// queued/running, else a small file named like the engine names it.
+  ResponseBody defaultExport(int id, RequestOptions r) {
+    final Map<String, Object?>? detail = details[id];
+    if (detail == null) return engineError(404, 'backtest_not_found', 'بک‌تستی با این شناسه پیدا نشد.');
+    final Object? status = detail['status'];
+    if (status == 'queued' || status == 'running') {
+      return engineError(409, 'run_not_finished', 'این بک‌تست هنوز تمام نشده است؛ خروجی بعد از پایان اجرا ممکن است.');
+    }
+    final String format = r.uri.queryParameters['format'] ?? 'xlsx';
+    final String table = format == 'xlsx' ? 'all' : (r.uri.queryParameters['table'] ?? 'trades');
+    return exportBody(
+      exportBytes(id, format, table),
+      'AlphaTrader_bt${id}_${detail['symbol']}_${detail['mode']}_$table.$format',
+      format: format,
+      status: '$status',
+    );
+  }
+
   static final RegExp _id = RegExp(r'^/backtests/(\d+)(/(\w+))?$');
 
   FakeEngineHttp http({Map<String, RouteHandler>? extra}) {
@@ -532,6 +554,8 @@ class _RoutedHttp extends FakeEngineHttp {
             : jsonBody(equityJson(id, windows: (detail['windows'] as List?)?.length ?? 1));
       case ('GET', 'skipped'):
         return detail == null ? notFound() : jsonBody(skippedJson(id));
+      case ('GET', 'export'):
+        return (engine.onExport ?? engine.defaultExport)(id, options);
       case ('POST', 'cancel'):
         return jsonBody({'id': id, 'status': 'running', 'cancel_requested': true});
       case ('DELETE', null):
@@ -542,6 +566,34 @@ class _RoutedHttp extends FakeEngineHttp {
     return notFound();
   }
 }
+
+/// Deterministic fake content of an export (BOM + a header line for csv).
+List<int> exportBytes(int id, String format, String table) =>
+    [if (format == 'csv') ...[0xEF, 0xBB, 0xBF], ...utf8.encode('run=$id format=$format table=$table;')];
+
+/// A `GET /backtests/{id}/export` 200: raw bytes, `Content-Disposition`
+/// ([quoted] like the engine, or bare), `X-Alpha-Run-Status`.
+ResponseBody exportBody(
+  List<int> bytes,
+  String? fileName, {
+  String format = 'csv',
+  String status = 'done',
+  bool quoted = true,
+}) =>
+    ResponseBody.fromBytes(
+      bytes,
+      200,
+      headers: {
+        Headers.contentTypeHeader: [
+          format == 'csv'
+              ? 'text/csv; charset=utf-8'
+              : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        ],
+        if (fileName != null)
+          'content-disposition': [quoted ? 'attachment; filename="$fileName"' : 'attachment; filename=$fileName'],
+        'x-alpha-run-status': [status],
+      },
+    );
 
 /// `GET /backtests/limits?symbol` (engine README worked example).
 Map<String, Object?> limitsJson({

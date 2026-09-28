@@ -5,9 +5,11 @@ import 'package:flutter/material.dart';
 import '../../chart/chart_data_source.dart';
 import '../../models/account_settings.dart';
 import '../../models/backtest_models.dart';
+import '../../services/backtest_exporter.dart';
 import '../../theme/app_semantic_colors.dart';
 import '../../widgets/status_message.dart';
 import 'backtest_controller.dart';
+import 'backtest_export_menu.dart';
 import 'backtest_format.dart';
 import 'backtest_tables.dart';
 import 'backtest_trades_chart.dart';
@@ -19,9 +21,12 @@ import 'metric_cards.dart';
 /// engine's honest labels, then tabs with metrics, windows (random),
 /// trades, equity curve, skipped candidates and the trades on the chart.
 class BacktestResultView extends StatelessWidget {
-  const BacktestResultView({super.key, required this.controller, this.chartSource});
+  const BacktestResultView({super.key, required this.controller, this.chartSource, this.exportSaver});
 
   final BacktestController controller;
+
+  /// Save dialog + file write of the «خروجی» menu; null = the native dialog.
+  final ExportFileSaver? exportSaver;
 
   /// Bars / channel of the «نمودار» tab; null = the engine ([EngineChartDataSource]).
   final ChartDataSource? chartSource;
@@ -54,7 +59,16 @@ class BacktestResultView extends StatelessWidget {
       return const Center(child: CircularProgressIndicator());
     }
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      _RunHeader(detail: d, onClose: c.closeRun),
+      _RunHeader(
+        detail: d,
+        onClose: c.closeRun,
+        export: BacktestExportMenu(
+          key: ValueKey<String>('bt-export-menu-${d.id}'),
+          api: c.api,
+          summary: d.summary,
+          saver: exportSaver ?? FileSelectorExportSaver(),
+        ),
+      ),
       const Divider(height: 1),
       Expanded(child: _body(context, d)),
     ]);
@@ -340,10 +354,13 @@ class BacktestResultView extends StatelessWidget {
 }
 
 class _RunHeader extends StatelessWidget {
-  const _RunHeader({required this.detail, required this.onClose});
+  const _RunHeader({required this.detail, required this.onClose, required this.export});
 
   final BacktestRunDetail detail;
   final VoidCallback onClose;
+
+  /// The «خروجی» menu button.
+  final Widget export;
 
   @override
   Widget build(BuildContext context) {
@@ -433,6 +450,8 @@ class _RunHeader extends StatelessWidget {
               style: text.titleMedium,
             ),
           ),
+          export,
+          const SizedBox(width: 8),
           BacktestStatusChip(s.status),
           IconButton(tooltip: 'بستن نتیجه', onPressed: onClose, icon: const Icon(Icons.close)),
         ]),
