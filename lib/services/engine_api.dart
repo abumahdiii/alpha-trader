@@ -14,6 +14,7 @@ import '../models/chart_models.dart';
 import '../models/json_reader.dart';
 import '../models/market_data.dart';
 import '../models/strategy.dart';
+import '../models/strategy_plugin.dart';
 
 /// Why an [EngineApi] call failed.
 enum EngineApiErrorKind {
@@ -217,35 +218,39 @@ class EngineApi {
 
   // --------------------------------------------------------------------- chart
 
-  /// `GET /chart/channel?symbol&timeframe&from&to` -- the strategy's channel
-  /// lines per bar (cache only; first call computes the full history).
+  /// `GET /chart/channel?symbol&timeframe&from&to[&strategy]` -- the
+  /// strategy's channel lines per bar (cache only; first call computes the
+  /// full history). Only `stddev_channel` has a channel: any other strategy
+  /// -> 409 `channel_not_available`.
   Future<ChannelResult> getChartChannel({
     required String symbol,
     required String timeframe,
     DateTime? from,
     DateTime? to,
+    String? strategy,
     Duration? timeout,
   }) =>
       _call(
         'GET',
         '/chart/channel',
-        query: {'symbol': symbol, 'timeframe': timeframe, ..._range(from, to)},
+        query: {'symbol': symbol, 'timeframe': timeframe, ..._range(from, to), ..._strategy(strategy)},
         timeout: timeout ?? slowCallTimeout,
         parse: ChannelResult.fromJson,
       );
 
-  /// `GET /chart/setups?symbol&from&to` -- scanned setups by decision time.
-  /// Always pass a window: the full-history list is heavy.
+  /// `GET /chart/setups?symbol&from&to[&strategy]` -- scanned setups by
+  /// decision time. Always pass a window: the full-history list is heavy.
   Future<SetupsResult> getChartSetups({
     required String symbol,
     DateTime? from,
     DateTime? to,
+    String? strategy,
     Duration? timeout,
   }) =>
       _call(
         'GET',
         '/chart/setups',
-        query: {'symbol': symbol, ..._range(from, to)},
+        query: {'symbol': symbol, ..._range(from, to), ..._strategy(strategy)},
         timeout: timeout ?? slowCallTimeout,
         parse: SetupsResult.fromJson,
       );
@@ -255,6 +260,9 @@ class EngineApi {
         if (from != null) 'from': from.toUtc().toIso8601String(),
         if (to != null) 'to': to.toUtc().toIso8601String(),
       };
+
+  /// `strategy` query parameter (omitted = the engine default).
+  static Map<String, Object> _strategy(String? strategy) => {if (strategy != null) 'strategy': strategy};
 
   // ------------------------------------------------------------------ settings
 
@@ -308,6 +316,78 @@ class EngineApi {
         parse: StrategyUpdateResult.fromJson,
       );
 
+  // ------------------------------------------------------------------- plugins
+
+  /// Budget of `POST /plugins`: the engine validates the file statically and
+  /// then runs it in a sandboxed worker (two worker boots, determinism,
+  /// prefix and future-mutation checks; 5-35 s measured, 30 s plugin budget).
+  static const Duration pluginUploadTimeout = Duration(seconds: 120);
+
+  /// `GET /plugins/template` -> `{filename, content}` (the self-documenting
+  /// two-MA-crossover template).
+  Future<PluginTemplate> getPluginTemplate({Duration? timeout}) =>
+      _call('GET', '/plugins/template', timeout: timeout, parse: PluginTemplate.fromJson);
+
+  /// `GET /plugins` -- every stored version (also disabled / archived),
+  /// newest first per name.
+  Future<List<StrategyPlugin>> listPlugins({Duration? timeout}) =>
+      _call('GET', '/plugins', timeout: timeout, parse: StrategyPlugin.listFromJson);
+
+  /// `POST /plugins` with `{filename, source}` -> 201 new version / 200 the
+  /// same file again ([PluginUploadResult.created]). 422 `invalid_plugin`
+  /// (Persian `errors_fa`, «خط N: ...») / `invalid_body`; 409
+  /// `version_conflict` (same name + version, different file). The file
+  /// text is never logged (its size is).
+  Future<PluginUploadResult> uploadPlugin({
+    required String filename,
+    required String source,
+    Duration? timeout,
+  }) async {
+    final (StrategyPlugin plugin, int status) = await _callWithStatus(
+      'POST',
+      '/plugins',
+      body: {'filename': filename, 'source': source},
+      logBody: '{filename: "$filename", source: <${source.length} chars, not logged>}',
+      timeout: timeout ?? pluginUploadTimeout,
+      parse: StrategyPlugin.fromJson,
+    );
+    return PluginUploadResult(plugin: plugin, created: status == 201);
+  }
+
+  /// `POST /plugins/{name}/{version}/disable` -- the engine stops running it
+  /// (409 `plugin_archived` for an archived version).
+  Future<StrategyPlugin> disablePlugin(String name, int version, {Duration? timeout}) =>
+      _call('POST', '${_pluginPath(name, version)}/disable', timeout: timeout, parse: StrategyPlugin.fromJson);
+
+  /// `POST /plugins/{name}/{version}/enable` (409 `plugin_archived` /
+  /// `plugin_file_invalid`).
+  Future<StrategyPlugin> enablePlugin(String name, int version, {Duration? timeout}) =>
+      _call('POST', '${_pluginPath(name, version)}/enable', timeout: timeout, parse: StrategyPlugin.fromJson);
+
+  /// `DELETE /plugins/{name}/{version}` -- archive (files kept); 409
+  /// `plugin_in_use` while a queued/running backtest uses it.
+  Future<StrategyPlugin> archivePlugin(String name, int version, {Duration? timeout}) =>
+      _call('DELETE', _pluginPath(name, version), timeout: timeout, parse: StrategyPlugin.fromJson);
+
+  static String _pluginPath(String name, int version) => '/plugins/${Uri.encodeComponent(name)}/$version';
+
+  /// The strategy selector's entries: `GET /strategies` (throws on failure)
+  /// with the plugins marked from `GET /plugins` (a failure there only drops
+  /// the «پلاگین» badges, logged). Builtin first, then plugins by name.
+  Future<List<StrategyOption>> listStrategyOptions({Duration? timeout}) async {
+    final Future<List<StrategyInfo>> strategies = listStrategies(timeout: timeout);
+    final Future<List<StrategyPlugin>> plugins = listPlugins(timeout: timeout).catchError((Object e) {
+      _log('   plugins unavailable for the strategy selector (no plugin badges): $e');
+      return const <StrategyPlugin>[];
+    });
+    final List<StrategyOption> options = StrategyOption.merge(
+      await strategies,
+      [for (final StrategyPlugin p in await plugins) if (p.registered) p.ref],
+    );
+    _log('   strategy options: ${options.map((StrategyOption o) => '${o.name}(${o.source.code})').join(', ')}');
+    return options;
+  }
+
   // ----------------------------------------------------------------- backtests
 
   /// Budget for result reads (a 5-year run: thousands of trades as JSON).
@@ -337,13 +417,13 @@ class EngineApi {
         parse: BacktestRunList.fromJson,
       );
 
-  /// `GET /backtests/limits?symbol` -- the allowed manual period for the
-  /// active params (reads the cache; slow budget like the POST that shares
-  /// its validation code).
-  Future<BacktestLimits> getBacktestLimits(String symbol, {Duration? timeout}) => _call(
+  /// `GET /backtests/limits?symbol[&strategy]` -- the allowed manual period
+  /// for the active params of the strategy (reads the cache; slow budget
+  /// like the POST that shares its validation code).
+  Future<BacktestLimits> getBacktestLimits(String symbol, {String? strategy, Duration? timeout}) => _call(
         'GET',
         '/backtests/limits',
-        query: {'symbol': symbol},
+        query: {'symbol': symbol, ..._strategy(strategy)},
         timeout: timeout ?? slowCallTimeout,
         parse: BacktestLimits.fromJson,
       );
@@ -473,9 +553,23 @@ class EngineApi {
     Object? body,
     Duration? timeout,
     required T Function(Object? json) parse,
+  }) async =>
+      (await _callWithStatus(method, path, query: query, body: body, timeout: timeout, parse: parse)).$1;
+
+  /// [_call] that also returns the 2xx status (e.g. 201 created vs 200).
+  /// [logBody] replaces the request body in the DEV_MODE log (bodies that
+  /// must not be logged verbatim).
+  Future<(T, int)> _callWithStatus<T>(
+    String method,
+    String path, {
+    Map<String, Object>? query,
+    Object? body,
+    String? logBody,
+    Duration? timeout,
+    required T Function(Object? json) parse,
   }) async {
     final (Response<String> response, String what, Stopwatch watch) =
-        await _send<String>(method, path, query: query, body: body, timeout: timeout);
+        await _send<String>(method, path, query: query, body: body, logBody: logBody, timeout: timeout);
     final int status = response.statusCode ?? 0;
     final String raw = response.data ?? '';
     _log('<- $what HTTP $status (${watch.elapsedMilliseconds} ms, ${raw.length} chars)');
@@ -485,7 +579,7 @@ class EngineApi {
       throw _logged(errorFromResponse(status, raw), watch);
     }
     try {
-      return parse(jsonDecode(raw));
+      return (parse(jsonDecode(raw)), status);
     } on FormatException catch (e) {
       _log('   unparsable body: ${_clip(raw)}');
       throw _logged(
@@ -509,6 +603,7 @@ class EngineApi {
     String path, {
     Map<String, Object>? query,
     Object? body,
+    String? logBody,
     Duration? timeout,
     ResponseType responseType = ResponseType.plain,
   }) async {
@@ -519,7 +614,7 @@ class EngineApi {
     final String what = '$method $path$queryText';
     final String? encodedBody = body == null ? null : jsonEncode(body);
     _log('-> $what (timeout ${limit.inMilliseconds} ms)'
-        '${encodedBody != null ? ' body=${_clip(encodedBody)}' : ''}');
+        '${encodedBody != null ? ' body=${logBody ?? _clip(encodedBody)}' : ''}');
 
     final Stopwatch watch = Stopwatch()..start();
     final CancelToken cancel = CancelToken();
@@ -625,12 +720,17 @@ class EngineApi {
         _ => 'موتور با خطا پاسخ داد (HTTP $status).',
       };
 
-  /// 409 codes of the engine routes (backtests, strategies, rates/update).
+  /// 409 codes of the engine routes (backtests, strategies, plugins, chart).
   static const Map<String?, String> _conflictFa = {
     'not_cancellable': 'این اجرا دیگر در حال انجام نیست و لغو نمی‌شود.',
     'run_active': 'این اجرا هنوز در حال انجام است؛ اول آن را لغو کنید.',
     'run_not_finished': 'این اجرا هنوز تمام نشده است؛ خروجی بعد از پایان اجرا گرفته می‌شود.',
     'stored_params_invalid': 'پارامترهای ذخیره‌شده استراتژی با نسخه فعلی موتور سازگار نیستند.',
+    'version_conflict': 'این نسخه سیستم قبلا با محتوای دیگری بارگذاری شده است؛ عدد version را در فایل بالا ببرید.',
+    'plugin_in_use': 'یک بک‌تست در صف یا در حال اجرا از این سیستم استفاده می‌کند؛ بعد از پایان آن دوباره تلاش کنید.',
+    'plugin_archived': 'این نسخه سیستم بایگانی شده است؛ برای استفاده دوباره همان فایل را بارگذاری کنید.',
+    'plugin_file_invalid': 'فایل ذخیره‌شده این سیستم تغییر کرده یا پیدا نشد و اجرا نمی‌شود.',
+    'channel_not_available': 'این سیستم کانال ندارد.',
   };
 
   static EngineApiException _fromDio(DioException e, String what, Duration limit) {
