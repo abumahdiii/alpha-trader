@@ -335,6 +335,17 @@ class EngineApi {
         parse: BacktestRunList.fromJson,
       );
 
+  /// `GET /backtests/limits?symbol` -- the allowed manual period for the
+  /// active params (reads the cache; slow budget like the POST that shares
+  /// its validation code).
+  Future<BacktestLimits> getBacktestLimits(String symbol, {Duration? timeout}) => _call(
+        'GET',
+        '/backtests/limits',
+        query: {'symbol': symbol},
+        timeout: timeout ?? slowCallTimeout,
+        parse: BacktestLimits.fromJson,
+      );
+
   /// `GET /backtests/{id}` -- config, plan, labels, metrics, windows, live progress.
   Future<BacktestRunDetail> getBacktest(int id, {Duration? timeout}) =>
       _call('GET', '/backtests/$id', timeout: timeout, parse: BacktestRunDetail.fromJson);
@@ -504,36 +515,46 @@ class EngineApi {
       final Object? code = detail['code'];
       return EngineApiException(
         kind,
-        message is String && message.trim().isNotEmpty ? message : _genericFa(status),
+        message is String && message.trim().isNotEmpty ? message : genericFa(status, code: code is String ? code : null),
         statusCode: status,
         code: code is String ? code : null,
         errorsFa: errors is List ? List<String>.unmodifiable(errors.map((Object? e) => '$e')) : const [],
       );
     }
     if (detail is String) {
-      return EngineApiException(kind, _genericFa(status), statusCode: status, detail: detail);
+      return EngineApiException(kind, genericFa(status), statusCode: status, detail: detail);
     }
     if (detail is List) {
       final String text = detail
           .map((Object? e) => e is Map ? '${(e['loc'] as List?)?.join('.') ?? ''}: ${e['msg']}' : '$e')
           .join('; ');
-      return EngineApiException(kind, _genericFa(status), statusCode: status, detail: text);
+      return EngineApiException(kind, genericFa(status), statusCode: status, detail: text);
     }
     return EngineApiException(
       kind,
-      _genericFa(status),
+      genericFa(status),
       statusCode: status,
       detail: raw.isEmpty ? null : _clip(raw),
     );
   }
 
-  static String _genericFa(int status) => switch (status) {
+  /// Persian fallback when the engine sent no `message_fa` (it normally
+  /// does). A 409 means different things per route, so it depends on the
+  /// engine [code]; an unknown 409 gets a neutral sentence.
+  static String genericFa(int status, {String? code}) => switch (status) {
         404 => 'موردی که از موتور خواسته شد پیدا نشد.',
-        409 => 'داده ذخیره‌شده در موتور با نسخه فعلی سازگار نیست.',
+        409 => _conflictFa[code] ?? 'موتور این درخواست را در وضعیت فعلی نپذیرفت.',
         422 => 'موتور ورودی را نپذیرفت.',
         503 => 'این بخش موتور فعلاً در دسترس نیست.',
         _ => 'موتور با خطا پاسخ داد (HTTP $status).',
       };
+
+  /// 409 codes of the engine routes (backtests, strategies, rates/update).
+  static const Map<String?, String> _conflictFa = {
+    'not_cancellable': 'این اجرا دیگر در حال انجام نیست و لغو نمی‌شود.',
+    'run_active': 'این اجرا هنوز در حال انجام است؛ اول آن را لغو کنید.',
+    'stored_params_invalid': 'پارامترهای ذخیره‌شده استراتژی با نسخه فعلی موتور سازگار نیستند.',
+  };
 
   static EngineApiException _fromDio(DioException e, String what, Duration limit) {
     final String technical = '$what: ${e.message ?? e.error ?? e.type.name}';

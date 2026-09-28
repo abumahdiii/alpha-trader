@@ -310,6 +310,77 @@ class BacktestRunList {
   }
 }
 
+// ----------------------------------------------------------------- limits
+
+/// `GET /backtests/limits?symbol` -- the manual period the engine accepts
+/// for the ACTIVE params (computed by the same code `POST /backtests`
+/// validates with): `earliest_start <= from < to <= data_end`.
+@immutable
+class BacktestLimits {
+  const BacktestLimits({
+    required this.symbol,
+    this.earliestStart,
+    this.dataStart,
+    this.dataEnd,
+    this.warmupH4Bars,
+    this.windowMonthsMax,
+    this.windowsCountMax,
+    this.paramsVersion,
+    this.paramsHash,
+    this.noteFa,
+  });
+
+  final String symbol;
+
+  /// First allowed `from` (after the channel + ATR warm-up), UTC.
+  final DateTime? earliestStart;
+  final DateTime? dataStart;
+
+  /// Last allowed `to` (exclusive end), UTC.
+  final DateTime? dataEnd;
+  final int? warmupH4Bars;
+  final int? windowMonthsMax;
+  final int? windowsCountMax;
+  final int? paramsVersion;
+  final String? paramsHash;
+  final String? noteFa;
+
+  /// Whole UTC days a manual form may pick (the form sends `from` = the
+  /// start day's midnight and `to` = the midnight after the end day):
+  /// the first day starting at or after [earliestStart], and the last day
+  /// ending at or before [dataEnd]. Calendar arithmetic only. null when the
+  /// engine sent no bounds or no whole day fits.
+  ({DateTime first, DateTime last})? get pickableDays {
+    final DateTime? start = earliestStart?.toUtc();
+    final DateTime? end = dataEnd?.toUtc();
+    if (start == null || end == null) return null;
+    DateTime first = DateTime.utc(start.year, start.month, start.day);
+    if (first.isBefore(start)) first = first.add(const Duration(days: 1));
+    final DateTime last = DateTime.utc(end.year, end.month, end.day).subtract(const Duration(days: 1));
+    return last.isBefore(first) ? null : (first: first, last: last);
+  }
+
+  factory BacktestLimits.fromJson(Object? json) {
+    final JsonReader r = JsonReader(json, 'backtest_limits');
+    return BacktestLimits(
+      symbol: r.str('symbol'),
+      earliestStart: r.utcOrNull('earliest_start'),
+      dataStart: r.utcOrNull('data_start'),
+      dataEnd: r.utcOrNull('data_end'),
+      warmupH4Bars: r.intOrNull('warmup_h4_bars'),
+      windowMonthsMax: r.intOrNull('window_months_max'),
+      windowsCountMax: r.intOrNull('windows_count_max'),
+      paramsVersion: r.intOrNull('params_version'),
+      paramsHash: r.strOrNull('params_hash'),
+      noteFa: r.strOrNull('note_fa'),
+    );
+  }
+
+  @override
+  String toString() => 'BacktestLimits($symbol earliest_start=${earliestStart?.toIso8601String()} '
+      'data_end=${dataEnd?.toIso8601String()} params_hash=$paramsHash)';
+}
+
 // ----------------------------------------------------------------- config
 
 /// `CostModel`: spread is always the broker's history; the fallback covers
