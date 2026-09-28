@@ -542,3 +542,24 @@ class _RoutedHttp extends FakeEngineHttp {
     return notFound();
   }
 }
+
+/// `GET /backtests/limits?symbol` (engine README worked example).
+Map<String, Object?> limitsJson({
+  String symbol = 'XAUUSD.x',
+  String earliestStart = '2024-07-29T09:00:00Z',
+  String dataEnd = '2025-03-03T00:00:00Z',
+}) =>
+    {
+      'symbol': symbol,
+      'earliest_start': earliestStart,
+      'data_start': '2024-06-03T00:00:00Z',
+      'data_end': dataEnd,
+      'warmup_h4_bars': 140,
+      'window_months_max': 60,
+      'windows_count_max': 500,
+      'seed_max': 9223372036854775807,
+      'default_fallback_spread_points': {'points': 30, 'source': 'auto_median_observed'},
+      'params_version': 1,
+      'params_hash': kHash,
+      'note_fa': 'بازه دستی نیم‌باز است.',
+    };
