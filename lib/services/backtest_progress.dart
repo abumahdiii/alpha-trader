@@ -121,6 +121,11 @@ class BacktestProgressWatcher {
       _log('ignored unparsable WS frame: $e | $frame');
       return;
     }
+    if (!message.isProgress && !message.isFinal) {
+      // keepalive (or a future informational type): not a state change.
+      _log('WS <- ${message.type} ignored');
+      return;
+    }
     _log('WS <- $message');
     _emit(message);
   }
