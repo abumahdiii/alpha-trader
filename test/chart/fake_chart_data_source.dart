@@ -10,6 +10,7 @@ import 'package:alpha_trader/chart/chart_format.dart';
 import 'package:alpha_trader/models/backtest_models.dart';
 import 'package:alpha_trader/models/chart_models.dart';
 import 'package:alpha_trader/models/market_data.dart';
+import 'package:alpha_trader/models/strategy.dart';
 import 'package:alpha_trader/services/engine_api.dart';
 
 /// Synthetic open times from [start] every [step], skipping the weekend.
@@ -156,6 +157,23 @@ const SetupsSummary kFakeSummary = SetupsSummary(
   openNetPnl: 5.12,
 );
 
+const String kFakePluginName = 'ma_cross';
+const String kFakePluginTitleFa = 'کراس دو میانگین';
+const String kFakePluginSetupTitleFa = 'کراس صعودی میانگین‌ها';
+const String kFakePluginSha = '2d070ea08a45aa11bb22cc33dd44ee55ff66778899aabbccddeeff0011223344';
+
+/// The selector's entries: the built-in channel system and one plugin.
+const List<StrategyOption> kFakeStrategyOptions = <StrategyOption>[
+  StrategyOption(name: 'stddev_channel', titleFa: 'کانال انحراف معیار', version: 1),
+  StrategyOption(
+    name: kFakePluginName,
+    titleFa: kFakePluginTitleFa,
+    version: 2,
+    source: StrategySource.plugin,
+    sha256: kFakePluginSha,
+  ),
+];
+
 final BacktestWindow kFakeWindow = BacktestWindow(
   from: DateTime.utc(2021, 11, 1, 9),
   to: DateTime.utc(2021, 11, 20),
@@ -194,6 +212,13 @@ class FakeChartDataSource implements ChartDataSource {
   final Map<String, Completer<void>> gates = <String, Completer<void>>{};
 
   final List<String> calls = <String>[];
+
+  /// What strategies() answers (null: throws [error] or a connection error).
+  List<StrategyOption>? strategyOptions = kFakeStrategyOptions;
+
+  /// `strategy` argument of every channel() / setups() call, in order.
+  final List<String?> channelStrategies = <String?>[];
+  final List<String?> setupsStrategies = <String?>[];
 
   final Map<String, List<Candle>> _h1 = <String, List<Candle>>{};
   final Map<String, List<Candle>> _h4 = <String, List<Candle>>{};
@@ -256,6 +281,36 @@ class FakeChartDataSource implements ChartDataSource {
             outcome: ev ? outcomes[k] : null, backtest: ev ? flags[k] : null),
     ];
   }
+
+  /// A plugin's setups (no channel line, slug type, own title): the same
+  /// fixture setups re-labelled the way the engine sends them.
+  List<SetupItem> pluginSetups(String symbol) => <SetupItem>[
+        for (final SetupItem s in allSetups(symbol))
+          SetupItem(
+            id: '${s.id}:$kFakePluginName',
+            symbol: s.symbol,
+            status: s.status,
+            rejectionReasonFa: s.rejectionReasonFa,
+            setupType: 'ma_cross_up',
+            setupTitleFa: kFakePluginSetupTitleFa,
+            direction: s.direction,
+            pattern: 'ma_cross',
+            confirmationBarTime: s.confirmationBarTime,
+            decisionTime: s.decisionTime,
+            entryTime: s.entryTime,
+            entry: s.entry,
+            entryBidOpen: s.entryBidOpen,
+            stopLoss: s.stopLoss,
+            takeProfit: s.takeProfit,
+            rr: s.rr,
+            referencePrice: s.referencePrice,
+            indicativeTakeProfit: s.indicativeTakeProfit,
+            volume: s.volume,
+            reasonFa: 'کراس میانگین سریع از بالای میانگین کند.',
+            outcome: s.outcome,
+            backtest: s.backtest,
+          ),
+      ];
 
   /// Full-history gaps: every weekend, plus one old "missing" gap.
   List<Gap> allGaps(String symbol, ChartTimeframe tf) {
@@ -359,10 +414,37 @@ class FakeChartDataSource implements ChartDataSource {
     params: <String, Object?>{'n': 100, 'k': 2},
   );
 
+  static const StrategyProvenance pluginProvenance = StrategyProvenance(
+    strategy: kFakePluginName,
+    strategyVersion: 2,
+    strategySource: StrategySource.plugin,
+    strategySha256: kFakePluginSha,
+    paramsVersion: 1,
+    paramsHash: '99887766554433221100',
+    params: <String, Object?>{'fast': 10, 'slow': 30},
+  );
+
   @override
-  Future<ChannelResult> channel(String symbol, ChartTimeframe timeframe, {DateTime? from, DateTime? to}) async {
+  Future<List<StrategyOption>> strategies() async {
+    calls.add('strategies');
+    final List<StrategyOption>? options = strategyOptions;
+    if (options == null) {
+      throw error ?? const EngineApiException(EngineApiErrorKind.connection, 'اتصال به موتور برقرار نشد.');
+    }
+    return options;
+  }
+
+  @override
+  Future<ChannelResult> channel(String symbol, ChartTimeframe timeframe,
+      {DateTime? from, DateTime? to, String? strategy}) async {
     calls.add('channel $symbol ${timeframe.code}');
+    channelStrategies.add(strategy);
     _maybeThrow();
+    if (strategy != null && strategy != 'stddev_channel') {
+      // Like the engine: only stddev_channel has a channel.
+      throw const EngineApiException(EngineApiErrorKind.badStatus, 'این سیستم کانال ندارد.',
+          statusCode: 409, code: 'channel_not_available');
+    }
     final List<Candle> all = bars(symbol, timeframe);
     final List<ChannelPoint> pts = <ChannelPoint>[
       for (int i = 0; i < all.length; i++)
@@ -381,14 +463,17 @@ class FakeChartDataSource implements ChartDataSource {
   }
 
   @override
-  Future<SetupsResult> setups(String symbol, {DateTime? from, DateTime? to}) async {
+  Future<SetupsResult> setups(String symbol, {DateTime? from, DateTime? to, String? strategy}) async {
     calls.add('setups $symbol');
+    setupsStrategies.add(strategy);
     _maybeThrow();
-    final List<SetupItem> s =
-        allSetups(symbol).where((SetupItem x) => _within(x.decisionTime, from, to)).toList(growable: false);
+    final bool plugin = strategy != null && strategy != 'stddev_channel';
+    final List<SetupItem> s = (plugin ? pluginSetups(symbol) : allSetups(symbol))
+        .where((SetupItem x) => _within(x.decisionTime, from, to))
+        .toList(growable: false);
     return SetupsResult(
       symbol: symbol,
-      provenance: provenance,
+      provenance: plugin ? pluginProvenance : provenance,
       from: from,
       to: to,
       account: const ChartAccount(balance: 1000, riskPct: 1, leverage: 100, rr: 2),

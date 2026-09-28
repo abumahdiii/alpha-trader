@@ -84,6 +84,7 @@ void main() {
     expect(FakeEngineHttp.bodyOf(http.sent('POST /backtests').single), {
       'symbol': 'XAUUSD.x',
       'mode': 'manual',
+      'strategy': 'stddev_channel', // the default system (no /strategies route in this fake)
       'from': '2023-01-02T00:00:00.000Z',
       'to': '2024-01-01T00:00:00.000Z', // the last day is included
       'commission_per_lot_per_side': 3.5,
@@ -123,6 +124,7 @@ void main() {
     expect(FakeEngineHttp.bodyOf(http.sent('POST /backtests').single), {
       'symbol': 'XAUUSD.x',
       'mode': 'random',
+      'strategy': 'stddev_channel',
       'windows_count': 5,
       'window_months': 2,
       'seed': 123,

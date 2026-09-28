@@ -1,9 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../core/dev_mode.dart';
 import '../models/market_data.dart';
+import '../models/strategy.dart';
 import '../theme/app_semantic_colors.dart';
+import '../widgets/strategy_selector.dart';
 import 'backtest_range_request.dart';
 import 'chart_controller.dart';
 import 'chart_data.dart';
@@ -226,6 +230,7 @@ class _ChartViewState extends State<ChartView> {
                   child: CandleInfoPanel(
                     data: data,
                     index: inspected,
+                    noChannelFa: c.hasChannel ? null : kNoChannelFa,
                     onClose: () => c.clearInspection(reason: 'close button'),
                   ),
                 ),
@@ -345,6 +350,23 @@ class _ChartToolbar extends StatelessWidget {
             // A locked symbol stays readable (the default disabled hint would hide it).
             disabledHint: c.symbol == null ? null : Text(c.symbol!, textDirection: TextDirection.ltr),
           ),
+          if (c.strategies.isNotEmpty)
+            StrategySelector(
+              key: const ValueKey<String>('chart-strategy'),
+              options: c.strategies,
+              value: c.strategy,
+              enabled: !busy,
+              onChanged: (String name) => unawaited(c.setStrategy(name)),
+            ),
+          if (!c.hasChannel)
+            Tooltip(
+              message: 'فقط سیستم کانال انحراف معیار خطوط کانال دارد؛ برای این سیستم فقط ستاپ‌ها نمایش داده می‌شوند.',
+              child: Text(
+                kNoChannelFa,
+                key: const ValueKey<String>('chart-no-channel'),
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: context.appColors.mutedText),
+              ),
+            ),
           ToggleButtons(
             key: const ValueKey<String>('chart-timeframe'),
             constraints: const BoxConstraints(minHeight: 34, minWidth: 48),
@@ -491,8 +513,12 @@ class _StatusLine extends StatelessWidget {
       parts.add('${d.length} کندل');
       final TradeOverlay? o = d.tradeOverlay;
       if (o != null) parts.add('${d.trades.length} معامله از ${o.trades.length} در این بازه');
-      final StrategyProvenance? p = d.channelResult?.provenance;
-      if (p != null) parts.add('پارامترها: نسخه ${p.paramsVersion}');
+      final StrategyProvenance? p = d.channelResult?.provenance ?? d.setupsResult?.provenance;
+      if (p != null) {
+        parts.add('${p.strategy} v${p.strategyVersion}'
+            '${p.strategySource == StrategySource.plugin ? ' (پلاگین${p.strategySha256 == null ? '' : '، ${shortSha(p.strategySha256!)}'})' : ''}'
+            ' — پارامترها: نسخه ${p.paramsVersion}');
+      }
       if (d.rates.stale) parts.add('MT5 در دسترس نبود؛ ممکن است کندل‌های اخیر در کش نباشند');
       final String? msg = d.channelResult?.messageFa ?? d.setupsResult?.messageFa;
       if (msg != null) parts.add(msg);

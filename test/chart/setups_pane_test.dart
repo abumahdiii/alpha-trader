@@ -324,7 +324,7 @@ void main() {
     await tester.tap(button);
     await tester.pumpAndSettle();
     expect(sent, <BacktestRangeRequest>[
-      BacktestRangeRequest(symbol: 'XAUUSD.x', from: kFakeWindow.from!, to: kFakeWindow.to!),
+      BacktestRangeRequest(symbol: 'XAUUSD.x', from: kFakeWindow.from!, to: kFakeWindow.to!, strategy: 'stddev_channel'),
     ]);
   });
 

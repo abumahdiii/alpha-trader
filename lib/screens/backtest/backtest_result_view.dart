@@ -5,9 +5,11 @@ import 'package:flutter/material.dart';
 import '../../chart/chart_data_source.dart';
 import '../../models/account_settings.dart';
 import '../../models/backtest_models.dart';
+import '../../models/strategy.dart';
 import '../../services/backtest_exporter.dart';
 import '../../theme/app_semantic_colors.dart';
 import '../../widgets/status_message.dart';
+import '../../widgets/strategy_selector.dart';
 import 'backtest_controller.dart';
 import 'backtest_export_menu.dart';
 import 'backtest_format.dart';
@@ -287,6 +289,7 @@ class BacktestResultView extends StatelessWidget {
           periodEnd: end,
           digits: c.openRunDigits,
           showWindow: random,
+          strategy: d.summary.strategy ?? d.config?.strategyName,
         ),
       ),
     ]);
@@ -403,10 +406,16 @@ class _RunHeader extends StatelessWidget {
         context,
         Icons.tune,
         'استراتژی: ${s.strategy ?? cfg?.strategyName ?? kDash} v${s.strategyVersion ?? cfg?.strategyVersion ?? '?'}'
+        '${s.strategySha256 == null ? '' : ' — فایل ${shortSha(s.strategySha256!)}'}'
         ' — پارامترها نسخه ${s.paramsVersion ?? cfg?.paramsVersion ?? 'موقت'}'
         '${hash == null ? '' : ' — هش ${hash.length > 12 ? hash.substring(0, 12) : hash}'}',
         key: const ValueKey<String>('bt-header-strategy'),
+        badge: s.strategySource == StrategySource.plugin
+            ? const PluginBadge(key: ValueKey<String>('bt-header-plugin'))
+            : null,
         tooltip: [
+          'منبع کد: ${s.strategySource.titleFa}',
+          if (s.strategySha256 != null) 'هش کامل فایل سیستم (sha256): ${s.strategySha256}',
           if (hash != null) 'هش کامل پارامترها: $hash',
           if (cfg != null && cfg.params.isNotEmpty) 'پارامترها: ${cfg.params}',
         ].join('\n'),
@@ -496,11 +505,12 @@ class _RunHeader extends StatelessWidget {
     );
   }
 
-  Widget _fact(BuildContext context, IconData icon, String text, {Key? key, String? tooltip}) {
+  Widget _fact(BuildContext context, IconData icon, String text, {Key? key, String? tooltip, Widget? badge}) {
     final Widget row = Row(key: key, mainAxisSize: MainAxisSize.min, children: [
       Icon(icon, size: 16, color: context.appColors.mutedText),
       const SizedBox(width: 4),
       Flexible(child: Text(text, style: Theme.of(context).textTheme.bodySmall)),
+      if (badge != null) ...[const SizedBox(width: 6), badge],
     ]);
     return tooltip == null || tooltip.isEmpty ? row : Tooltip(message: tooltip, child: row);
   }
