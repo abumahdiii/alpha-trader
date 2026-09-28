@@ -706,8 +706,18 @@ class BacktestProgress {
   final String? messageFa;
 
   static const String lostType = 'lost';
+  static const String progressType = 'progress';
 
-  bool get isFinal => type != 'progress';
+  /// Engine heartbeat while a run is queued/running (`{"type":"keepalive"}`);
+  /// carries no progress and is never a final state.
+  static const String keepaliveType = 'keepalive';
+
+  /// Message types that end a run (whitelist: an unknown type is never final).
+  static const Set<String> finalTypes = {'done', 'error', 'cancelled', 'interrupted', lostType};
+
+  bool get isFinal => finalTypes.contains(type);
+
+  bool get isProgress => type == progressType;
 
   bool get isDone => type == 'done';
 

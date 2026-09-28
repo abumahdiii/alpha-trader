@@ -25,7 +25,9 @@ Random windows: ``numpy.random.default_rng(seed)`` (PCG64). Eligible starts = ca
 ``s`` with ``s >= earliest`` and ``s + DateOffset(months=L) <= data_end``. ``N`` starts are drawn uniformly
 with replacement (``rng.integers(0, M, size=N)``; overlaps allowed), each window is
 ``[s, s + DateOffset(months=L))``; windows are then sorted by start (stable) and numbered 0..N-1. A missing
-seed is generated with ``secrets.randbits(63)`` and returned, so every run can be regenerated exactly.
+seed is generated with ``secrets.randbits(63)`` (:func:`new_seed`) and returned, so every run can be
+regenerated exactly. Through the API the seed is drawn at SUBMIT time (``POST /backtests`` returns and stores
+it before the run starts); the job then marks the stored plan ``seed_generated``.
 The numpy version is stored too (Generator streams are only guaranteed within a numpy version).
 """
 
@@ -62,6 +64,13 @@ def _fmt(ts: pd.Timestamp | datetime) -> str:
 def _utc(value: datetime | pd.Timestamp) -> pd.Timestamp:
     ts = pd.Timestamp(value)
     return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+
+
+def new_seed() -> int:
+    """A fresh random-window seed, ``0 <= seed < 2**63`` (``models.SEED_MAX``). ``POST /backtests`` draws it at
+    submit time when the request has none (stored and returned); ``random_windows`` uses it only when called
+    directly without a seed."""
+    return secrets.randbits(63)
 
 
 def warmup_h4_bars(atr_period: int) -> int:
@@ -142,7 +151,7 @@ def random_windows(
     if count < 1 or months < 1:
         raise ValueError("count and months must be >= 1")
     generated = seed is None
-    used_seed = secrets.randbits(63) if seed is None else int(seed)
+    used_seed = new_seed() if seed is None else int(seed)
     last = data_end(h1_times_ns)
     times = pd.DatetimeIndex(pd.to_datetime(np.asarray(h1_times_ns, dtype=np.int64), utc=True))
     offset = pd.DateOffset(months=months)
@@ -175,6 +184,7 @@ __all__ = [
     "data_end",
     "earliest_start",
     "manual_window",
+    "new_seed",
     "random_windows",
     "warmup_h4_bars",
 ]
