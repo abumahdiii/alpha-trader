@@ -21,11 +21,22 @@ Worked example (buy, rr = 2)::
 
 Prices are not rounded here (no symbol spec in this layer); rounding to the symbol's ``digits`` is the
 caller's job.
+
+Setup vocabulary (strategy contract S1)
+---------------------------------------
+``setup`` is a lowercase slug (``^[a-z][a-z0-9_]{0,47}$``) chosen by the strategy, e.g. ``ma_cross``. The six
+values of :class:`Setup` are the StdDev-channel setups: when ``setup`` is one of them it is stored as the
+:class:`Setup` member and the channel rules apply (setup -> ``line`` from :data:`SETUP_LINE`, forced direction
+from :data:`SETUP_DIRECTION`); the built-in ``stddev_channel`` strategy may only emit these values. Any other
+slug is free-form: ``line`` may be ``None`` (a strategy without channel lines) and ``setup_title_fa`` carries
+its Persian title for the UI (the StdDev titles come from the strategy's own table). ``setup_title_fa`` is left
+out of dumps while ``None``, so StdDev candidates serialize exactly as before.
 """
 
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Literal
@@ -38,6 +49,10 @@ EntryRule = Literal["next_bar_open"]
 
 H1 = timedelta(hours=1)
 _HASH_RE = r"^[0-9a-f]{64}$"
+SETUP_SLUG_PATTERN = r"^[a-z][a-z0-9_]{0,47}$"
+_SETUP_SLUG_RE = re.compile(SETUP_SLUG_PATTERN)
+# The built-in strategy whose setups are exactly the closed ``Setup`` vocabulary below.
+CHANNEL_STRATEGY_NAME = "stddev_channel"
 # Relative tolerance when a caller passes indicative_take_profit explicitly (e.g. a JSON round-trip).
 _TP_REL_TOL = 1e-9
 
@@ -76,6 +91,11 @@ SETUP_DIRECTION: dict[Setup, Direction | None] = {
 ExtraValue = float | int | bool | str | None
 
 
+def setup_slug(value: Setup | str) -> str:
+    """Plain string of a setup (``Setup.BOUNCE_LOWER`` -> ``"bounce_lower"``; other slugs unchanged)."""
+    return value.value if isinstance(value, Setup) else str(value)
+
+
 def take_profit_from(price: float, stop_loss: float, rr: float, direction: Direction) -> float:
     """``price +/- rr * |price - stop_loss|`` (``+`` for buy, ``-`` for sell)."""
     distance = abs(price - stop_loss)
@@ -100,8 +120,9 @@ class SignalCandidate(BaseModel):
     params_hash: str = Field(pattern=_HASH_RE)
     symbol: str = Field(min_length=1)
     direction: Direction
-    setup: Setup
-    line: Line
+    # A ``Setup`` member for the StdDev-channel setups, else a strategy-defined slug (module docstring).
+    setup: Setup | str
+    line: Line | None  # channel line the setup trades at; None for strategies without channel lines
     decision_time_utc: datetime  # CLOSE time of the confirmation H1 bar
     confirmation_bar_open_utc: datetime
     entry_rule: EntryRule = "next_bar_open"
@@ -113,6 +134,23 @@ class SignalCandidate(BaseModel):
     pattern: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_]*$")
     reason_fa: str = Field(min_length=1)
     extra: dict[str, ExtraValue] = Field(default_factory=dict)
+    # Persian title of a non-StdDev setup (UI); omitted from dumps while None.
+    setup_title_fa: str | None = Field(default=None, min_length=1, max_length=120, exclude_if=lambda v: v is None)
+
+    @field_validator("setup", mode="before")
+    @classmethod
+    def _setup_slug(cls, value: object) -> Setup | str:
+        if isinstance(value, Setup):
+            return value
+        if not isinstance(value, str):
+            raise ValueError("setup must be a string slug")
+        try:
+            return Setup(value)
+        except ValueError:
+            pass
+        if not _SETUP_SLUG_RE.fullmatch(value):
+            raise ValueError(f"setup {value!r} must match {SETUP_SLUG_PATTERN}")
+        return value
 
     @field_validator("decision_time_utc", "confirmation_bar_open_utc")
     @classmethod
@@ -134,11 +172,16 @@ class SignalCandidate(BaseModel):
                 "decision_time_utc must be the close of the confirmation H1 bar "
                 "(confirmation_bar_open_utc + 1h)"
             )
-        if SETUP_LINE[self.setup] != self.line:
-            raise ValueError(f"setup {self.setup.value!r} trades the {SETUP_LINE[self.setup]!r} line, not {self.line!r}")
-        forced = SETUP_DIRECTION[self.setup]
-        if forced is not None and forced != self.direction:
-            raise ValueError(f"setup {self.setup.value!r} can only be a {forced!r}")
+        if isinstance(self.setup, Setup):  # StdDev-channel setup: channel line and direction rules
+            if SETUP_LINE[self.setup] != self.line:
+                raise ValueError(
+                    f"setup {self.setup.value!r} trades the {SETUP_LINE[self.setup]!r} line, not {self.line!r}")
+            forced = SETUP_DIRECTION[self.setup]
+            if forced is not None and forced != self.direction:
+                raise ValueError(f"setup {self.setup.value!r} can only be a {forced!r}")
+        elif self.strategy_name == CHANNEL_STRATEGY_NAME:
+            raise ValueError(f"{CHANNEL_STRATEGY_NAME} setups must be one of {[s.value for s in Setup]}, "
+                             f"not {self.setup!r}")
         if self.direction == "buy" and not self.stop_loss < self.reference_price:
             raise ValueError("buy: stop_loss must be below reference_price")
         if self.direction == "sell" and not self.stop_loss > self.reference_price:
@@ -155,6 +198,11 @@ class SignalCandidate(BaseModel):
                 f"indicative_take_profit {self.indicative_take_profit} != reference_price +/- rr*|ref - sl| = {expected}"
             )
         return self
+
+    @property
+    def setup_slug(self) -> str:
+        """``setup`` as a plain string (the value stored in trades and shown in the UI)."""
+        return setup_slug(self.setup)
 
     @property
     def fill_bar_open_utc(self) -> datetime:
