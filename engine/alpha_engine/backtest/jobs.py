@@ -3,6 +3,9 @@
 * ONE worker thread (``ThreadPoolExecutor(max_workers=1)``): runs execute one at a time in submit order;
   later runs wait ``queued``. The HTTP threads and the event loop stay free (``/health`` answers during a
   run; tests/test_backtests_api.py).
+* Seeds: a random run submitted without a seed gets one drawn at SUBMIT time by the route
+  (``periods.new_seed``) and stored in ``config.seed`` before it is queued; ``submit(..., seed_generated=True)``
+  only marks the stored plan ``seed_generated: true`` (provenance), the windows are the ones of that seed.
 * Per-run in-memory state (:class:`JobState`: status, phase, percent, window i/n, error) under one lock;
   the WebSocket route polls :meth:`BacktestJobs.snapshot`. The database row mirrors it: status changes
   immediately, progress THROTTLED (a write when >= ``PROGRESS_DB_INTERVAL_S`` seconds or >=
@@ -206,6 +209,7 @@ class JobState:
     net_profit: float | None = None
     net_profit_pct: float | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
+    seed_generated: bool = False  # random run whose seed the engine drew at submit time (config.seed)
     shutdown: bool = False
     future: Future | None = None
     version: int = 0
@@ -254,11 +258,16 @@ class BacktestJobs:
     def closing(self) -> bool:
         return self._closing
 
-    def submit(self, run_id: int, config: RunConfig) -> JobState:
+    def submit(self, run_id: int, config: RunConfig, *, seed_generated: bool = False) -> JobState:
+        """Queue a run. ``seed_generated``: ``config.seed`` was drawn by the engine at submit time (the request
+        had none); the stored plan then says ``seed_generated: true`` although the runner got an explicit seed."""
+        if seed_generated and (config.mode != "random" or config.seed is None):
+            raise ValueError("seed_generated needs a random run with its (generated) seed in the config")
         with self._lock:
             if self._closing:
                 raise JobsClosed(CLOSING_FA)
-            job = JobState(run_id=run_id, config=config, windows_total=_windows_total(config))
+            job = JobState(run_id=run_id, config=config, windows_total=_windows_total(config),
+                           seed_generated=seed_generated)
             self._jobs[run_id] = job
             queued_before = sum(1 for j in self._jobs.values() if j.status in ACTIVE_STATUSES) - 1
             job.future = self._executor.submit(self._run, job)
@@ -428,6 +437,8 @@ class BacktestJobs:
             result = run_backtest(job.config, prepared.history, scan, bars=bars_for(prepared, job.config),
                                   progress_cb=on_progress, cancel_event=job.cancel_event)
             timings["simulate_s"] = time.perf_counter() - t
+            if job.seed_generated:  # provenance only: the windows come from config.seed either way
+                result = result.model_copy(update={"plan": result.plan.model_copy(update={"seed_generated": True})})
             self._set_phase(job, "saving")
             t = time.perf_counter()
             output = build_run_output(result)

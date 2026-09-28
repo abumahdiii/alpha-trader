@@ -16,24 +16,28 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from alpha_engine.app import create_app
 from alpha_engine.backtest import jobs as jobs_module
 from alpha_engine.backtest.history import load_history
 from alpha_engine.backtest.metrics import compute_metrics, summarize_windows
-from alpha_engine.backtest.models import NO_SWAP_LABEL_FA, PROVISIONAL_LABEL_FA, RunConfig
+from alpha_engine.backtest.models import NO_SWAP_LABEL_FA, PROVISIONAL_LABEL_FA, SEED_MAX, RunConfig
 from alpha_engine.backtest.runner import run_backtest
 from alpha_engine.config import Settings
 from alpha_engine.data.cache import OhlcvCache
 from alpha_engine.logging_setup import ROOT_LOGGER_NAME
-from alpha_engine.storage.backtests_repo import BacktestsRepo
+from alpha_engine.routes import backtests as routes_module
+from alpha_engine.storage.backtests_repo import ACTIVE_STATUSES, TERMINAL_STATUSES, BacktestsRepo
 from alpha_engine.storage.db import DB_FILENAME, open_db
+from alpha_engine.strategy.base import bar_open_times
 from fixtures.seed_cache import seed_cache
 
 GOLD, BRENT = "XAUUSD.x", "BRNUSD.x"
@@ -151,10 +155,13 @@ def scan_gate(monkeypatch: pytest.MonkeyPatch) -> Iterator[Gate]:
 
 
 def _ws_messages(env: Env, run_id: int) -> list[dict]:
+    """Progress + final messages (keepalives, sent only after long idle periods, are skipped)."""
     messages = []
     with env.client.websocket_connect(f"/ws/backtests/{run_id}") as ws:
         while True:
             msg = ws.receive_json()
+            if msg["type"] == "keepalive":
+                continue
             messages.append(msg)
             if msg["type"] != "progress":
                 break
