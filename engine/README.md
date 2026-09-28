@@ -22,6 +22,11 @@ From this directory, with the project venv (after the user has approved the envi
 
 Then `GET http://127.0.0.1:8765/health`.
 
+## Package (release)
+
+Frozen with PyInstaller (onedir) for machines without Python: see `packaging/README.md` (build steps
+need the user's permission; `requirements-build.txt` is build-only).
+
 ## Test
 
 ```
@@ -48,8 +53,8 @@ Read from the OS environment first, then from `<repo>/.env` (OS environment wins
 | `MT5_SERVER_UTC_OFFSET` | - | Fixed broker offset override in hours (-14..14, no DST). Unset = automatic (see below) |
 | `ENGINE_MT5_AUTOCONNECT` | `true` | Connect to MT5 in the background on startup (`false`/`0`/`no`/`off` disables) |
 | `ENGINE_SYMBOLS` | `XAUUSD.x,BRNUSD.x` | Symbols served by `/symbols` and `/rates` |
-| `ALPHA_TRADER_DATA_DIR` | `<repo>/data` | Cache, database and results |
-| `ALPHA_TRADER_ENV_FILE` | `<repo>/.env` | Alternative `.env` path |
+| `ALPHA_TRADER_DATA_DIR` | `<repo>/data` (frozen: `<app>/user_data`) | Cache, database and results |
+| `ALPHA_TRADER_ENV_FILE` | `<repo>/.env` (frozen: `<app>/.env`) | Alternative `.env` path |
 | `ALPHA_DATA_CHECK_CONFIRMED` | `false` | `true` once the user confirmed the raw-data check: backtests are no longer labelled «موقت تا تایید چک داده» (`provisional`) |
 
 ## Market data (phase 1)
@@ -176,6 +181,41 @@ the decision time (and, with `now_utc`, only closed H1 bars); `alpha_engine.risk
 margin 40; brent SL 0.50 -> 0.02 lots, margin 16 with an explicit balance 1000, risk 1 %, leverage 100.
 With the default balance 2500: risk 25.00 -> gold 25 / 500 = 0.05 lots, margin 0.05 * 100 * 2000 / 100 = 100;
 brent 25 / (0.50 * 1000) = 0.05 lots, margin 0.05 * 1000 * 80 / 100 = 40).
+
+### Strategy plugins (uploaded Python files, sandboxed)
+
+A user (or an LLM agent) uploads ONE Python file defining one `Strategy` subclass. The engine never imports it:
+it is checked statically, then run **only in an isolated worker process**, and usable in the chart and the
+backtests (not live yet). Package `alpha_engine/plugins/`; routes `alpha_engine/routes/plugins.py`.
+
+| Layer | Where | What |
+|---|---|---|
+| Static (parent) | `plugins/validator.py` | <= 256 KiB, UTF-8, `ast.parse`; import whitelist (numpy, pandas, math, statistics, dataclasses, typing; `from alpha_engine.{strategy,indicators,patterns,risk.sizing} import ...` only); no `exec/eval/compile/__import__/open/getattr/setattr/type/...`, no dunder names/attributes/strings, no `_private` attribute except on `self`/`cls`, no OS/process/clock/I-O names (`os`, `sys`, `read_*`, `to_pickle`, `now`, ...), no MT5 order-API names or MT5 package name; exactly one top-level `Strategy` subclass with literal `name` (not reserved) / `version` / `title_fa`, `param_schema`, `evaluate`; may not override `validate_params`/`clean_params` or set `source`/`code_sha256`. Owns the banned-name scanner shared with `tests/test_no_order_calls.py`. |
+| Worker (child) | `plugins/worker.py` | `python -E -s -S -B -m alpha_engine --plugin-worker` (frozen: `<exe> --plugin-worker`), dispatched at the top of `__main__` before uvicorn/app/settings import; never calls `get_settings()`. Boot: parent's `sys.path` from the `go` line, MT5/pyarrow/numexpr/... set to `None` in `sys.modules`, numpy/pandas/helpers pre-imported and warmed up; then an irreversible lock: `sys.meta_path` finder + `sys.addaudithook` (denies sockets, subprocess/`os.system`/`os.exec*`/`os.spawn*`/`os.startfile`/`_winapi`, `ctypes`, `winreg`, `gc`/`sys.*` introspection, `__code__`/`__defaults__` rewrites, every file write, reads and listings outside the Python installation / site-packages / the engine package, and every non-whitelisted `import` event). The plugin runs in a fresh module with restricted builtins (no `open/exec/eval/getattr/...`, `print` is a no-op) and a whitelist `__import__`. JSON lines only (`describe`, `scan`, `evaluate`, `meta`, `shutdown`); frames as columns; candidates as `SignalCandidate.model_dump(mode="json")`. Never pickle. |
+| Host (parent) | `plugins/host.py` | Minimal env (`SYSTEMROOT`, `PYTHONIOENCODING`, `DEV_MODE`), `CREATE_NO_WINDOW`, **Windows Job Object before `go`**: 1 GiB process + job memory, 1 active process, UI limits, kill-on-close (fail closed if it cannot be set). Per-request deadline -> job terminated; semaphore (2 workers); strict JSON (no NaN, 64 MiB line cap, request id). Every answer re-validated (`ParamSchema` rebuilt, `SignalCandidate.model_validate`, this name/version/symbol/params hash, one per bar, chronological, not before `first_valid_index`). `PluginStrategyProxy`: `source = "plugin"`, `code_sha256` = file SHA-256 -> provenance and cache keys. |
+| Dynamic (parent) | `plugins/checks.py` | On `plugins/fixture.random_walk(3000, seed=20260928)`: describe matches the literal identity; >= 1 candidate; determinism (3 scans: same worker + a fresh worker); prefix equivalence (`evaluate` on the closed prefix of <= 40 candidate bars + 20 other bars + the last bar == scan); future mutation and truncation at 2 seeded cut-offs (candidates before the cut-off unchanged); 30 s plugin-time budget; peak memory reported. Floats compared at rel 1e-9. |
+
+**Storage:** `<data_dir>/strategies/plugins/<name>/<version>-<sha12>.py` (+ `.json` manifest), table
+`strategy_plugins` (DB migration **v3**, `UNIQUE(name, version)`, status `active|disabled|archived`, no FK). The
+SHA-256 (of the UTF-8 text, BOM removed) is re-checked on every load; a modified file is never run. Strict
+versions: same name+version+sha -> idempotent; different sha -> 409; old versions are kept; delete = archive
+(files moved to `archive/`). The lifespan registers each name's latest **active** version (`registry.replace`) and
+logs/skips broken files; shutdown unregisters them.
+
+| Route | Response |
+|---|---|
+| `GET /plugins/template` | `{filename, content}` (two-MA crossover, contract + prohibitions + self-test in the docstring) |
+| `POST /plugins` body `{filename, source}` | 201 new version / 200 same file (archived copy restored) -> `{name, version, sha256, title_fa, status, param_schema, validation: {static: [...], dynamic: {bars, candidates, prefix_checks, determinism, future_mutation, elapsed_s, budget_s, worker_boot_s, peak_memory_mib}}, filename, created_utc, registered}`; 409 `version_conflict`; 422 `invalid_plugin` (Persian `errors_fa`, `خط N:` prefixes) / `invalid_body` |
+| `GET /plugins` | every stored version, newest first per name |
+| `POST /plugins/{name}/{version}/disable` \| `/enable` | item; 404 `plugin_not_found`; 409 `plugin_archived` / `plugin_file_invalid` |
+| `DELETE /plugins/{name}/{version}` | archive -> item; 409 `plugin_in_use` while a queued/running backtest uses it |
+
+A registered plugin appears in `/strategies` (params store as usual) and is selected with `strategy=<name>` in
+`/chart/setups`, `/backtests/limits` and `POST /backtests`; results record `strategy_source = "plugin"` and
+`strategy_sha256` = the file hash. Self-test without the app: `python -m alpha_engine --plugin-check file.py`
+(same checks, JSON report, exit 0 = accepted; reads no settings). Measured timings (template, this dev machine): upload
+validation 5.5 s (two worker boots of ~1.4 s each, peak ~280 MiB); a 5-year synthetic scan (31 200 H1 bars, 928
+candidates) 2.1 s end to end, of which ~1.4 s is the worker boot (one fresh worker per call).
 
 ### Channel check tool (cache only, no MT5)
 
@@ -399,6 +439,7 @@ trough. So the stored curve reproduces the stored Sharpe and `max_drawdown_abs` 
 | `GET /backtests/{id}/skipped?window` | `{run_id, window, count, skipped: [{window_index, time, confirmation_bar_time, direction, setup_type, reason, reason_fa, detail}]}` |
 | `POST /backtests/{id}/cancel` | `{id, status: "cancelled" (was queued) \| "running" (stops at the next check), cancel_requested: true}`; 409 `not_cancellable` when finished |
 | `DELETE /backtests/{id}` | `{id, deleted: true}`; 409 `run_active` while queued/running (cancel first) |
+| `GET /backtests/{id}/export?format=xlsx\|csv&table&header=en\|fa` | the stored results as a file attachment (see "Export" below) |
 | `WS /ws/backtests/{id}` | progress messages (plus keepalives while idle), then one final message, then close |
 
 **List paging and filters.** `offset` 0..10^9 (default 0), `limit` 1..500 (default 50); optional exact filters
@@ -511,7 +552,7 @@ Errors (`{"detail": {"code", "message_fa", "errors_fa"}}`): 422 `invalid_request
 `field_not_for_mode`, `missing_period`, `invalid_range`, `window_too_early` (before channel + ATR warm-up),
 `window_beyond_data`, `window_empty`, `data_too_short`, `no_data`, `spec_missing`, `invalid_symbol`,
 `invalid_window`, `invalid_query`; 404 `symbol_not_configured`, `strategy_not_found`, `backtest_not_found`;
-409 `stored_params_invalid`, `not_cancellable`, `run_active`; 503 `db_unavailable`, `cache_unreadable`,
+409 `stored_params_invalid`, `not_cancellable`, `run_active`, `run_not_finished` (export); 503 `db_unavailable`, `cache_unreadable`,
 `engine_closing`. A failed run ends `error` with the same codes (`config_mismatch`, `internal_error`).
 
 Storage (schema v2): `backtest_runs`, `backtest_windows`, `backtest_trades`, `backtest_equity` (children
@@ -519,3 +560,74 @@ Storage (schema v2): `backtest_runs`, `backtest_windows`, `backtest_trades`, `ba
 cancelled or failed run stores no trades. Performance (31k-bar synthetic H1 cache, DEV_MODE off, through the
 API): 5-year manual run ~2.5 s cold (scan 1.4 s, simulate 0.6 s, metrics 0.2 s, persist 0.2 s), 20 x 3-month
 windows ~2.5-3 s cold, ~1.2 s with the history/scan already in the shared LRU.
+
+### Export (phase 7: CSV and Excel)
+
+`GET /backtests/{id}/export?format=xlsx|csv&table=...&header=en|fa` returns the STORED results of a run as a
+file (`backtest/export.py`). Nothing is recomputed: every value is what `/backtests/{id}` (incl. its
+`windows`), `/trades`, `/skipped`, `/equity` return. Presentation only: times ISO-8601 UTC with `Z` (metric times stored
+as `+00:00` become `Z`), nested dicts flattened to dotted keys (`params.n`, `pooled.win_rate`), list cells
+(`flags`, `sizing_warnings_fa`) as JSON text, empty cell = null.
+
+| Query | Values | Default |
+|---|---|---|
+| `format` | `xlsx` (all tables, one sheet each) \| `csv` (one table) | `xlsx` |
+| `table` | csv: `trades` \| `windows` \| `skipped` \| `equity` \| `run` \| `metrics`; xlsx: ignored (`all` or any of these) | `trades` |
+| `header` | `en` = stable English snake_case keys \| `fa` = Persian labels | `en` |
+
+Response: `200` with `Content-Type: text/csv; charset=utf-8` or
+`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`,
+`Content-Disposition: attachment; filename="AlphaTrader_bt<id>_<symbol>_<mode>_<table|all>.<csv|xlsx>"`
+(ASCII only: other characters become `_`), `Cache-Control: no-store`, `X-Alpha-Run-Status: <status>`.
+Errors (standard Persian format): 404 `backtest_not_found`; 422 `invalid_query` (unknown `format`/`table`/
+`header`, or `format=csv&table=all`); 409 `run_not_finished` while `queued`/`running`. Runs that ended
+`error`/`cancelled`/`interrupted` store no results: they export the run table (first row `export_note_fa`
+explains it, plus `status` / `error_code` / `error_message_fa`) and header-only tables.
+
+Tables (column order is fixed; unknown extra stored keys are appended sorted, so nothing stored is dropped):
+
+* `run` (sheet «مشخصات اجرا») -- rows `key,label_fa,value`: `id, status, status_fa, progress, error_code,
+  error_message_fa, created_at, started_at, finished_at, elapsed_s, symbol, mode, from, to, windows_count,
+  window_months, seed, seed_generated, strategy, strategy_version, strategy_source, strategy_sha256,
+  params_version, params_hash, provisional, provisional_label_fa, trade_count, net_profit, net_profit_pct,
+  summary_basis`, then `params.*`, `account.*`, `cost_model.*`, `spread_fallback.*`, `result_meta.*`,
+  `labels_fa.<i>`, `plan.*` (without the window list), manual only `window.*` (bars, first/last bar, spread
+  counts, stopped_reason, ...), `fingerprint.*` (incl. `fingerprint.spec.*`), `request.*`, `timings.*`,
+  `equity_storage_rule`, `exported_at`, `export_format_version` (1).
+* `metrics` («معیارها») -- rows `key,label_fa,value`: `metrics_kind`, the overall metrics (manual: the
+  `compute_metrics` fields; random: `window_count, windows_with_trades, initial_balance, total_trades,
+  pooled.*, mean.*, worst.*, note_fa`) and, random only, `distribution.*`.
+* `trades` («معاملات») -- every `Trade` field in model order (`window_index ... reason_fa`, incl.
+  `exit_reason`, `exit_reason_fa`, `reason_fa`), then `indicator.<name>` (sorted union over the run's trades).
+* `windows` («پنجره‌ها», workbook: random runs only; csv: both modes) -- `window_index, start, end,
+  initial_balance, final_balance, trade_count, skipped_count, candidates, bars, first_bar_time, last_bar_time,
+  zero_spread_bars_filled, zero_spread_bars_unfilled, weekend_holds, spread_fallback_bars, stopped_reason,
+  equity_points_full, equity_points_stored, metrics.*`.
+* `skipped` («ردشده‌ها») -- `window_index, time, confirmation_bar_time, direction, setup_type, reason,
+  reason_fa, detail`.
+* `equity` («منحنی سرمایه») -- `window_index, time, balance, equity` (the stored, downsampled curve).
+
+CSV: UTF-8 **with BOM** (Excel shows Persian), CRLF line endings, RFC 4180 quoting, floats as `repr()`
+(`float(text) == stored` exactly), booleans `true`/`false`. A TEXT cell that starts with `= + - @`, TAB or CR
+gets a leading `'` (spreadsheet formula injection; strategy texts can come from uploaded plugins); numbers are
+never changed. xlsx: standard library only (`zipfile` + minimal SpreadsheetML, inline strings, no shared
+strings), sheets right-to-left, bold frozen header row; numbers are numeric cells with the same `repr()`
+text, booleans are boolean cells, integers beyond 2^53 (a 63-bit seed) are TEXT so Excel cannot round them;
+XML-illegal control characters are written as `_xHHHH_` (Excel decodes them), literal `_xHHHH_` as
+`_x005F_xHHHH_`. Performance (DEV_MODE off): 1000 trades -> xlsx ~180 ms / 185 KB, csv ~110 ms; 5000 trades ->
+xlsx ~0.9 s. DEV_MODE logs `backtest export run <id> (...) format=... table=... rows={...} bytes=... load=...
+total=... ms`.
+
+Worked example (the fixture run of `tests/test_backtest_export.py`, manual run 1, `format=csv&table=trades`,
+first data row; file
+`AlphaTrader_bt1_XAUUSD.x_manual_trades.csv`, bytes `EF BB BF` first):
+
+```
+window_index,trade_index,direction,setup_type,line,pattern,confirmation_bar_time,decision_time,entry_time,entry,entry_bid_open,stop_loss,take_profit,rr,volume,risk_amount,balance_before,exit_bar_time,exit_time,exit_price,exit_reason,exit_reason_fa,gross_pnl,commission,net_pnl,r_multiple,balance_after,bars_held,spread_at_entry_points,spread_at_exit_points,held_over_weekend,flags,sizing_warnings_fa,reason_fa,indicator.atr,indicator.ok,indicator.slope,indicator.src
+0,0,buy,touch_upper,upper,pin_bar,2024-09-02T00:00:00Z,2024-09-02T01:00:00Z,2024-09-02T01:00:00Z,2400.0,2399.66,2397.0,2406.0,2.0,0.01,8.333333333333334,2500.0,2024-09-02T03:00:00Z,2024-09-02T04:00:00Z,2397.0,sl,حد ضرر,-8.1,0.07,-8.17,0.3333333333333333,2500.000000001,3,34,,true,"[""weekend_gap""]",[],لمس خط بالای کانال,1.2345678901234567,true,-0.1,h4
+```
+
+`net_pnl` = `-8.17` is the stored value (= `gross_pnl - commission` = -8.1 - 0.07 as stored), not recomputed;
+`spread_at_exit_points` is empty (null: buy exits are on the bid). `format=csv&table=run` starts
+`key,label_fa,value` / `id,شناسه اجرا,1` / `status,وضعیت,done` / ... / `params_hash,هش پارامترها,8e22...`;
+a random run with seed 9223372036854775807 shows it exactly in both formats.

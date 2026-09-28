@@ -23,6 +23,12 @@ created by the lifespan right after the database is opened; runs left ``queued``
 process are marked ``interrupted`` first. On shutdown the jobs are stopped (running run cancelled and joined
 briefly) BEFORE the database is closed.
 
+Plugin routes (``GET /plugins/template``, ``GET|POST /plugins``, ``POST /plugins/{name}/{version}/enable|disable``,
+``DELETE /plugins/{name}/{version}``; :mod:`alpha_engine.routes.plugins`): the lifespan registers every stored
+plugin's latest active version right after the database opened (:func:`load_plugins`; a broken file is logged and
+skipped) and removes them from the registry on shutdown. Uploaded code only ever runs in a sandboxed worker
+process (:mod:`alpha_engine.plugins`).
+
 Strategy and account-settings routes (``GET /strategies``, ``GET|PUT /strategies/{name}``,
 ``GET|PUT /settings``) use ``app.state.db`` and ``app.state.strategy_registry``:
 
@@ -196,6 +202,41 @@ def stop_backtest_jobs(app: FastAPI) -> None:
             logger.debug("shutdown: backtest jobs shutdown failed", exc_info=True)
 
 
+def load_plugins(app: FastAPI) -> set[str]:
+    """Register every stored plugin's latest ACTIVE version in the app's registry (after the database opened).
+
+    A broken or modified plugin file is logged and skipped; nothing here can stop the engine from starting."""
+    db: EngineConnection | None = getattr(app.state, "db", None)
+    if db is None:
+        return set()
+    try:
+        from .plugins.store import PluginStore, register_active_plugins
+
+        store = PluginStore(db, app.state.settings.data_dir)
+        names = set(register_active_plugins(store, app.state.strategy_registry))
+    except Exception as exc:
+        logger.error("strategy plugins could not be loaded (%s: %s)", type(exc).__name__, exc)
+        if is_dev_mode():
+            logger.debug("startup: plugin loading failed", exc_info=True)
+        return set()
+    if is_dev_mode():
+        logger.debug("startup: %d strategy plugin(s) registered: %s", len(names), sorted(names))
+    return names
+
+
+def unload_plugins(app: FastAPI) -> None:
+    """Remove the plugins this app registered from its registry (never raises; keeps a shared registry clean)."""
+    names = getattr(app.state, "plugin_names", None) or set()
+    app.state.plugin_names = set()
+    registry = getattr(app.state, "strategy_registry", None)
+    for name in sorted(names):
+        try:
+            if registry is not None and name in registry and getattr(registry.get(name), "source", "") == "plugin":
+                registry.unregister(name)
+        except Exception:
+            logger.warning("plugin %s could not be unregistered at shutdown", name)
+
+
 def create_app(
     settings: Settings | None = None,
     mt5_status_provider: Mt5StatusProvider | None = None,
@@ -212,6 +253,7 @@ def create_app(
     from .mt5_adapter import Mt5Adapter
     from .routes import backtests as backtests_routes
     from .routes import chart as chart_routes
+    from .routes import plugins as plugins_routes
     from .routes import rates as rates_routes
     from .routes import settings as settings_routes
     from .routes import strategies as strategies_routes
@@ -233,10 +275,12 @@ def create_app(
         try:
             app_.state.db = open_engine_db(settings)
             app_.state.backtest_jobs = start_backtest_jobs(app_)
+            app_.state.plugin_names = load_plugins(app_)
             yield
         finally:
             try:
                 stop_backtest_jobs(app_)
+                unload_plugins(app_)
                 close_engine_db(app_)
             finally:
                 if is_dev_mode():
@@ -251,6 +295,7 @@ def create_app(
     app.state.server = None  # set by __main__ to the uvicorn.Server handle
     app.state.db = None  # opened by the lifespan
     app.state.backtest_jobs = None  # created by the lifespan (needs the database)
+    app.state.plugin_names = set()  # plugin names registered by this app (lifespan + /plugins routes)
     app.state.strategy_registry = registry
     app.state.chart_cache = chart_routes.ChartCache()
     app.include_router(symbols_routes.router)
@@ -259,6 +304,7 @@ def create_app(
     app.include_router(settings_routes.router)
     app.include_router(chart_routes.router)
     app.include_router(backtests_routes.router)
+    app.include_router(plugins_routes.router)
 
     @app.middleware("http")
     async def dev_request_log(

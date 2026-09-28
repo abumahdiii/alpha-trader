@@ -175,6 +175,28 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         )
         """,
     ),
+    # v3 (strategy plugins): one row per uploaded plugin VERSION (plugins/store.py). ``(name, version)`` is unique
+    # forever -- a new file needs a new version; old versions stay (archived, file kept) for reproducibility.
+    # No foreign key to ``strategies``: the params store creates its own row on first use of a registered
+    # plugin, and the tgc_startup reset may clear the tables independently.
+    3: (
+        """
+        CREATE TABLE strategy_plugins (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            name            TEXT    NOT NULL,
+            version         INTEGER NOT NULL CHECK (version >= 1),
+            sha256          TEXT    NOT NULL CHECK (length(sha256) = 64),
+            title_fa        TEXT    NOT NULL,
+            file_relpath    TEXT    NOT NULL,
+            manifest_json   TEXT    NOT NULL,
+            validation_json TEXT    NOT NULL,
+            status          TEXT    NOT NULL CHECK (status IN ('active', 'disabled', 'archived')),
+            created_utc     TEXT    NOT NULL,
+            UNIQUE (name, version)
+        )
+        """,
+        "CREATE INDEX ix_strategy_plugins_status ON strategy_plugins (name, status)",
+    ),
 }
 SCHEMA_VERSION: int = max(MIGRATIONS)
 
