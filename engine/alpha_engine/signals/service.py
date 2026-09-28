@@ -62,6 +62,7 @@ import pandas as pd
 
 from ..backtest.history import HistoryUnavailable
 from ..backtest.jobs import LruLike, PreparedHistory, prepare_history, scan_for
+from ..backtest.models import SKIP_REASON_FA, SkipReason
 from ..data.cache import CacheError, CacheLockTimeout
 from ..data.schema import Timeframe
 from ..data.timezone import OffsetError, OffsetModel
@@ -95,10 +96,13 @@ POLL_S = 15.0
 RETRY_TOLERANCE_S = 180.0
 SKEW_TOLERANCE_S = 10.0
 SKEW_WINDOW_S = 3600.0
+MIN_SKEW_SAMPLES = 1
+WARMUP_POLLS = 2  # tick polls before the first boundary check (so a skewed PC clock is known first)
 RECONNECT_BACKOFF_S = (10.0, 20.0, 40.0, 60.0, 120.0, 300.0)
 REVISION_BARS = 3
 REVISION_IGNORED = frozenset({"rr", "indicative_take_profit"})
 CHAIN_LOOKBACK = timedelta(days=90)
+ENTRY_REVISION_WINDOW = timedelta(days=7)
 EVENT_RETENTION = timedelta(days=30)
 MESSAGE_BUFFER = 500
 SHUTDOWN_JOIN_S = 5.0
@@ -110,6 +114,7 @@ MARKET_CLOSED_FA = "بازار در ساعت گذشته بسته بود (تیک�
 INCOMPLETE_FA = "کندل بسته‌شده مورد انتظار (یا کندل H4 آن) پس از مهلت تحمل در کش نیامد؛ با داده ناقص سیگنالی صادر نمی‌شود."
 MISMATCH_FA = ("تصمیم مسیر بک‌تست (اسکن کل تاریخچه) و مسیر لایو (ارزیابی همان کندل) یکسان نبود؛ سیگنالی صادر نشد و "
                "مغایرت ثبت شد.")
+MISSING_GAP_SKIP_FA = f"{SKIP_REASON_FA[SkipReason.MISSING_GAP]} (برچسب موقت: طبقه‌بندی گپ ممکن است با داده بعدی تغییر کند)"
 SUPERSEDED_FA = "داده این کندل‌ها در بروکر اصلاح شد و اسکن تازه دیگر همین ستاپ را نمی‌دهد؛ سیگنال باطل شد."
 UPDATE_REFUSED_FA = {
     "no_cache": "برای این نماد کش MT5 وجود ندارد؛ ابتدا دریافت تاریخچه (fetch_history) را اجرا کنید.",
@@ -177,6 +182,8 @@ class LiveSignals:
         self._settings = self.repo.get_settings()
         self._lock = threading.RLock()  # status fields + message buffer
         self._stop = threading.Event()
+        self._step_lock = threading.Lock()
+        self._polls = 0
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._messages: deque[tuple[int, dict[str, Any]]] = deque(maxlen=MESSAGE_BUFFER)
@@ -186,7 +193,9 @@ class LiveSignals:
         self._mt5_state: str | None = None
         self._model_label: str | None = None
         self._ticks: dict[str, dict[str, Any]] = {}
-        self._skew_samples: deque[tuple[float, float]] = deque()
+        self._tick_hours: dict[str, deque[datetime]] = {}  # UTC hours in which a tick was observed (recent)
+        self._skew_samples: deque[tuple[float, float]] = deque()  # (pc epoch, pc_now - tick_utc) of moving ticks
+        self._last_poll: dict[str, tuple[float, int]] = {}  # symbol -> (pc epoch, tick server time) of the last poll
         self._skew_s: float | None = None
         self._skew_warned = False
         self._server_now: datetime | None = None
@@ -351,7 +360,12 @@ class LiveSignals:
 
     # ------------------------------------------------------------------------------------------ the loop body
     def step(self) -> None:
-        """One scheduler iteration (module docstring). Never raises for MT5/data problems."""
+        """One scheduler iteration (module docstring). Never raises for MT5/data problems. Serialised: the
+        thread and a direct caller (tests) never run two iterations at once."""
+        with self._step_lock:
+            self._step()
+
+    def _step(self) -> None:
         pc_now = self._clock()
         with self._lock:
             settings = self._settings
@@ -371,7 +385,15 @@ class LiveSignals:
         with self._lock:
             self._model_label = model.label
         self._poll_ticks(pc_now, model)
+        self._polls += 1
         server_now = self._estimate_server_now(pc_now)
+        if self._polls < WARMUP_POLLS:
+            # the first poll cannot tell a moving market from a stale tick (clock skew unknown): never decide yet
+            with self._lock:
+                self._state = "running"
+                self._next_check_utc = pc_now + timedelta(seconds=self.poll_s)
+            self._publish_status()
+            return
         self._expire_due(server_now)
         self._tick_expiries()
         boundary = _floor_hour(server_now)
@@ -411,6 +433,7 @@ class LiveSignals:
                 self._event("mt5_status", None, {"state": "connected", "after_attempts": self._reconnect_attempts})
                 if is_dev_mode():
                     logger.debug("live signals: MT5 connected again after %d attempt(s)", self._reconnect_attempts)
+                self._polls = 0  # fresh ticks after a reconnect: warm up again
             self._mt5_state = "connected"
             self._reconnect_attempts = 0
             self._next_reconnect_pc = None
@@ -460,7 +483,19 @@ class LiveSignals:
             with self._lock:
                 self._ticks[symbol] = {"time_utc": _iso(tick_utc), "utc": tick_utc, "bid": tick.bid, "ask": tick.ask,
                                        "server_time": tick.server_time}
-            self._skew_samples.append((pc_now.timestamp(), (pc_now - tick_utc).total_seconds()))
+                hours = self._tick_hours.setdefault(symbol, deque(maxlen=48))
+                hour = _floor_hour(tick_utc)
+                if not hours or hours[-1] != hour:
+                    hours.append(hour)
+            age = (pc_now - tick_utc).total_seconds()
+            prev = self._last_poll.get(symbol)
+            self._last_poll[symbol] = (pc_now.timestamp(), tick.server_time)
+            # A skew sample needs a MOVING market: a new tick since the previous poll, and that poll recent (so the
+            # tick is at most ~one poll interval old). A stale tick (market closed) says nothing about the clocks.
+            # A tick "from the future" (age < 0) is evidence of a PC clock running behind in any case.
+            moving = prev is not None and tick.server_time != prev[1] and                 pc_now.timestamp() - prev[0] <= 2 * self.poll_s + 1
+            if moving or age < 0:
+                self._skew_samples.append((pc_now.timestamp(), age))
             if is_dev_mode():
                 logger.debug("live signals: tick %s server=%d utc=%s bid=%s ask=%s (pc %s, age %.1f s)", symbol,
                              tick.server_time, _iso(tick_utc), tick.bid, tick.ask, _iso(pc_now),
@@ -473,9 +508,11 @@ class LiveSignals:
         skew = min(d for _, d in self._skew_samples) if self._skew_samples else None
         server_now = pc_now
         warned = False
-        if skew is not None and abs(skew) > self.skew_tolerance_s:
+        if skew is not None and skew < -self.skew_tolerance_s:  # PC behind: a tick is never in the future
             server_now = pc_now - timedelta(seconds=skew)
-            warned = skew > 0
+        elif skew is not None and skew > self.skew_tolerance_s and len(self._skew_samples) >= MIN_SKEW_SAMPLES:
+            server_now = pc_now - timedelta(seconds=skew)  # PC ahead (consistently, over moving ticks)
+            warned = True
         with self._lock:
             latest = max((t["utc"] for t in self._ticks.values()), default=None)
         if latest is not None and latest > server_now:
@@ -571,10 +608,18 @@ class LiveSignals:
             tick = self._ticks.get(symbol)
         tick_utc: datetime | None = None if tick is None else tick["utc"]
         if t >= len(times_ns) or int(times_ns[t]) != exp_ns:
-            if tick_utc is None or tick_utc < expected_open:
+            # Was the market trading during the expected bar's hour? (1) a tick seen there by the polls -> the bar
+            # must come (retry); (2) else MT5 already has the NEXT bar forming -> that hour had no ticks (daily
+            # break); (3) else no tick since before that hour -> closed (weekend, holiday).
+            with self._lock:
+                seen_in_hour = expected_open in self._tick_hours.get(symbol, ())
+            forming_now = int((updated.get("H1") or {}).get("dropped_forming") or 0) > 0
+            closed = not seen_in_hour and (forming_now or tick_utc is None or tick_utc < expected_open)
+            if closed:
                 if is_dev_mode():
-                    logger.debug("live check %s: market closed (last tick %s < bar %s), last cached bar %s", symbol,
-                                 _iso(tick_utc), _iso(expected_open), _iso(h1["time"].iloc[-1]) if len(h1) else None)
+                    logger.debug("live check %s: market closed during %s (last tick %s, next bar forming=%s, tick seen "
+                                 "in that hour=%s), last cached bar %s", symbol, _iso(expected_open), _iso(tick_utc),
+                                 forming_now, seen_in_hour, _iso(h1["time"].iloc[-1]) if len(h1) else None)
                 self._record_check(symbol, boundary, "market_closed", MARKET_CLOSED_FA, info)
                 return "done"
             if within_tolerance:
@@ -848,8 +893,11 @@ class LiveSignals:
                 self._event("check", symbol, {"result": "superseded", "signal_id": row["id"], "fields": diff})
                 logger.warning("live signal %d %s @ %s superseded after a broker revision (fields %s)", row["id"],
                                symbol, row["confirmation_bar_open_utc"], diff)
-        # entry bar known now? (signals whose entry bar was not known at decision time)
-        for row in self.repo.with_status("active", symbol):
+        # entry bar known now? (signals whose entry step was unknown / provisional at decision time; active or
+        # already expired -- the expiry may have come from the tick estimate first)
+        recent = pd.Timestamp(int(times_ns[t]), tz="UTC").to_pydatetime() - ENTRY_REVISION_WINDOW
+        for row in self.repo.for_identity(symbol, active.identity.name, active.identity.version, active.params_hash,
+                                          since=recent, statuses=("active", "expired")):
             extra = _json(row["extra_json"]) or {}
             gap = extra.get("entry_gap") or {}
             if not gap.get("provisional") and row["expires_utc"] is not None:
@@ -859,15 +907,17 @@ class LiveSignals:
             if idx >= len(times_ns) or int(times_ns[idx]) != conf_ns or idx + 1 >= len(times_ns):
                 continue
             step = entry_step_info(times_ns, idx, tick_utc=None)
+            if gap == step.to_json() and row["expires_utc"] is not None:
+                continue  # nothing new
             extra["entry_gap"] = step.to_json()
             extra["entry_bar_time"] = step.to_json()["entry_bar_time"]
             fields: dict[str, Any] = {"expires_utc": step.expires, "gap_class_provisional": step.provisional,
                                       "extra_json": extra}
+            skip_reason = row["backtest_skip_reason_fa"] or ""
             if step.kind == "missing" and not row["backtest_would_skip"]:
-                from ..backtest.models import SKIP_REASON_FA, SkipReason
-
-                fields.update(backtest_would_skip=True,
-                              backtest_skip_reason_fa=f"{SKIP_REASON_FA[SkipReason.MISSING_GAP]} (برچسب موقت)")
+                fields.update(backtest_would_skip=True, backtest_skip_reason_fa=MISSING_GAP_SKIP_FA)
+            elif step.kind != "missing" and skip_reason == MISSING_GAP_SKIP_FA:
+                fields.update(backtest_would_skip=False, backtest_skip_reason_fa=None)
             self.repo.update(row["id"], **fields)
             if is_dev_mode():
                 logger.debug("live signal %d %s: entry bar %s known (step %s, provisional=%s) -> expires %s", row["id"],
