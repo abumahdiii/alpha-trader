@@ -45,8 +45,8 @@ import zipfile
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any, Literal
-from xml.sax.saxutils import escape as _xml_escape
 
 from ..logging_setup import get_logger, is_dev_mode
 from ..storage.backtests_repo import BacktestsRepo, api_time
@@ -199,6 +199,9 @@ def load_export_data(repo: BacktestsRepo, run: dict[str, Any], tables: Iterable[
 # ------------------------------------------------------------------------------------------ value helpers
 def _norm(value: Any) -> Any:
     """Presentation normalisation of one scalar: ISO UTC ``+00:00`` -> ``Z``; lists/dicts -> JSON text."""
+    kind = type(value)
+    if kind is float or kind is int or kind is bool or value is None:
+        return value
     if isinstance(value, str):
         if value.endswith("+00:00") and _ISO_UTC_OFFSET.match(value):
             return value[:-6] + "Z"
@@ -399,12 +402,15 @@ _XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff￾￿]")
 SHEET_NAME_MAX = 31
 
 
+@lru_cache(maxsize=16384)  # cells repeat a lot (direction, exit reason, rationale texts)
 def xlsx_text(text: str) -> str:
     """Text for a SpreadsheetML ``<t>`` element: ``_xHHHH_`` literals protected (``_x005F_``), XML-illegal
     characters as ``_xHHHH_`` (Excel decodes both), then ``& < > "`` escaped."""
-    text = _ST_XSTRING_ESCAPE.sub(r"_x005F_\1", text)
-    text = _XML_ILLEGAL.sub(lambda m: f"_x{ord(m.group()):04X}_", text)
-    return _xml_escape(text, {'"': "&quot;"})
+    if "_x" in text:
+        text = _ST_XSTRING_ESCAPE.sub(r"_x005F_\1", text)
+    if _XML_ILLEGAL.search(text):
+        text = _XML_ILLEGAL.sub(lambda m: f"_x{ord(m.group()):04X}_", text)
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 def _col_letter(index: int) -> str:
@@ -418,17 +424,19 @@ def _col_letter(index: int) -> str:
 
 
 def _xlsx_cell(ref: str, value: Any, style: int = 0) -> str:
-    s = f' s="{style}"' if style else ""
     if value is None:
         return ""
-    if isinstance(value, bool):
+    s = f' s="{style}"' if style else ""
+    kind = type(value)
+    if kind is str:
+        return f'<c r="{ref}"{s} t="inlineStr"><is><t xml:space="preserve">{xlsx_text(value)}</t></is></c>'
+    if kind is float:
+        return f'<c r="{ref}"{s}><v>{value!r}</v></c>' if math.isfinite(value) else ""
+    if kind is bool:
         return f'<c r="{ref}"{s} t="b"><v>{int(value)}</v></c>'
-    if isinstance(value, int) and abs(value) <= _EXCEL_EXACT_INT:
+    if kind is int and -_EXCEL_EXACT_INT <= value <= _EXCEL_EXACT_INT:
         return f'<c r="{ref}"{s}><v>{value}</v></c>'
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            return ""
-        return f'<c r="{ref}"{s}><v>{value!r}</v></c>'
+    # big ints (a 63-bit seed would be rounded by Excel's doubles) and anything else: text
     return f'<c r="{ref}"{s} t="inlineStr"><is><t xml:space="preserve">{xlsx_text(str(value))}</t></is></c>'
 
 
