@@ -14,7 +14,6 @@ import json
 import logging
 import time
 from collections import Counter
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,22 +27,19 @@ from alpha_engine.backtest.models import CostModel, RunConfig, SkipReason
 from alpha_engine.backtest.runner import run_backtest
 from alpha_engine.data.cache import OhlcvCache
 from alpha_engine.data.schema import Timeframe
-from alpha_engine.data.symbols import SymbolSpec
 from alpha_engine.data.timezone import OffsetModel
 from alpha_engine.logging_setup import ROOT_LOGGER_NAME
 from alpha_engine.market_data import MarketDataService
 from alpha_engine.mt5_adapter import Mt5Adapter
 from alpha_engine.signals import service as service_module
 from alpha_engine.signals.service import LiveSignals
-from alpha_engine.storage.account_settings import AccountSettings, AccountSettingsRepo
+from alpha_engine.storage.account_settings import AccountSettingsRepo
 from alpha_engine.storage.db import open_db
 from alpha_engine.strategies.stddev_channel import StdDevChannelStrategy
-from alpha_engine.strategy.base import Strategy, StrategyContext, bar_open_times
-from alpha_engine.strategy.params import ParamSchema, ParamSpec, params_hash
 from alpha_engine.strategy.registry import StrategyRegistry
 from alpha_engine.strategy.resolve import resolve_active
 from alpha_engine.strategy.signal import SignalCandidate
-from fixtures.live_market import LiveFakeMt5, MarketClock, seed_mt5_cache
+from fixtures.live_market import LiveFakeMt5, MarketClock, ScheduledBuy, seed_mt5_cache
 from fixtures.synthetic_ohlcv import generate_dataset
 
 GOLD, BRENT = "XAUUSD.x", "BRNUSD.x"
@@ -58,54 +54,6 @@ def utc(*args: int) -> datetime:
 
 def server_epoch(when: datetime) -> int:
     return int(MODEL.utc_to_server([int(when.timestamp())])[0])
-
-
-# ---------------------------------------------------------------------------------------------- test strategy
-class ScheduledBuy(Strategy):
-    """Deterministic test strategy: a BUY on every H1 bar whose open time is in ``bars`` (ISO ``...Z``);
-    SL = low - ``sl_buffer``, reference = close. O(n) scan == per-bar evaluate."""
-
-    name: ClassVar[str] = "scheduled_buy"
-    version: ClassVar[int] = 1
-    title_fa: ClassVar[str] = "خرید زمان‌بندی‌شده (آزمایشی)"
-    param_schema: ClassVar[ParamSchema] = ParamSchema([
-        ParamSpec(name="sl_buffer", type="float", default=1.0, min=0.0, max=100.0, label_fa="فاصله حد ضرر"),
-    ])
-    bars: ClassVar[frozenset[str]] = frozenset()
-
-    def _cand(self, symbol: str, open_t: pd.Timestamp, low: float, close: float, p: Mapping[str, Any],
-              account: AccountSettings) -> SignalCandidate | None:
-        if open_t.strftime("%Y-%m-%dT%H:%M:%SZ") not in self.bars:
-            return None
-        sl = low - float(p["sl_buffer"])
-        if not 0 < sl < close:
-            return None
-        open_dt = open_t.to_pydatetime()
-        return SignalCandidate(
-            strategy_name=self.name, strategy_version=self.version, params_hash=params_hash(dict(p)), symbol=symbol,
-            direction="buy", setup="scheduled", line=None, setup_title_fa="ستاپ زمان‌بندی‌شده",
-            decision_time_utc=open_dt + H1, confirmation_bar_open_utc=open_dt, reference_price=close, stop_loss=sl,
-            rr=account.rr, pattern="scheduled", reason_fa="کندل زمان‌بندی‌شده آزمایشی", extra={"low": low})
-
-    def evaluate(self, ctx: StrategyContext) -> SignalCandidate | None:
-        if ctx.has_open_trade or len(ctx.h1) == 0:
-            return None
-        p = self.clean_params(ctx.params)
-        last = ctx.h1.iloc[-1]
-        return self._cand(ctx.symbol, pd.Timestamp(bar_open_times(ctx.h1)[-1]), float(last["low"]),
-                          float(last["close"]), p, ctx.account)
-
-    def scan(self, h1: pd.DataFrame, h4: pd.DataFrame, params: Mapping[str, Any] | None, account: AccountSettings,
-             *, symbol: str) -> list[SignalCandidate]:
-        p = self.clean_params(params)
-        times = bar_open_times(h1)
-        lows, closes = h1["low"].tolist(), h1["close"].tolist()
-        out = []
-        for i, open_t in enumerate(times):
-            cand = self._cand(symbol, pd.Timestamp(open_t), float(lows[i]), float(closes[i]), p, account)
-            if cand is not None:
-                out.append(cand)
-        return out
 
 
 # ---------------------------------------------------------------------------------------------- environment

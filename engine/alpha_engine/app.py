@@ -218,8 +218,10 @@ def start_live_signals(app: FastAPI) -> Any:
     if db is None:
         return None
     try:
-        live = LiveSignals(db, app.state.market_data, registry=getattr(app.state, "strategy_registry", None),
-                           lru=getattr(app.state, "chart_cache", None))
+        market = app.state.market_data
+        live = LiveSignals(db, market, registry=getattr(app.state, "strategy_registry", None),
+                           lru=getattr(app.state, "chart_cache", None),
+                           clock=getattr(market, "clock", None) or (lambda: datetime.now(timezone.utc)))
         live.start()
     except Exception as exc:
         logger.error("live signals could not be started (%s: %s)", type(exc).__name__, exc)

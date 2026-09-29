@@ -8,6 +8,7 @@
   bar's prices (broker revision). ``symbol_info_tick`` returns the tick at the true time: during a bar its
   server time is the true time (bid = the bar's open, ask = bid + spread * point); while the market is closed,
   the last tick of the last bar (open + 3599 s, bid = its close).
+* :class:`ScheduledBuy` -- a deterministic test strategy (a buy on chosen bars) for expiry / revision scenarios.
 * :func:`seed_mt5_cache` writes the initial cache the way ``fetch_history`` would (a full MT5 fetch up to the
   true time + the symbol spec), so the scheduler's incremental updates are allowed.
 
@@ -16,17 +17,22 @@ Never a terminal, never the network, never the real ``data/``.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
+import pandas as pd
 
 from alpha_engine.data.schema import Timeframe
 from alpha_engine.data.symbols import SymbolSpec
 from alpha_engine.data.timezone import OffsetModel
+from alpha_engine.storage.account_settings import AccountSettings
+from alpha_engine.strategy.base import Strategy, StrategyContext, bar_open_times
+from alpha_engine.strategy.params import ParamSchema, ParamSpec, params_hash
+from alpha_engine.strategy.signal import SignalCandidate
 
 from .fake_mt5 import _TF_BY_CONST, FakeMt5
 from .synthetic_ohlcv import MT5_RATES_DTYPE, SyntheticSeries, symbol_info_dict
@@ -118,7 +124,57 @@ def seed_mt5_cache(service: Any, symbols: Iterable[str], start: datetime) -> Non
         service.cache.write_spec(SymbolSpec.from_mt5(symbol_info_dict(symbol)), "mt5")
 
 
-__all__ = ["LiveFakeMt5", "MarketClock", "seed_mt5_cache", "utc"]
+_H1 = timedelta(hours=1)
+
+
+class ScheduledBuy(Strategy):
+    """Deterministic test strategy: a BUY on every H1 bar whose open time is in ``bars`` (ISO ``...Z``);
+    SL = low - ``sl_buffer``, reference = close. O(n) scan == per-bar evaluate."""
+
+    name: ClassVar[str] = "scheduled_buy"
+    version: ClassVar[int] = 1
+    title_fa: ClassVar[str] = "خرید زمان‌بندی‌شده (آزمایشی)"
+    param_schema: ClassVar[ParamSchema] = ParamSchema([
+        ParamSpec(name="sl_buffer", type="float", default=1.0, min=0.0, max=100.0, label_fa="فاصله حد ضرر"),
+    ])
+    bars: ClassVar[frozenset[str]] = frozenset()
+
+    def _cand(self, symbol: str, open_t: pd.Timestamp, low: float, close: float, p: Mapping[str, Any],
+              account: AccountSettings) -> SignalCandidate | None:
+        if open_t.strftime("%Y-%m-%dT%H:%M:%SZ") not in self.bars:
+            return None
+        sl = low - float(p["sl_buffer"])
+        if not 0 < sl < close:
+            return None
+        open_dt = open_t.to_pydatetime()
+        return SignalCandidate(
+            strategy_name=self.name, strategy_version=self.version, params_hash=params_hash(dict(p)), symbol=symbol,
+            direction="buy", setup="scheduled", line=None, setup_title_fa="ستاپ زمان‌بندی‌شده",
+            decision_time_utc=open_dt + _H1, confirmation_bar_open_utc=open_dt, reference_price=close, stop_loss=sl,
+            rr=account.rr, pattern="scheduled", reason_fa="کندل زمان‌بندی‌شده آزمایشی", extra={"low": low})
+
+    def evaluate(self, ctx: StrategyContext) -> SignalCandidate | None:
+        if ctx.has_open_trade or len(ctx.h1) == 0:
+            return None
+        p = self.clean_params(ctx.params)
+        last = ctx.h1.iloc[-1]
+        return self._cand(ctx.symbol, pd.Timestamp(bar_open_times(ctx.h1)[-1]), float(last["low"]),
+                          float(last["close"]), p, ctx.account)
+
+    def scan(self, h1: pd.DataFrame, h4: pd.DataFrame, params: Mapping[str, Any] | None, account: AccountSettings,
+             *, symbol: str) -> list[SignalCandidate]:
+        p = self.clean_params(params)
+        times = bar_open_times(h1)
+        lows, closes = h1["low"].tolist(), h1["close"].tolist()
+        out = []
+        for i, open_t in enumerate(times):
+            cand = self._cand(symbol, pd.Timestamp(open_t), float(lows[i]), float(closes[i]), p, account)
+            if cand is not None:
+                out.append(cand)
+        return out
+
+
+__all__ = ["LiveFakeMt5", "MarketClock", "ScheduledBuy", "seed_mt5_cache", "utc"]
 
 
 def utc(*args: int) -> datetime:
