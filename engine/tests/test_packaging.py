@@ -84,6 +84,26 @@ def test_entry_delegates_to_package_main() -> None:
     assert "freeze_support" in ENTRY.read_text(encoding="utf-8")
 
 
+def test_entry_dispatches_the_plugin_worker_before_importing_the_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``alpha_engine.exe --plugin-worker`` must reach ``run_worker`` without importing ``alpha_engine.__main__``
+    (uvicorn / app / settings) -- the same guarantee as ``python -m alpha_engine --plugin-worker``."""
+    import sys
+    import types
+
+    module = _load_entry()
+    calls: list[str] = []
+    fake_worker = types.ModuleType("alpha_engine.plugins.worker")
+    fake_worker.run_worker = lambda: calls.append("worker") or 0  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "alpha_engine.plugins.worker", fake_worker)
+    monkeypatch.setitem(sys.modules, "alpha_engine.__main__", None)  # importing it would raise ImportError
+    monkeypatch.setattr(module.multiprocessing, "freeze_support", lambda: calls.append("freeze_support"))
+    monkeypatch.setattr(sys, "argv", ["alpha_engine.exe", "--plugin-worker"])
+    assert module.run() == 0
+    assert calls == ["worker"]
+    source = ENTRY.read_text(encoding="utf-8")
+    assert source.index("run_worker") < source.index("from alpha_engine.__main__ import main")
+
+
 # --- alpha_engine.spec -----------------------------------------------------------------------------
 
 def test_spec_is_valid_python(tmp_path: Path) -> None:
@@ -113,7 +133,7 @@ def test_spec_is_onedir_console_less_without_upx() -> None:
     '"alpha_engine"', '"uvicorn"', "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
     "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on", '"websockets"', '"fastapi"',
     '"pydantic"', "pydantic_core", '"pandas"', '"pyarrow"', '"numpy"', '"MetaTrader5"',
-    "MetaTrader5._core", '"dotenv"',
+    "MetaTrader5._core", '"dotenv"', "alpha_engine.plugins.worker", "alpha_engine.plugins.validator",
 ])
 def test_spec_hidden_imports(needle: str) -> None:
     text = SPEC.read_text(encoding="utf-8")

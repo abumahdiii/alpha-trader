@@ -48,11 +48,15 @@ class _ChartPageState extends State<_ChartPage> {
     super.dispose();
   }
 
-  /// «بک‌تست همین بازه»: the backtest page, prefilled with the symbol and the
-  /// engine's backtest_window (exactly as received), runs it at once.
+  /// «بک‌تست همین بازه»: the backtest page, prefilled with the symbol, the
+  /// engine's backtest_window (exactly as received) and the strategy of the
+  /// shown setups, runs it at once.
   void _openBacktest(BacktestRangeRequest r) {
-    devLog('[ChartScreen] backtest this range -> $r');
-    context.read<ShellNavigation>().openBacktest(symbol: r.symbol, from: r.from, to: r.to, autoRun: true);
+    final String strategy = r.strategy ?? _controller.strategy;
+    devLog('[ChartScreen] backtest this range -> $r (strategy $strategy)');
+    context
+        .read<ShellNavigation>()
+        .openBacktest(symbol: r.symbol, from: r.from, to: r.to, strategy: strategy, autoRun: true);
   }
 
   @override

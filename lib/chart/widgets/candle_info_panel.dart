@@ -10,13 +10,22 @@ import '../../models/chart_models.dart';
 /// tick volume, spread, and the engine's channel lines / slope / direction /
 /// ATR at that bar. Closed with [onClose] (the close button).
 class CandleInfoPanel extends StatelessWidget {
-  const CandleInfoPanel({super.key, required this.data, required this.index, required this.onClose});
+  const CandleInfoPanel({
+    super.key,
+    required this.data,
+    required this.index,
+    required this.onClose,
+    this.noChannelFa,
+  });
 
   final ChartData data;
 
   /// Bar to show; must be a valid index of [data].
   final int index;
   final VoidCallback onClose;
+
+  /// Set for a strategy without a channel: this note replaces the channel rows.
+  final String? noChannelFa;
 
   @override
   Widget build(BuildContext context) {
@@ -51,7 +60,13 @@ class CandleInfoPanel extends StatelessWidget {
       _row('اسپرد (پوینت)', '${c.spread}'),
       const Divider(height: 10),
     ];
-    if (p == null || !p.drawable) {
+    if (noChannelFa != null) {
+      rows.add(Text(
+        noChannelFa!,
+        key: const ValueKey<String>('candle-info-no-channel'),
+        style: tt.bodySmall?.copyWith(color: colors.mutedText),
+      ));
+    } else if (p == null || !p.drawable) {
       rows.add(Text(
         p == null ? 'برای این کندل مقدار کانال نیامده است.' : 'کانال در این کندل معتبر نیست (دوره گرم‌شدن).',
         style: tt.bodySmall?.copyWith(color: colors.mutedText),

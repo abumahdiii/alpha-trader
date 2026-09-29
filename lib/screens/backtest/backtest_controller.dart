@@ -8,6 +8,7 @@ import '../../core/dev_mode.dart';
 import '../../core/number_format.dart';
 import '../../models/backtest_models.dart';
 import '../../models/market_data.dart';
+import '../../models/strategy.dart';
 import '../../providers/shell_navigation.dart';
 import '../../services/backtest_progress.dart';
 import '../../services/engine_api.dart';
@@ -108,6 +109,48 @@ class BacktestController extends ChangeNotifier {
     return null;
   }
 
+  // ---------------------------------------------------------- strategies
+
+  List<StrategyOption> _strategies = const [];
+  String _strategy = kDefaultStrategyName;
+
+  /// The selector's entries (`/strategies` + plugin badges); empty until
+  /// loaded or when that failed (the form then runs [strategy] = default).
+  List<StrategyOption> get strategies => _strategies;
+
+  /// The strategy the next run uses (`strategy` in the body and the limits query).
+  String get strategy => _strategy;
+
+  StrategyOption? get strategyOption {
+    for (final StrategyOption o in _strategies) {
+      if (o.name == _strategy) return o;
+    }
+    return null;
+  }
+
+  void setStrategy(String name) {
+    if (name == _strategy) return;
+    _log('form: strategy $_strategy -> $name');
+    _strategy = name;
+    _submitError = null;
+    _generalErrors = const [];
+    _notify();
+    unawaited(loadLimits());
+  }
+
+  Future<void> _loadStrategies() async {
+    try {
+      final List<StrategyOption> list = await api.listStrategyOptions();
+      if (_disposed) return;
+      _strategies = list;
+      _log('strategies: ${list.map((StrategyOption s) => '${s.name} v${s.version}(${s.source.code})').toList()}');
+    } on EngineApiException catch (e) {
+      if (_disposed) return;
+      _log('strategies failed (selector shows only $_strategy): $e');
+    }
+    _notify();
+  }
+
   // --------------------------------------------------------------- form
 
   String? _symbol;
@@ -199,17 +242,19 @@ class BacktestController extends ChangeNotifier {
   // ------------------------------------------------------------- limits
 
   BacktestLimits? _limits;
+  String? _limitsStrategy;
   int _limitsSerial = 0;
 
-  /// The engine's allowed manual period of the selected symbol
+  /// The engine's allowed manual period of the selected symbol and strategy
   /// (`GET /backtests/limits`); null while unknown or when the call failed
   /// (the form then works unbounded and the engine validates on submit).
-  BacktestLimits? get limits => _limits?.symbol == _symbol ? _limits : null;
+  BacktestLimits? get limits => _limits?.symbol == _symbol && _limitsStrategy == _strategy ? _limits : null;
 
-  /// Refetches [limits] for the selected symbol. Never throws; a failure
-  /// only leaves [limits] null.
+  /// Refetches [limits] for the selected symbol and strategy. Never throws;
+  /// a failure only leaves [limits] null.
   Future<void> loadLimits() async {
     final String? symbol = _symbol;
+    final String strategy = _strategy;
     final int serial = ++_limitsSerial;
     if (symbol == null) {
       _limits = null;
@@ -217,15 +262,18 @@ class BacktestController extends ChangeNotifier {
       return;
     }
     try {
-      final BacktestLimits l = await api.getBacktestLimits(symbol);
+      final BacktestLimits l = await api.getBacktestLimits(symbol, strategy: strategy);
       if (_disposed || serial != _limitsSerial) return;
       _limits = l;
+      _limitsStrategy = strategy;
       final days = l.pickableDays;
-      _log('limits $symbol: $l -> pickable days ${days == null ? 'none' : '${days.first} .. ${days.last}'}');
+      _log('limits $symbol ($strategy): $l -> pickable days '
+          '${days == null ? 'none' : '${days.first} .. ${days.last}'}');
     } on EngineApiException catch (e) {
       if (_disposed || serial != _limitsSerial) return;
       _limits = null;
-      _log('limits $symbol failed (form stays unbounded): $e');
+      _limitsStrategy = null;
+      _log('limits $symbol ($strategy) failed (form stays unbounded): $e');
     }
     _notify();
   }
@@ -346,6 +394,9 @@ class BacktestController extends ChangeNotifier {
       SpreadChoice.zero => 0,
       SpreadChoice.custom => _customSpreadPoints,
     };
+    // The picked code version pins the run: the engine refuses it (404) if
+    // the registered code changed after the list was read.
+    final int? strategyVersion = strategyOption?.version;
     if (_mode == BacktestMode.manual) {
       final bool exact = hasExactPeriod;
       return BacktestRequest.manual(
@@ -355,6 +406,8 @@ class BacktestController extends ChangeNotifier {
         to: exact ? _exactTo! : _toDay!.add(const Duration(days: 1)),
         commissionPerLotPerSide: _commission,
         fallbackSpreadPoints: fallback,
+        strategy: _strategy,
+        strategyVersion: strategyVersion,
       );
     }
     return BacktestRequest.random(
@@ -364,6 +417,8 @@ class BacktestController extends ChangeNotifier {
       seed: _seedText.isEmpty ? null : _parseSeed(_seedText),
       commissionPerLotPerSide: _commission,
       fallbackSpreadPoints: fallback,
+      strategy: _strategy,
+      strategyVersion: strategyVersion,
     );
   }
 
@@ -439,7 +494,13 @@ class BacktestController extends ChangeNotifier {
     _log('prefill $p');
     final bool symbolChanged = p.symbol != _symbol;
     _symbol = p.symbol;
-    if (symbolChanged) unawaited(loadLimits());
+    final String? strategy = p.strategy;
+    final bool strategyChanged = strategy != null && strategy != _strategy;
+    if (strategyChanged) {
+      _log('prefill: strategy $_strategy -> $strategy');
+      _strategy = strategy;
+    }
+    if (symbolChanged || strategyChanged) unawaited(loadLimits());
     _mode = BacktestMode.manual;
     final DateTime? from = p.from?.toUtc();
     final DateTime? to = p.to?.toUtc();
@@ -726,7 +787,7 @@ class BacktestController extends ChangeNotifier {
   /// rebuilt after an engine restart) is followed and opened again.
   Future<void> init() async {
     _log('init (engine :${api.port})');
-    await Future.wait([_loadSymbols(), loadRuns()]);
+    await Future.wait([_loadSymbols(), loadRuns(), _loadStrategies()]);
     if (_disposed) return;
     _initialized = true;
     BacktestRunSummary? active;

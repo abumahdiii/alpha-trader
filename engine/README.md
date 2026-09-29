@@ -182,6 +182,41 @@ margin 40; brent SL 0.50 -> 0.02 lots, margin 16 with an explicit balance 1000, 
 With the default balance 2500: risk 25.00 -> gold 25 / 500 = 0.05 lots, margin 0.05 * 100 * 2000 / 100 = 100;
 brent 25 / (0.50 * 1000) = 0.05 lots, margin 0.05 * 1000 * 80 / 100 = 40).
 
+### Strategy plugins (uploaded Python files, sandboxed)
+
+A user (or an LLM agent) uploads ONE Python file defining one `Strategy` subclass. The engine never imports it:
+it is checked statically, then run **only in an isolated worker process**, and usable in the chart and the
+backtests (not live yet). Package `alpha_engine/plugins/`; routes `alpha_engine/routes/plugins.py`.
+
+| Layer | Where | What |
+|---|---|---|
+| Static (parent) | `plugins/validator.py` | <= 256 KiB, UTF-8, `ast.parse`; import whitelist (numpy, pandas, math, statistics, dataclasses, typing; `from alpha_engine.{strategy,indicators,patterns,risk.sizing} import ...` only); no `exec/eval/compile/__import__/open/getattr/setattr/type/...`, no dunder names/attributes/strings, no `_private` attribute except on `self`/`cls`, no OS/process/clock/I-O names (`os`, `sys`, `read_*`, `to_pickle`, `now`, ...), no MT5 order-API names or MT5 package name; exactly one top-level `Strategy` subclass with literal `name` (not reserved) / `version` / `title_fa`, `param_schema`, `evaluate`; may not override `validate_params`/`clean_params` or set `source`/`code_sha256`. Owns the banned-name scanner shared with `tests/test_no_order_calls.py`. |
+| Worker (child) | `plugins/worker.py` | `python -E -s -S -B -m alpha_engine --plugin-worker` (frozen: `<exe> --plugin-worker`), dispatched at the top of `__main__` before uvicorn/app/settings import; never calls `get_settings()`. Boot: parent's `sys.path` from the `go` line, MT5/pyarrow/numexpr/... set to `None` in `sys.modules`, numpy/pandas/helpers pre-imported and warmed up; then an irreversible lock: `sys.meta_path` finder + `sys.addaudithook` (denies sockets, subprocess/`os.system`/`os.exec*`/`os.spawn*`/`os.startfile`/`_winapi`, `ctypes`, `winreg`, `gc`/`sys.*` introspection, `__code__`/`__defaults__` rewrites, every file write, reads and listings outside the Python installation / site-packages / the engine package, and every non-whitelisted `import` event). The plugin runs in a fresh module with restricted builtins (no `open/exec/eval/getattr/...`, `print` is a no-op) and a whitelist `__import__`. JSON lines only (`describe`, `scan`, `evaluate`, `meta`, `shutdown`); frames as columns; candidates as `SignalCandidate.model_dump(mode="json")`. Never pickle. |
+| Host (parent) | `plugins/host.py` | Minimal env (`SYSTEMROOT`, `PYTHONIOENCODING`, `DEV_MODE`), `CREATE_NO_WINDOW`, **Windows Job Object before `go`**: 1 GiB process + job memory, 1 active process, UI limits, kill-on-close (fail closed if it cannot be set). Per-request deadline -> job terminated; semaphore (2 workers); strict JSON (no NaN, 64 MiB line cap, request id). Every answer re-validated (`ParamSchema` rebuilt, `SignalCandidate.model_validate`, this name/version/symbol/params hash, one per bar, chronological, not before `first_valid_index`). `PluginStrategyProxy`: `source = "plugin"`, `code_sha256` = file SHA-256 -> provenance and cache keys. |
+| Dynamic (parent) | `plugins/checks.py` | On `plugins/fixture.random_walk(3000, seed=20260928)`: describe matches the literal identity; >= 1 candidate; determinism (3 scans: same worker + a fresh worker); prefix equivalence (`evaluate` on the closed prefix of <= 40 candidate bars + 20 other bars + the last bar == scan); future mutation and truncation at 2 seeded cut-offs (candidates before the cut-off unchanged); 30 s plugin-time budget; peak memory reported. Floats compared at rel 1e-9. |
+
+**Storage:** `<data_dir>/strategies/plugins/<name>/<version>-<sha12>.py` (+ `.json` manifest), table
+`strategy_plugins` (DB migration **v3**, `UNIQUE(name, version)`, status `active|disabled|archived`, no FK). The
+SHA-256 (of the UTF-8 text, BOM removed) is re-checked on every load; a modified file is never run. Strict
+versions: same name+version+sha -> idempotent; different sha -> 409; old versions are kept; delete = archive
+(files moved to `archive/`). The lifespan registers each name's latest **active** version (`registry.replace`) and
+logs/skips broken files; shutdown unregisters them.
+
+| Route | Response |
+|---|---|
+| `GET /plugins/template` | `{filename, content}` (two-MA crossover, contract + prohibitions + self-test in the docstring) |
+| `POST /plugins` body `{filename, source}` | 201 new version / 200 same file (archived copy restored) -> `{name, version, sha256, title_fa, status, param_schema, validation: {static: [...], dynamic: {bars, candidates, prefix_checks, determinism, future_mutation, elapsed_s, budget_s, worker_boot_s, peak_memory_mib}}, filename, created_utc, registered}`; 409 `version_conflict`; 422 `invalid_plugin` (Persian `errors_fa`, `خط N:` prefixes) / `invalid_body` |
+| `GET /plugins` | every stored version, newest first per name |
+| `POST /plugins/{name}/{version}/disable` \| `/enable` | item; 404 `plugin_not_found`; 409 `plugin_archived` / `plugin_file_invalid` |
+| `DELETE /plugins/{name}/{version}` | archive -> item; 409 `plugin_in_use` while a queued/running backtest uses it |
+
+A registered plugin appears in `/strategies` (params store as usual) and is selected with `strategy=<name>` in
+`/chart/setups`, `/backtests/limits` and `POST /backtests`; results record `strategy_source = "plugin"` and
+`strategy_sha256` = the file hash. Self-test without the app: `python -m alpha_engine --plugin-check file.py`
+(same checks, JSON report, exit 0 = accepted; reads no settings). Measured timings (template, this dev machine): upload
+validation 5.5 s (two worker boots of ~1.4 s each, peak ~280 MiB); a 5-year synthetic scan (31 200 H1 bars, 928
+candidates) 2.1 s end to end, of which ~1.4 s is the worker boot (one fresh worker per call).
+
 ### Channel check tool (cache only, no MT5)
 
 ```

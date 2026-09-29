@@ -12,6 +12,7 @@ import 'package:flutter/foundation.dart';
 
 import 'json_reader.dart';
 import 'market_data.dart';
+import 'strategy.dart';
 
 /// Required ISO-8601 UTC timestamp.
 DateTime _utc(JsonReader r, String key) {
@@ -399,12 +400,14 @@ class ChannelPoint {
 }
 
 /// Strategy provenance shared by both chart responses. Mirrors
-/// `_StrategyInfo` (routes/chart.py:110-116).
+/// `_StrategyInfo` (routes/chart.py).
 @immutable
 class StrategyProvenance {
   const StrategyProvenance({
     required this.strategy,
     required this.strategyVersion,
+    this.strategySource = StrategySource.builtin,
+    this.strategySha256,
     required this.paramsVersion,
     required this.paramsHash,
     required this.params,
@@ -412,6 +415,12 @@ class StrategyProvenance {
 
   final String strategy;
   final int strategyVersion;
+
+  /// `builtin` | `plugin` (absent on an older engine = builtin).
+  final StrategySource strategySource;
+
+  /// SHA-256 of an uploaded plugin's file; null for built-in strategies.
+  final String? strategySha256;
   final int paramsVersion;
   final String paramsHash;
   final Map<String, Object?> params;
@@ -419,6 +428,8 @@ class StrategyProvenance {
   factory StrategyProvenance.read(JsonReader r) => StrategyProvenance(
         strategy: r.str('strategy'),
         strategyVersion: r.integer('strategy_version'),
+        strategySource: StrategySource.parse(r.strOrNull('strategy_source')),
+        strategySha256: r.strOrNull('strategy_sha256'),
         paramsVersion: r.integer('params_version'),
         paramsHash: r.str('params_hash'),
         params: _rawMap(r, 'params'),
@@ -509,11 +520,15 @@ enum ChannelLine {
 
   final String titleFa;
 
-  static ChannelLine parse(String code) => switch (code) {
+  static ChannelLine parse(String code) => tryParse(code) ?? (throw FormatException('unknown channel line "$code"'));
+
+  /// null for a strategy without channel lines (`line: null`) or a line
+  /// name this UI does not know (shown without a line, never a failure).
+  static ChannelLine? tryParse(String? code) => switch (code) {
         'lower' => ChannelLine.lower,
         'mid' => ChannelLine.mid,
         'upper' => ChannelLine.upper,
-        _ => throw FormatException('unknown channel line "$code"'),
+        _ => null,
       };
 }
 
@@ -680,7 +695,7 @@ class SetupItem {
     required this.setupTitleFa,
     required this.direction,
     required this.pattern,
-    required this.line,
+    this.line,
     this.lineValue,
     this.channelDirection,
     required this.confirmationBarTime,
@@ -712,11 +727,17 @@ class SetupItem {
   final String symbol;
   final SetupStatus status;
   final String? rejectionReasonFa;
+
+  /// A StdDev setup (`bounce_lower`, ...) or another strategy's slug.
   final String setupType;
+
+  /// The engine's title (for a slug without a title: the slug itself).
   final String setupTitleFa;
   final TradeSide direction;
   final String pattern;
-  final ChannelLine line;
+
+  /// null: the strategy has no channel lines (plugins).
+  final ChannelLine? line;
   final double? lineValue;
   final String? channelDirection;
 
@@ -767,45 +788,54 @@ class SetupItem {
 
   String get patternTitleFa => patternTitlesFa[pattern] ?? pattern;
 
-  /// The setup title, plus the channel line when the title does not name it.
-  String get typeTitleFa => setupTitleFa.contains(line.titleFa) ? setupTitleFa : '$setupTitleFa (${line.titleFa})';
+  /// The setup title, plus the channel line when there is one and the title
+  /// does not name it.
+  String get typeTitleFa {
+    final ChannelLine? l = line;
+    if (l == null || setupTitleFa.contains(l.titleFa)) return setupTitleFa;
+    return '$setupTitleFa (${l.titleFa})';
+  }
 
-  factory SetupItem.read(JsonReader r) => SetupItem(
-        id: r.str('id'),
-        symbol: r.str('symbol'),
-        status: SetupStatus.parse(r.str('status')),
-        rejectionReasonFa: r.strOrNull('rejection_reason_fa'),
-        setupType: r.str('setup_type'),
-        setupTitleFa: r.str('setup_title_fa'),
-        direction: TradeSide.parse(r.str('direction')),
-        pattern: r.str('pattern'),
-        line: ChannelLine.parse(r.str('line')),
-        lineValue: r.numberOrNull('line_value'),
-        channelDirection: r.strOrNull('channel_direction'),
-        confirmationBarTime: _utc(r, 'confirmation_bar_time'),
-        decisionTime: _utc(r, 'decision_time'),
-        entryTime: r.utcOrNull('entry_time'),
-        entry: r.numberOrNull('entry'),
-        entryBidOpen: r.numberOrNull('entry_bid_open'),
-        spreadAtEntryPoints: r.intOrNull('spread_at_entry_points'),
-        entrySpreadSource: EntrySpreadSource.parse(r.strOrNull('entry_spread_source')),
-        stopLoss: r.number('stop_loss'),
-        takeProfit: r.numberOrNull('take_profit'),
-        rr: r.number('rr'),
-        riskDistance: r.numberOrNull('risk_distance'),
-        referencePrice: r.number('reference_price'),
-        indicativeTakeProfit: r.number('indicative_take_profit'),
-        volume: r.numberOrNull('volume'),
-        actualRisk: r.numberOrNull('actual_risk'),
-        margin: r.numberOrNull('margin'),
-        riskAmount: r.numberOrNull('risk_amount'),
-        volumeNoteFa: r.strOrNull('volume_note_fa'),
-        sizingWarningsFa: _strings(r, 'sizing_warnings_fa'),
-        reasonFa: r.str('reason_fa'),
-        indicators: _rawMap(r, 'indicators'),
-        outcome: _objectOrNull(r, 'outcome', SetupOutcome.read),
-        backtest: _objectOrNull(r, 'backtest', SetupBacktestFlag.read),
-      );
+  factory SetupItem.read(JsonReader r) {
+    final String setupType = r.str('setup_type');
+    final String? title = r.strOrNull('setup_title_fa');
+    return SetupItem(
+      id: r.str('id'),
+      symbol: r.str('symbol'),
+      status: SetupStatus.parse(r.str('status')),
+      rejectionReasonFa: r.strOrNull('rejection_reason_fa'),
+      setupType: setupType,
+      setupTitleFa: title == null || title.trim().isEmpty ? setupType : title,
+      direction: TradeSide.parse(r.str('direction')),
+      pattern: r.strOrNull('pattern') ?? '',
+      line: ChannelLine.tryParse(r.strOrNull('line')),
+      lineValue: r.numberOrNull('line_value'),
+      channelDirection: r.strOrNull('channel_direction'),
+      confirmationBarTime: _utc(r, 'confirmation_bar_time'),
+      decisionTime: _utc(r, 'decision_time'),
+      entryTime: r.utcOrNull('entry_time'),
+      entry: r.numberOrNull('entry'),
+      entryBidOpen: r.numberOrNull('entry_bid_open'),
+      spreadAtEntryPoints: r.intOrNull('spread_at_entry_points'),
+      entrySpreadSource: EntrySpreadSource.parse(r.strOrNull('entry_spread_source')),
+      stopLoss: r.number('stop_loss'),
+      takeProfit: r.numberOrNull('take_profit'),
+      rr: r.number('rr'),
+      riskDistance: r.numberOrNull('risk_distance'),
+      referencePrice: r.number('reference_price'),
+      indicativeTakeProfit: r.number('indicative_take_profit'),
+      volume: r.numberOrNull('volume'),
+      actualRisk: r.numberOrNull('actual_risk'),
+      margin: r.numberOrNull('margin'),
+      riskAmount: r.numberOrNull('risk_amount'),
+      volumeNoteFa: r.strOrNull('volume_note_fa'),
+      sizingWarningsFa: _strings(r, 'sizing_warnings_fa'),
+      reasonFa: r.str('reason_fa'),
+      indicators: _rawMap(r, 'indicators'),
+      outcome: _objectOrNull(r, 'outcome', SetupOutcome.read),
+      backtest: _objectOrNull(r, 'backtest', SetupBacktestFlag.read),
+    );
+  }
 }
 
 /// An optional nested object: absent (older engine) or null -> null.

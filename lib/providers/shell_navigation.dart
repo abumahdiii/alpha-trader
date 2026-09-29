@@ -10,7 +10,7 @@ enum ShellPage { chart, systems, backtest, signal, settings }
 /// (e.g. «بک‌تست همین بازه» from the chart). Consumed once by the page.
 @immutable
 class BacktestPrefill {
-  const BacktestPrefill({required this.symbol, this.from, this.to, this.autoRun = false});
+  const BacktestPrefill({required this.symbol, this.from, this.to, this.strategy, this.autoRun = false});
 
   final String symbol;
 
@@ -18,12 +18,15 @@ class BacktestPrefill {
   final DateTime? from;
   final DateTime? to;
 
+  /// Strategy to backtest (the chart's selected system); null keeps the form's.
+  final String? strategy;
+
   /// Submit right away once the form is filled.
   final bool autoRun;
 
   @override
   String toString() => 'BacktestPrefill($symbol ${from?.toUtc().toIso8601String()} .. '
-      '${to?.toUtc().toIso8601String()} autoRun=$autoRun)';
+      '${to?.toUtc().toIso8601String()} strategy=${strategy ?? '-'} autoRun=$autoRun)';
 }
 
 /// Which shell page is shown, plus cross-page requests (a pending backtest
@@ -47,10 +50,16 @@ class ShellNavigation extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Opens the backtest page with [symbol] and the manual period
-  /// `[from, to)`; with [autoRun] the page submits it at once.
-  void openBacktest({required String symbol, DateTime? from, DateTime? to, bool autoRun = false}) {
-    _pendingBacktest = BacktestPrefill(symbol: symbol, from: from, to: to, autoRun: autoRun);
+  /// Opens the backtest page with [symbol], the manual period `[from, to)`
+  /// and [strategy]; with [autoRun] the page submits it at once.
+  void openBacktest({
+    required String symbol,
+    DateTime? from,
+    DateTime? to,
+    String? strategy,
+    bool autoRun = false,
+  }) {
+    _pendingBacktest = BacktestPrefill(symbol: symbol, from: from, to: to, strategy: strategy, autoRun: autoRun);
     _log('[ShellNavigation] openBacktest $_pendingBacktest');
     _page = ShellPage.backtest;
     notifyListeners();

@@ -19,9 +19,13 @@ Frozen-startup concerns handled here (and only here):
 3. ``multiprocessing.freeze_support()`` -- a no-op today, but required before any future
    ``multiprocessing`` child (e.g. the strategy-plugin worker) can start from a frozen exe.
 
-HOOK (strategy-plugin worker, not implemented): a future ``--plugin-worker`` style flag belongs in
-``alpha_engine.__main__.main()`` (argv is passed through untouched), so dev and frozen share one code
-path. Do not parse it here; this file must stay a thin, logic-free wrapper.
+HOOK (strategy-plugin worker): ``alpha_engine.exe --plugin-worker`` is the sandboxed plugin worker
+(``alpha_engine/plugins/worker.py``; the host starts it with ``[sys.executable, "--plugin-worker"]`` when frozen).
+It must start with nothing but the standard library loaded, exactly like ``python -m alpha_engine
+--plugin-worker`` (dispatched at the top of ``__main__.py``). Importing ``alpha_engine.__main__`` would load
+uvicorn, the app and the settings module first, so :func:`run` dispatches the flag BEFORE that import and before
+``freeze_support`` / the stream repairs (the worker speaks binary JSON lines on the inherited pipes). This is the
+only argument parsed here; every other flag (e.g. ``--plugin-check``) goes through ``main()`` untouched.
 """
 
 from __future__ import annotations
@@ -64,7 +68,14 @@ def configure_utf8_streams() -> list[str]:
     return done
 
 
+WORKER_FLAG = "--plugin-worker"
+
+
 def run() -> int:
+    if sys.argv[1:2] == [WORKER_FLAG]:
+        from alpha_engine.plugins.worker import run_worker
+
+        return run_worker()
     multiprocessing.freeze_support()
     ensure_std_streams()
     configure_utf8_streams()
