@@ -13,6 +13,7 @@ import '../models/backtest_models.dart';
 import '../models/chart_models.dart';
 import '../models/json_reader.dart';
 import '../models/market_data.dart';
+import '../models/signal_models.dart';
 import '../models/strategy.dart';
 import '../models/strategy_plugin.dart';
 
@@ -545,6 +546,73 @@ class EngineApi {
   /// `ws://127.0.0.1:<port>/ws/backtests/{id}` -- the run's progress socket.
   Uri backtestProgressUri(int id) => Uri.parse('ws://127.0.0.1:$port/ws/backtests/$id');
 
+  // -------------------------------------------------------------- live signals
+  // SUGGESTIONS ONLY: the engine has no route that could send an order, and
+  // neither does this client.
+
+  /// Most signals one `GET /signals` returns (engine `LIST_LIMIT_MAX`).
+  static const int maxSignalsPerPage = 500;
+
+  /// `GET /signals?status&symbol&limit&offset` -- stored signals, newest
+  /// confirmation bar first, with `total`. 422 `invalid_query` (Persian).
+  Future<SignalsPage> listSignals({
+    LiveSignalStatus? status,
+    String? symbol,
+    int limit = 50,
+    int offset = 0,
+    Duration? timeout,
+  }) =>
+      _call(
+        'GET',
+        '/signals',
+        query: {
+          if (status != null && status != LiveSignalStatus.unknown) 'status': status.code,
+          if (symbol != null && symbol.isNotEmpty) 'symbol': symbol,
+          'limit': limit,
+          'offset': offset,
+        },
+        timeout: timeout,
+        parse: SignalsPage.fromJson,
+      );
+
+  /// `GET /signals/{id}`; 404 `signal_not_found`.
+  Future<LiveSignal> getSignal(int id, {Duration? timeout}) =>
+      _call('GET', '/signals/$id', timeout: timeout, parse: LiveSignal.fromJson);
+
+  /// `GET /signals/status` -- the live scheduler's state.
+  Future<LiveSignalsStatus> getSignalsStatus({Duration? timeout}) =>
+      _call('GET', '/signals/status', timeout: timeout, parse: LiveSignalsStatus.fromJson);
+
+  /// `GET /signals/settings` -> `{enabled, live_strategy, grace_s}`.
+  Future<LiveSignalSettings> getSignalSettings({Duration? timeout}) =>
+      _call('GET', '/signals/settings', timeout: timeout, parse: LiveSignalSettings.fromJson);
+
+  /// `POST /signals/settings` with only the given fields (partial update).
+  /// 422 `invalid_body` (Persian `errors_fa`), 404 `strategy_not_found`,
+  /// 409 `plugin_not_live` (uploaded plugins are chart + backtest only) /
+  /// `stored_params_invalid`.
+  Future<LiveSignalSettingsResult> postSignalSettings({
+    bool? enabled,
+    String? liveStrategy,
+    double? graceS,
+    Duration? timeout,
+  }) =>
+      _call(
+        'POST',
+        '/signals/settings',
+        body: {
+          if (enabled != null) 'enabled': enabled,
+          if (liveStrategy != null) 'live_strategy': liveStrategy,
+          // A whole number goes as an int (the engine's strict model accepts both).
+          if (graceS != null) 'grace_s': graceS == graceS.roundToDouble() ? graceS.round() : graceS,
+        },
+        timeout: timeout,
+        parse: LiveSignalSettingsResult.fromJson,
+      );
+
+  /// `ws://127.0.0.1:<port>/ws/signals` -- snapshot, then signal events.
+  Uri signalsSocketUri() => Uri.parse('ws://127.0.0.1:$port/ws/signals');
+
   void close() => _dio.close(force: true);
 
   // ------------------------------------------------------------------ plumbing
@@ -734,6 +802,8 @@ class EngineApi {
     'plugin_archived': 'این نسخه سیستم بایگانی شده است؛ برای استفاده دوباره همان فایل را بارگذاری کنید.',
     'plugin_file_invalid': 'فایل ذخیره‌شده این سیستم تغییر کرده یا پیدا نشد و اجرا نمی‌شود.',
     'channel_not_available': 'این سیستم کانال ندارد.',
+    'plugin_not_live':
+        'سیستم‌های بارگذاری‌شده (پلاگین) فعلا فقط در چارت و بک‌تست قابل استفاده‌اند و برای سیگنال لایو انتخاب نمی‌شوند.',
   };
 
   static EngineApiException _fromDio(DioException e, String what, Duration limit) {

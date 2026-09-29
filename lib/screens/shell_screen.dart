@@ -3,12 +3,15 @@ import 'package:provider/provider.dart';
 
 import '../core/dev_mode.dart';
 import '../providers/shell_navigation.dart';
+import '../providers/signals_provider.dart';
 import '../theme/app_semantic_colors.dart';
 import '../theme/theme_provider.dart';
 import '../widgets/engine_status_indicator.dart';
 import 'backtest/backtest_screen.dart';
 import 'chart/chart_screen.dart';
 import 'settings/settings_screen.dart';
+import 'signals/signal_notice_listener.dart';
+import 'signals/signals_screen.dart';
 import 'systems/systems_screen.dart';
 
 /// One entry of the navigation rail. [page] is null for a destination that
@@ -72,6 +75,7 @@ class ShellScreen extends StatefulWidget {
       label: 'سیگنال',
       icon: Icons.notifications_active_outlined,
       selectedIcon: Icons.notifications_active,
+      page: SignalsScreen(),
     ),
     ShellDestination(
       id: ShellPage.settings,
@@ -99,60 +103,73 @@ class _ShellScreenState extends State<ShellScreen> {
     final ShellNavigation navigation = context.watch<ShellNavigation>();
     final int selected = ShellScreen.destinations.indexWhere((ShellDestination d) => d.id == navigation.page);
     final ThemeProvider themeProvider = context.watch<ThemeProvider>();
+    final int activeSignals = context.select<SignalsProvider, int>((SignalsProvider p) => p.activeCount);
     final AppSemanticColors colors = context.appColors;
     final TextTheme text = Theme.of(context).textTheme;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Alpha Trader'),
-        actions: [
-          const EngineStatusIndicator(),
-          IconButton(
-            tooltip: themeProvider.isDark() ? 'تم روشن' : 'تم تاریک',
-            icon: Icon(themeProvider.isDark() ? Icons.light_mode : Icons.dark_mode),
-            onPressed: () => themeProvider.toggleTheme(
-              themeProvider.isDark() ? ThemeMode.light : ThemeMode.dark,
+    // The active signal count on the «سیگنال» item.
+    Widget icon(ShellDestination d, IconData data) => d.id == ShellPage.signal
+        ? Badge(
+            key: const ValueKey<String>('shell-signal-badge'),
+            isLabelVisible: activeSignals > 0,
+            label: Text('$activeSignals'),
+            child: Icon(data),
+          )
+        : Icon(data);
+
+    return SignalNoticeListener(
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Alpha Trader'),
+          actions: [
+            const EngineStatusIndicator(),
+            IconButton(
+              tooltip: themeProvider.isDark() ? 'تم روشن' : 'تم تاریک',
+              icon: Icon(themeProvider.isDark() ? Icons.light_mode : Icons.dark_mode),
+              onPressed: () => themeProvider.toggleTheme(
+                themeProvider.isDark() ? ThemeMode.light : ThemeMode.dark,
+              ),
             ),
-          ),
-        ],
-      ),
-      body: Row(
-        children: [
-          NavigationRail(
-            selectedIndex: selected < 0 ? 0 : selected,
-            onDestinationSelected: (int i) => _select(navigation, i),
-            labelType: NavigationRailLabelType.all,
-            destinations: [
-              for (final ShellDestination d in ShellScreen.destinations)
-                NavigationRailDestination(
-                  icon: Icon(d.icon),
-                  selectedIcon: Icon(d.selectedIcon),
-                  disabled: !d.enabled,
-                  label: d.enabled
-                      ? Text(d.label)
-                      : Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(d.label),
-                            Text(
-                              ShellScreen.comingSoon,
-                              style: text.labelSmall?.copyWith(color: colors.mutedText),
-                            ),
-                          ],
-                        ),
-                ),
-            ],
-          ),
-          const VerticalDivider(width: 1),
-          Expanded(
-            child: IndexedStack(
-              index: selected < 0 ? 0 : selected,
-              children: [
-                for (final ShellDestination d in ShellScreen.destinations) d.page ?? const SizedBox.shrink(),
+          ],
+        ),
+        body: Row(
+          children: [
+            NavigationRail(
+              selectedIndex: selected < 0 ? 0 : selected,
+              onDestinationSelected: (int i) => _select(navigation, i),
+              labelType: NavigationRailLabelType.all,
+              destinations: [
+                for (final ShellDestination d in ShellScreen.destinations)
+                  NavigationRailDestination(
+                    icon: icon(d, d.icon),
+                    selectedIcon: icon(d, d.selectedIcon),
+                    disabled: !d.enabled,
+                    label: d.enabled
+                        ? Text(d.label)
+                        : Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(d.label),
+                              Text(
+                                ShellScreen.comingSoon,
+                                style: text.labelSmall?.copyWith(color: colors.mutedText),
+                              ),
+                            ],
+                          ),
+                  ),
               ],
             ),
-          ),
-        ],
+            const VerticalDivider(width: 1),
+            Expanded(
+              child: IndexedStack(
+                index: selected < 0 ? 0 : selected,
+                children: [
+                  for (final ShellDestination d in ShellScreen.destinations) d.page ?? const SizedBox.shrink(),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

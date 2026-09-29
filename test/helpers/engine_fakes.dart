@@ -12,9 +12,12 @@ import 'package:alpha_trader/models/engine_health.dart';
 import 'package:alpha_trader/providers/engine_api_provider.dart';
 import 'package:alpha_trader/providers/engine_status_provider.dart';
 import 'package:alpha_trader/providers/shell_navigation.dart';
+import 'package:alpha_trader/providers/signals_provider.dart';
+import 'package:alpha_trader/services/backtest_progress.dart';
 import 'package:alpha_trader/services/engine_api.dart';
 import 'package:alpha_trader/services/engine_client.dart';
 import 'package:alpha_trader/services/engine_process.dart';
+import 'package:alpha_trader/services/signal_alerts.dart';
 import 'package:alpha_trader/theme/theme.dart';
 import 'package:alpha_trader/theme/theme_provider.dart';
 import 'package:alpha_trader/widgets/top_notice_stack.dart';
@@ -211,29 +214,67 @@ Map<String, Object?> strategyJson({
       if (createdNewVersion != null) 'created_new_version': createdNewVersion,
     };
 
+/// A `/ws/signals` socket that connects and then stays silent.
+class IdleSignalSocket implements ProgressSocket {
+  final StreamController<Object?> _controller = StreamController<Object?>();
+
+  @override
+  Stream<Object?> get messages => _controller.stream;
+
+  @override
+  Future<void> get ready => Future<void>.value();
+
+  @override
+  Future<void> close() async {
+    if (!_controller.isClosed) await _controller.close();
+  }
+}
+
+/// Answers of the `/signals` routes used by the settings / signal pages
+/// when a test does not route them itself (live signals off, no history).
+Map<String, RouteHandler> defaultSignalRoutes() => {
+      'GET /signals/settings': (_) => jsonBody({'enabled': false, 'live_strategy': 'stddev_channel', 'grace_s': 20}),
+      'GET /signals': (_) => jsonBody({'count': 0, 'total': 0, 'offset': 0, 'limit': 50, 'signals': <Object?>[]}),
+    };
+
 /// Providers + MaterialApp (Persian locale, RTL) around [child], with an
 /// engine that becomes running on [start] and an [EngineApi] on [http].
+/// The app-level live signal providers are included ([signals] follows the
+/// engine; its socket comes from [signalSocket], idle by default).
 class EngineHarness {
-  EngineHarness({FakeEngineHttp? http, ShellNavigation? navigation})
-      : http = http ?? FakeEngineHttp(),
-        navigation = navigation ?? ShellNavigation() {
+  EngineHarness({
+    FakeEngineHttp? http,
+    ShellNavigation? navigation,
+    ProgressSocketConnector? signalSocket,
+    SignalAlertPrefs? alertPrefs,
+  })  : http = http ?? FakeEngineHttp(),
+        navigation = navigation ?? ShellNavigation(),
+        alertPrefs = alertPrefs ?? SignalAlertPrefs() {
+    for (final MapEntry<String, RouteHandler> r in defaultSignalRoutes().entries) {
+      this.http.routes.putIfAbsent(r.key, () => r.value);
+    }
     engine = EngineStatusProvider(launcher: NoProcessLauncher(), clientFactory: HealthyClient.new);
     apis = EngineApiProvider(
       engine: engine,
       apiFactory: (int port) => EngineApi(port: port, httpClientAdapter: this.http),
     );
+    signals = SignalsProvider(apis: apis, connect: signalSocket ?? (Uri _) => IdleSignalSocket());
   }
 
   final FakeEngineHttp http;
   final ShellNavigation navigation;
+  final SignalAlertPrefs alertPrefs;
   late final EngineStatusProvider engine;
   late final EngineApiProvider apis;
+  late final SignalsProvider signals;
 
   Widget wrap(Widget child) => MultiProvider(
         providers: [
           ChangeNotifierProvider(create: (_) => ThemeProvider(initialThemeMode: ThemeMode.light)),
           ChangeNotifierProvider<EngineStatusProvider>.value(value: engine),
           ChangeNotifierProvider<EngineApiProvider>.value(value: apis),
+          ChangeNotifierProvider<SignalsProvider>.value(value: signals),
+          ChangeNotifierProvider<SignalAlertPrefs>.value(value: alertPrefs),
           ChangeNotifierProvider<ShellNavigation>.value(value: navigation),
         ],
         child: Builder(
@@ -266,9 +307,11 @@ class EngineHarness {
     debugResetTopNotices();
     await engine.stop();
     await tester.pumpWidget(const SizedBox.shrink());
+    signals.dispose();
     apis.dispose();
     engine.dispose();
     navigation.dispose();
+    alertPrefs.dispose();
   }
 }
 
