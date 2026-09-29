@@ -459,7 +459,7 @@ def test_mt5_down_reconnects_with_backoff_and_never_crashes(make_env) -> None:
     assert env.signals() == []
     env.fake._init_results = [True]  # terminal back
     env.at(CAND_BOUNDARY + timedelta(seconds=90), polls=3)  # reconnect (backoff 20 s passed), warm-up, check
-    assert env.live.status()["state"] == "running"
+    assert env.live.status()["state"] == "running" and env.live.status()["last_error_fa"] is None
     assert [e["payload"]["state"] for e in env.live.repo.events(kind="mt5_status")] == ["disconnected", "connected"]
     assert len(env.signals()) == 1  # the missed boundary is decided after the reconnect
 

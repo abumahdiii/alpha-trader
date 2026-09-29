@@ -434,6 +434,9 @@ class LiveSignals:
                 if is_dev_mode():
                     logger.debug("live signals: MT5 connected again after %d attempt(s)", self._reconnect_attempts)
                 self._polls = 0  # fresh ticks after a reconnect: warm up again
+                with self._lock:
+                    if self._last_error_fa == MT5_DOWN_FA:
+                        self._last_error_fa = None
             self._mt5_state = "connected"
             self._reconnect_attempts = 0
             self._next_reconnect_pc = None
