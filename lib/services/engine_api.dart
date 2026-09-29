@@ -382,7 +382,10 @@ class EngineApi {
     });
     final List<StrategyOption> options = StrategyOption.merge(
       await strategies,
-      [for (final StrategyPlugin p in await plugins) if (p.registered) p.ref],
+      [
+        for (final StrategyPlugin p in await plugins)
+          if (p.registered) p.ref
+      ],
     );
     _log('   strategy options: ${options.map((StrategyOption o) => '${o.name}(${o.source.code})').join(', ')}');
     return options;

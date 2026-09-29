@@ -31,8 +31,7 @@ class PluginReportView extends StatelessWidget {
   /// null = opened from the list.
   final bool? created;
 
-  static Future<void> show(BuildContext context, StrategyPlugin plugin, {bool? created}) =>
-      ScrollableDialog.show<void>(
+  static Future<void> show(BuildContext context, StrategyPlugin plugin, {bool? created}) => ScrollableDialog.show<void>(
         context: context,
         title: Text(switch (created) {
           true => '${PluginTextsFa.acceptedTitle}: «${plugin.titleFa}»',
@@ -51,8 +50,7 @@ class PluginReportView extends StatelessWidget {
     final AppSemanticColors colors = context.appColors;
     final PluginDynamicReport? d = p.validation.dynamicReport;
     String yesNo(bool? v) => v == null ? '—' : (v ? 'بله' : 'خیر');
-    String seconds(double? v) =>
-        v == null ? '—' : '${formatNumber(v, decimals: v == v.roundToDouble() ? 0 : 2)} ثانیه';
+    String seconds(double? v) => v == null ? '—' : '${formatNumber(v, decimals: v == v.roundToDouble() ? 0 : 2)} ثانیه';
     String count(int? v) => v == null ? '—' : formatNumber(v);
 
     return Column(

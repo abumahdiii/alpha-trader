@@ -123,18 +123,19 @@ class PluginActionsBar extends StatelessWidget {
                 : const Icon(Icons.download_outlined),
             label: const Text(PluginActionsFa.download),
           ),
-          Row(mainAxisSize: MainAxisSize.min, children: [
-            Icon(Icons.shield_outlined, size: 18, color: colors.info),
-            const SizedBox(width: 6),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 720),
-              child: Text(
-                PluginActionsFa.safetyNote,
-                key: const ValueKey<String>('plugin-safety-note'),
-                style: tt.bodySmall?.copyWith(color: colors.mutedText),
-              ),
+        ]),
+        const SizedBox(height: 8),
+        // Own full-width row: the note wraps on a narrow window instead of overflowing.
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Icon(Icons.shield_outlined, size: 18, color: colors.info),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              PluginActionsFa.safetyNote,
+              key: const ValueKey<String>('plugin-safety-note'),
+              style: tt.bodySmall?.copyWith(color: colors.mutedText),
             ),
-          ]),
+          ),
         ]),
         if (c.uploading) ...[
           const SizedBox(height: 10),

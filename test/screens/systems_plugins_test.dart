@@ -142,7 +142,8 @@ void main() {
     expect(find.byKey(const ValueKey<String>('plugin-registered-$kPluginName@2-true')), findsOneWidget);
     expect(_status(tester), 'فعال');
     expect(
-      find.text('هش: 2d070ea08a45 — ${formatLocalDateTime(DateTime.utc(2026, 9, 28, 9, 15), seconds: false)} (وقت محلی)'),
+      find.text(
+          'هش: 2d070ea08a45 — ${formatLocalDateTime(DateTime.utc(2026, 9, 28, 9, 15), seconds: false)} (وقت محلی)'),
       findsOneWidget,
     );
     expect(find.byTooltip('هش کامل فایل (sha256): $kPluginSha'), findsOneWidget);
@@ -157,7 +158,8 @@ void main() {
 
   testWidgets('upload 422 invalid_plugin: every error with its line number, readable', (tester) async {
     final FakePluginEngine engine = FakePluginEngine()
-      ..onUpload = (_) => engineError(422, 'invalid_plugin', 'فایل سیستم پذیرفته نشد؛ خطاها را برطرف کنید و دوباره بارگذاری کنید.', [
+      ..onUpload = (_) =>
+          engineError(422, 'invalid_plugin', 'فایل سیستم پذیرفته نشد؛ خطاها را برطرف کنید و دوباره بارگذاری کنید.', [
             'خط 3: import «os» مجاز نیست.',
             'خط 17: فراخوانی «open» مجاز نیست.',
             'کلاس Strategy پیدا نشد.',

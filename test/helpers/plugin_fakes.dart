@@ -79,7 +79,8 @@ Map<String, Object?> pluginJson({
     };
 
 /// The plugin as `/strategies` lists it once registered.
-Map<String, Object?> pluginStrategyJson({int paramsVersion = 1, Map<String, Object?>? params, bool? createdNewVersion}) =>
+Map<String, Object?> pluginStrategyJson(
+        {int paramsVersion = 1, Map<String, Object?>? params, bool? createdNewVersion}) =>
     {
       'name': kPluginName,
       'title_fa': kPluginTitleFa,

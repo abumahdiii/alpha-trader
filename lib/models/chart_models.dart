@@ -520,8 +520,7 @@ enum ChannelLine {
 
   final String titleFa;
 
-  static ChannelLine parse(String code) =>
-      tryParse(code) ?? (throw FormatException('unknown channel line "$code"'));
+  static ChannelLine parse(String code) => tryParse(code) ?? (throw FormatException('unknown channel line "$code"'));
 
   /// null for a strategy without channel lines (`line: null`) or a line
   /// name this UI does not know (shown without a line, never a failure).
@@ -728,6 +727,7 @@ class SetupItem {
   final String symbol;
   final SetupStatus status;
   final String? rejectionReasonFa;
+
   /// A StdDev setup (`bounce_lower`, ...) or another strategy's slug.
   final String setupType;
 
@@ -800,41 +800,41 @@ class SetupItem {
     final String setupType = r.str('setup_type');
     final String? title = r.strOrNull('setup_title_fa');
     return SetupItem(
-        id: r.str('id'),
-        symbol: r.str('symbol'),
-        status: SetupStatus.parse(r.str('status')),
-        rejectionReasonFa: r.strOrNull('rejection_reason_fa'),
-        setupType: setupType,
-        setupTitleFa: title == null || title.trim().isEmpty ? setupType : title,
-        direction: TradeSide.parse(r.str('direction')),
-        pattern: r.strOrNull('pattern') ?? '',
-        line: ChannelLine.tryParse(r.strOrNull('line')),
-        lineValue: r.numberOrNull('line_value'),
-        channelDirection: r.strOrNull('channel_direction'),
-        confirmationBarTime: _utc(r, 'confirmation_bar_time'),
-        decisionTime: _utc(r, 'decision_time'),
-        entryTime: r.utcOrNull('entry_time'),
-        entry: r.numberOrNull('entry'),
-        entryBidOpen: r.numberOrNull('entry_bid_open'),
-        spreadAtEntryPoints: r.intOrNull('spread_at_entry_points'),
-        entrySpreadSource: EntrySpreadSource.parse(r.strOrNull('entry_spread_source')),
-        stopLoss: r.number('stop_loss'),
-        takeProfit: r.numberOrNull('take_profit'),
-        rr: r.number('rr'),
-        riskDistance: r.numberOrNull('risk_distance'),
-        referencePrice: r.number('reference_price'),
-        indicativeTakeProfit: r.number('indicative_take_profit'),
-        volume: r.numberOrNull('volume'),
-        actualRisk: r.numberOrNull('actual_risk'),
-        margin: r.numberOrNull('margin'),
-        riskAmount: r.numberOrNull('risk_amount'),
-        volumeNoteFa: r.strOrNull('volume_note_fa'),
-        sizingWarningsFa: _strings(r, 'sizing_warnings_fa'),
-        reasonFa: r.str('reason_fa'),
-        indicators: _rawMap(r, 'indicators'),
-        outcome: _objectOrNull(r, 'outcome', SetupOutcome.read),
-        backtest: _objectOrNull(r, 'backtest', SetupBacktestFlag.read),
-      );
+      id: r.str('id'),
+      symbol: r.str('symbol'),
+      status: SetupStatus.parse(r.str('status')),
+      rejectionReasonFa: r.strOrNull('rejection_reason_fa'),
+      setupType: setupType,
+      setupTitleFa: title == null || title.trim().isEmpty ? setupType : title,
+      direction: TradeSide.parse(r.str('direction')),
+      pattern: r.strOrNull('pattern') ?? '',
+      line: ChannelLine.tryParse(r.strOrNull('line')),
+      lineValue: r.numberOrNull('line_value'),
+      channelDirection: r.strOrNull('channel_direction'),
+      confirmationBarTime: _utc(r, 'confirmation_bar_time'),
+      decisionTime: _utc(r, 'decision_time'),
+      entryTime: r.utcOrNull('entry_time'),
+      entry: r.numberOrNull('entry'),
+      entryBidOpen: r.numberOrNull('entry_bid_open'),
+      spreadAtEntryPoints: r.intOrNull('spread_at_entry_points'),
+      entrySpreadSource: EntrySpreadSource.parse(r.strOrNull('entry_spread_source')),
+      stopLoss: r.number('stop_loss'),
+      takeProfit: r.numberOrNull('take_profit'),
+      rr: r.number('rr'),
+      riskDistance: r.numberOrNull('risk_distance'),
+      referencePrice: r.number('reference_price'),
+      indicativeTakeProfit: r.number('indicative_take_profit'),
+      volume: r.numberOrNull('volume'),
+      actualRisk: r.numberOrNull('actual_risk'),
+      margin: r.numberOrNull('margin'),
+      riskAmount: r.numberOrNull('risk_amount'),
+      volumeNoteFa: r.strOrNull('volume_note_fa'),
+      sizingWarningsFa: _strings(r, 'sizing_warnings_fa'),
+      reasonFa: r.str('reason_fa'),
+      indicators: _rawMap(r, 'indicators'),
+      outcome: _objectOrNull(r, 'outcome', SetupOutcome.read),
+      backtest: _objectOrNull(r, 'backtest', SetupBacktestFlag.read),
+    );
   }
 }
 

@@ -31,8 +31,9 @@ enum SetupColumn {
   netPnl('سود/زیان \$', 92, sortKey: SetupSortKey.netPnl, outcome: true, tooltip: 'سود خالص به دلار (بعد از کمیسیون)'),
   backtest('در بک‌تست', 170,
       outcome: true, tooltip: 'آیا بک‌تست همین بازه (با قید یک معامله باز) این ستاپ را معامله کرد؟'),
-  why('چرا؟', 300, tooltip: 'دلیل باز شدن ستاپ به گفته خود سیستم (برای سیستم کانال: مقادیر کانال، ATR، شیب و الگو) '
-      'و دلیل رد');
+  why('چرا؟', 300,
+      tooltip: 'دلیل باز شدن ستاپ به گفته خود سیستم (برای سیستم کانال: مقادیر کانال، ATR، شیب و الگو) '
+          'و دلیل رد');
 
   const SetupColumn(this.titleFa, this.width, {this.sortKey, this.outcome = false, this.tooltip});
 

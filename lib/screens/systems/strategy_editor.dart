@@ -179,8 +179,8 @@ class _StrategyEditorState extends State<StrategyEditor> with AsyncActionGuard<S
               _chip('ذخیره‌شده در: ${formatLocalDateTime(_info.paramsSavedUtc!)} (وقت محلی)'),
             Tooltip(
               message: 'هش پارامترها (sha256): ${_info.paramsHash}',
-              child: _chip(
-                  'هش: ${_info.paramsHash.length > 12 ? _info.paramsHash.substring(0, 12) : _info.paramsHash}'),
+              child:
+                  _chip('هش: ${_info.paramsHash.length > 12 ? _info.paramsHash.substring(0, 12) : _info.paramsHash}'),
             ),
           ],
         ),
