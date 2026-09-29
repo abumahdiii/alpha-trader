@@ -22,6 +22,8 @@ dependencies:
   # Talking to the local Python engine (REST + WebSocket).
   dio: ^5.9.0
   web_socket_channel: ^3.0.3
+  # Native "save as" dialog for backtest exports (CSV / Excel).
+  file_selector: ^1.1.0
 
 dev_dependencies:
   flutter_test:

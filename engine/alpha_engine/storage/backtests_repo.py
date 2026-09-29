@@ -20,6 +20,10 @@ Reads take ``conn.lock`` (the connection is shared across threads).
 
 Status machine: ``queued -> running -> done | error | cancelled``; ``queued -> cancelled``;
 ``queued | running -> interrupted`` (engine stopped: at shutdown, or found stale at the next startup).
+
+Listing (``list_runs_page``): newest first, ``LIMIT ? OFFSET ?`` plus optional exact ``symbol`` / ``mode`` /
+``status`` filters; the total matching count is read under the same lock. Filter values are bound
+parameters, never interpolated into the SQL text.
 """
 
 from __future__ import annotations
@@ -39,11 +43,14 @@ ACTIVE_STATUSES: frozenset[str] = frozenset({"queued", "running"})
 TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "error", "cancelled", "interrupted"})
 INTERRUPTED_FA = "اجرا با بسته شدن engine نیمه‌کاره ماند و ادامه داده نمی‌شود؛ دوباره اجرا کنید."
 
+# strategy_sha256 / strategy_source live in the stored RunConfig snapshot (strategy contract S1; no schema
+# change): NULL for configs stored before these fields existed or for built-in strategies without a hash.
 _SUMMARY_COLUMNS = (
     "id, created_utc, started_utc, finished_utc, status, progress, error_code, error_message_fa, symbol, mode, "
     "period_start_utc, period_end_utc, windows_count, window_months, seed, seed_generated, strategy_name, "
     "strategy_version, params_version, params_hash, provisional, trade_count, net_profit, net_profit_pct, "
-    "elapsed_s"
+    "elapsed_s, json_extract(config_json, '$.strategy_sha256') AS strategy_sha256, "
+    "json_extract(config_json, '$.strategy_source') AS strategy_source"
 )
 
 
@@ -53,6 +60,17 @@ def _dumps(value: Any) -> str:
 
 def _loads(text: str | None) -> Any:
     return None if text is None else json.loads(text)
+
+
+def _run_filters(symbol: str | None, mode: str | None, status: str | None) -> tuple[str, list[Any]]:
+    """``(" WHERE ...", args)`` for the list filters: fixed column names, values as ``?`` parameters."""
+    clauses: list[str] = []
+    args: list[Any] = []
+    for column, value in (("symbol", symbol), ("mode", mode), ("status", status)):
+        if value is not None:
+            clauses.append(f"{column} = ?")
+            args.append(value)
+    return (" WHERE " + " AND ".join(clauses)) if clauses else "", args
 
 
 def api_time(text: str | None) -> str | None:
@@ -85,22 +103,26 @@ class BacktestsRepo:
         params_hash: str,
         provisional: bool,
         labels_fa: Sequence[str],
+        seed_generated: bool | None = None,
     ) -> int:
+        """Store a ``queued`` run. Random runs get their seed at submit time (``seed_generated`` = the engine
+        drew it because the request had none), so the row shows the seed from the start."""
         with self._conn.transaction():
             cur = self._conn.execute(
                 "INSERT INTO backtest_runs (created_utc, status, progress, symbol, mode, period_start_utc,"
-                " period_end_utc, windows_count, window_months, seed, strategy_name, strategy_version,"
-                " params_version, params_hash, provisional, request_json, config_json, labels_json)"
-                " VALUES (?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " period_end_utc, windows_count, window_months, seed, seed_generated, strategy_name,"
+                " strategy_version, params_version, params_hash, provisional, request_json, config_json,"
+                " labels_json) VALUES (?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (utc_now_text(), symbol, mode, None if period_start is None else format_utc(period_start),
                  None if period_end is None else format_utc(period_end), windows_count, window_months, seed,
-                 strategy_name, strategy_version, params_version, params_hash, int(provisional), _dumps(request),
-                 _dumps(config), _dumps(list(labels_fa))),
+                 None if seed_generated is None else int(seed_generated), strategy_name, strategy_version,
+                 params_version, params_hash, int(provisional), _dumps(request), _dumps(config),
+                 _dumps(list(labels_fa))),
             )
             run_id = int(cur.lastrowid)
         if is_dev_mode():
-            logger.debug("backtest run %d created: %s %s params v%s hash=%s provisional=%s", run_id, symbol, mode,
-                         params_version, params_hash[:12], provisional)
+            logger.debug("backtest run %d created: %s %s seed=%s (generated=%s) params v%s hash=%s provisional=%s",
+                         run_id, symbol, mode, seed, seed_generated, params_version, params_hash[:12], provisional)
         return run_id
 
     def mark_running(self, run_id: int) -> bool:
@@ -245,11 +267,45 @@ class BacktestsRepo:
                 " mode, windows_count FROM backtest_runs WHERE id = ?", (run_id,)).fetchone()
         return None if row is None else dict(row)
 
-    def list_runs(self, limit: int = 50) -> list[dict[str, Any]]:
+    def list_runs(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        symbol: str | None = None,
+        mode: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run summaries, newest first (``id DESC``), optionally filtered (exact matches)."""
+        return self.list_runs_page(limit, offset, symbol=symbol, mode=mode, status=status)[0]
+
+    def count_runs(self, *, symbol: str | None = None, mode: str | None = None, status: str | None = None) -> int:
+        where, args = _run_filters(symbol, mode, status)
         with self._conn.lock:
+            return int(self._conn.execute(f"SELECT COUNT(*) FROM backtest_runs{where}", args).fetchone()[0])
+
+    def list_runs_page(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        symbol: str | None = None,
+        mode: str | None = None,
+        status: str | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """``(page, total)``: one page of summaries (newest first) and the number of runs matching the filters,
+        read under ONE lock so both agree. Filter VALUES are always bound parameters; only the fixed column
+        names of ``_run_filters`` are part of the SQL text."""
+        where, args = _run_filters(symbol, mode, status)
+        with self._conn.lock:
+            total = int(self._conn.execute(f"SELECT COUNT(*) FROM backtest_runs{where}", args).fetchone()[0])
             rows = self._conn.execute(
-                f"SELECT {_SUMMARY_COLUMNS} FROM backtest_runs ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
-        return [dict(r) for r in rows]
+                f"SELECT {_SUMMARY_COLUMNS} FROM backtest_runs{where} ORDER BY id DESC LIMIT ? OFFSET ?",
+                [*args, int(limit), int(offset)]).fetchall()
+        if is_dev_mode():
+            logger.debug("backtest runs listed: symbol=%s mode=%s status=%s offset=%d limit=%d -> %d of %d", symbol,
+                         mode, status, offset, limit, len(rows), total)
+        return [dict(r) for r in rows], total
 
     def get_run(self, run_id: int) -> dict[str, Any] | None:
         with self._conn.lock:

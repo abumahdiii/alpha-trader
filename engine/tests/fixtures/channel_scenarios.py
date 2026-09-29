@@ -279,22 +279,5 @@ def boundary_scenario(side: str, extra: float, t: int = DEFAULT_T) -> tuple[Scen
 
 
 # ---------------------------------------------------------------------------------------------- random walk
-def random_walk(n_h1: int, seed: int = 7, start: str = "2025-01-06 00:00") -> tuple[pd.DataFrame, pd.DataFrame]:
-    """FX-like H1 random walk (weekends skipped) and its H4 aggregation (bars 00/04/.../20 UTC)."""
-    rng = np.random.default_rng(seed)
-    hours = pd.date_range(pd.Timestamp(start, tz="UTC"), periods=int(n_h1 * 1.5) + 200, freq="h")
-    hours = hours[hours.dayofweek < 5][:n_h1]
-    steps = rng.normal(0.0, 1.2, n_h1)
-    close = 2000.0 + np.cumsum(steps)
-    open_ = np.r_[2000.0, close[:-1]] + rng.normal(0.0, 0.05, n_h1)
-    high = np.maximum(open_, close) + rng.exponential(0.7, n_h1)
-    low = np.minimum(open_, close) - rng.exponential(0.7, n_h1)
-    h1 = pd.DataFrame({"time": hours, "open": open_, "high": high, "low": low, "close": close})
-    key = h1["time"].dt.floor("4h")
-    h4 = (
-        h1.groupby(key)
-        .agg(open=("open", "first"), high=("high", "max"), low=("low", "min"), close=("close", "last"))
-        .reset_index()
-    )
-    h4.columns = ["time", "open", "high", "low", "close"]
-    return h1, h4
+# Moved to the engine (plugin validation uses it at runtime); same numbers, same signature.
+from alpha_engine.plugins.fixture import random_walk  # noqa: E402,F401

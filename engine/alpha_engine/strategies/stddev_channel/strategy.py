@@ -12,6 +12,12 @@ Decision on the closed H1 bar ``t`` (decision time ``D = open_t + 1h``):
 ``evaluate(ctx)`` is a pure function of ``ctx`` (bars <= t). ``scan`` computes the indicators once over a
 whole history and returns what ``evaluate`` would return at every bar, IGNORING the open-trade state (the
 backtester applies "max one open trade" itself).
+
+Engine hooks (``strategy.base``): ``first_valid_index`` = first H1 bar whose channel and both Wilder ATRs are
+defined (``compute_channel_bars(...).valid``); ``warmup_margin_h4_bars`` = ``WARMUP_ATR_MULT * atr_period``
+(10 * 14 = 140 H4 bars with the defaults: Wilder ATR is a recursion seeded with an SMA whose influence decays
+like ``(1 - 1/p)^k``, ``(13/14)^140 ~ 3e-5``); ``warmup_texts_fa`` = the channel/ATR wording of the period
+messages.
 """
 
 from __future__ import annotations
@@ -25,7 +31,14 @@ import pandas as pd
 
 from ...logging_setup import get_logger, is_dev_mode
 from ...storage.account_settings import AccountSettings
-from ...strategy.base import H4_DURATION, Strategy, StrategyContext, bar_open_times, slice_closed_bars
+from ...strategy.base import (
+    H4_DURATION,
+    Strategy,
+    StrategyContext,
+    WarmupTextsFa,
+    bar_open_times,
+    slice_closed_bars,
+)
 from ...strategy.params import ParamSchema, ParamValue, params_hash
 from ...strategy.registry import register
 from ...strategy.signal import SignalCandidate
@@ -48,6 +61,18 @@ from .state_machine import PRIORITY, Decision, decide_at
 logger = get_logger(__name__)
 
 _H1 = timedelta(hours=1)
+
+# Warm-up margin after the first valid channel bar, in multiples of atr_period H4 bars (module docstring).
+WARMUP_ATR_MULT = 10
+
+WARMUP_TEXTS_FA = WarmupTextsFa(
+    no_valid_bar="داده کش برای ساختن کانال کافی نیست (هیچ کندلی با کانال و ATR معتبر وجود ندارد).",
+    too_short=("داده کش برای گرم شدن اندیکاتورها کافی نیست: بعد از اولین کندل معتبر کانال به {margin} کندل H4 "
+               "دیگر (۱۰ برابر دوره ATR) نیاز است."),
+    window_too_early="کانال به داده کافی H4 و حاشیه گرم شدن ATR ({margin} کندل H4) نیاز دارد.",
+    limits="کانال به داده کافی H4 و حاشیه گرم شدن ATR ({margin} کندل H4 = ۱۰ برابر دوره ATR) نیاز دارد",
+    clip_reason="گرم شدن کانال و ATR",
+)
 
 
 def _closed_h4(h4: pd.DataFrame, decision_time: pd.Timestamp) -> pd.DataFrame:
@@ -94,6 +119,20 @@ class StdDevChannelStrategy(Strategy):
     version: ClassVar[int] = 1
     title_fa: ClassVar[str] = "کانال انحراف معیار"
     param_schema: ClassVar[ParamSchema] = SCHEMA
+    warmup_texts_fa: ClassVar[WarmupTextsFa] = WARMUP_TEXTS_FA
+
+    # ------------------------------------------------------------------ engine hooks
+    def first_valid_index(self, h1: pd.DataFrame, h4: pd.DataFrame, params: Mapping[str, Any] | None) -> int | None:
+        """First H1 bar whose channel and both ATRs are defined (the indicator code of ``scan``)."""
+        p, _ = resolve_params(params)
+        cb = compute_channel_bars(h1, h4, p, pattern_from=None)
+        valid = np.flatnonzero(cb.valid)
+        return int(valid[0]) if len(valid) else None
+
+    def warmup_margin_h4_bars(self, params: Mapping[str, Any] | None) -> int:
+        """``WARMUP_ATR_MULT * atr_period`` H4 bars (140 with the default ``atr_period`` 14)."""
+        p, _ = resolve_params(params)
+        return WARMUP_ATR_MULT * int(p.atr_period)
 
     @classmethod
     def validate_params(cls, values: Mapping[str, Any] | None) -> tuple[dict[str, ParamValue], list[str]]:

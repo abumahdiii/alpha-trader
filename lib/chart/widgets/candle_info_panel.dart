@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../theme/app_semantic_colors.dart';
@@ -6,35 +5,27 @@ import '../chart_data.dart';
 import '../chart_format.dart';
 import '../../models/chart_models.dart';
 
-/// Values of the hovered bar (or the newest bar), laid out for a
-/// side-by-side check against MT5's Data Window: server time AND UTC, OHLC
-/// with the symbol's digits, tick volume, spread, and the engine's channel
-/// lines / slope / direction / ATR at that bar.
+/// Values of the clicked bar, laid out for a side-by-side check against
+/// MT5's Data Window: server time AND UTC, OHLC with the symbol's digits,
+/// tick volume, spread, and the engine's channel lines / slope / direction /
+/// ATR at that bar. Closed with [onClose] (the close button).
 class CandleInfoPanel extends StatelessWidget {
-  const CandleInfoPanel({super.key, required this.data, required this.hoverIndex});
+  const CandleInfoPanel({
+    super.key,
+    required this.data,
+    required this.index,
+    required this.onClose,
+    this.noChannelFa,
+  });
 
   final ChartData data;
-  final ValueListenable<int?> hoverIndex;
 
-  @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<int?>(
-      valueListenable: hoverIndex,
-      builder: (BuildContext context, int? hovered, _) {
-        if (data.isEmpty) return const SizedBox.shrink();
-        final int i = (hovered ?? data.length - 1).clamp(0, data.length - 1);
-        return _Panel(data: data, index: i, hovering: hovered != null);
-      },
-    );
-  }
-}
-
-class _Panel extends StatelessWidget {
-  const _Panel({required this.data, required this.index, required this.hovering});
-
-  final ChartData data;
+  /// Bar to show; must be a valid index of [data].
   final int index;
-  final bool hovering;
+  final VoidCallback onClose;
+
+  /// Set for a strategy without a channel: this note replaces the channel rows.
+  final String? noChannelFa;
 
   @override
   Widget build(BuildContext context) {
@@ -44,8 +35,19 @@ class _Panel extends StatelessWidget {
     final TextTheme tt = Theme.of(context).textTheme;
     final AppSemanticColors colors = context.appColors;
     final List<Widget> rows = <Widget>[
-      Text(hovering ? 'کندل زیر نشانگر' : 'آخرین کندل بازه', style: tt.labelLarge),
-      const SizedBox(height: 4),
+      Row(children: <Widget>[
+        Expanded(child: Text('کندل انتخاب‌شده', style: tt.labelLarge)),
+        IconButton(
+          key: const ValueKey<String>('candle-info-close'),
+          tooltip: 'بستن',
+          onPressed: onClose,
+          icon: const Icon(Icons.close, size: 18),
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+        ),
+      ]),
+      const SizedBox(height: 2),
       _row('زمان سرور', c.serverTime ?? 'نامشخص (مدل offset در کش نیست)'),
       _row('زمان UTC', formatMt5Time(c.time)),
       _row('زمان محلی', formatLocal(c.time)),
@@ -58,7 +60,13 @@ class _Panel extends StatelessWidget {
       _row('اسپرد (پوینت)', '${c.spread}'),
       const Divider(height: 10),
     ];
-    if (p == null || !p.drawable) {
+    if (noChannelFa != null) {
+      rows.add(Text(
+        noChannelFa!,
+        key: const ValueKey<String>('candle-info-no-channel'),
+        style: tt.bodySmall?.copyWith(color: colors.mutedText),
+      ));
+    } else if (p == null || !p.drawable) {
       rows.add(Text(
         p == null ? 'برای این کندل مقدار کانال نیامده است.' : 'کانال در این کندل معتبر نیست (دوره گرم‌شدن).',
         style: tt.bodySmall?.copyWith(color: colors.mutedText),

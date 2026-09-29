@@ -11,29 +11,44 @@ import '../chart_painter.dart';
 import '../chart_viewport.dart';
 
 /// Interactive candlestick canvas: owns the viewport (it depends on the
-/// pixel width), turns wheel / drag / pinch into zoom and pan, reports the
-/// hovered bar and setup-marker clicks. Always left-to-right (time axis),
-/// even inside the RTL app.
+/// pixel width), turns wheel / drag / pinch into zoom and pan, draws the
+/// crosshair under the mouse and reports clicks: a setup marker first, then a
+/// backtest trade marker, else the candle under the click, else an
+/// empty-area click. Always
+/// left-to-right (time axis), even inside the RTL app.
 class ChartCanvas extends StatefulWidget {
   const ChartCanvas({
     super.key,
     required this.data,
     required this.viewRequest,
-    required this.hoverIndex,
     this.selectedSetupId,
+    this.selectedTradeKey,
     this.highlightIndex,
     this.onSetupTap,
+    this.onTradeTap,
+    this.onCandleTap,
+    this.onEmptyTap,
   });
 
   final ChartData data;
   final ChartViewRequest viewRequest;
-
-  /// Written with the bar under the mouse (null when outside) — the info
-  /// panel listens to it without rebuilding the chart.
-  final ValueNotifier<int?> hoverIndex;
   final String? selectedSetupId;
+  final TradeKey? selectedTradeKey;
   final int? highlightIndex;
+
+  /// A click on a setup marker (has priority over [onTradeTap] and [onCandleTap]).
   final ValueChanged<SetupMark>? onSetupTap;
+
+  /// A click on a backtest trade's entry or exit marker (has priority over
+  /// [onCandleTap]).
+  final ValueChanged<TradeMark>? onTradeTap;
+
+  /// A click on the column of bar `index` (not on a marker).
+  final ValueChanged<int>? onCandleTap;
+
+  /// A click on the chart that hits neither a marker nor a bar (beyond the
+  /// data, or on the price / time axis).
+  final VoidCallback? onEmptyTap;
 
   @override
   State<ChartCanvas> createState() => ChartCanvasState();
@@ -58,7 +73,8 @@ class ChartCanvasState extends State<ChartCanvas> {
   @override
   void didUpdateWidget(ChartCanvas oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!identical(oldWidget.data, widget.data)) {
+    // Same bars with another trade overlay (ChartData.withTrades): keep the view.
+    if (!identical(oldWidget.data, widget.data) && !identical(oldWidget.data.rates, widget.data.rates)) {
       // New load: start from the newest bars; a pending request re-applies.
       _viewport = null;
       _appliedRequest = -1;
@@ -88,9 +104,11 @@ class ChartCanvasState extends State<ChartCanvas> {
     if (req.serial != _appliedRequest) {
       _appliedRequest = req.serial;
       if (req.reset) v = v.reset();
+      final double? fit = req.fitBars;
+      if (fit != null) v = v.fitBars(fit);
       final int? focus = req.focusIndex;
       if (focus != null && focus >= 0 && focus < widget.data.length) v = v.centerOn(focus);
-      devLog('[Chart] view request #${req.serial}: reset=${req.reset} focus=${req.focusIndex} -> $v');
+      devLog('[Chart] view request #${req.serial}: reset=${req.reset} focus=${req.focusIndex} fit=$fit -> $v');
     }
     return _viewport = v;
   }
@@ -102,11 +120,7 @@ class ChartCanvasState extends State<ChartCanvas> {
     if (next != v) setState(() => _viewport = next);
   }
 
-  void _setHover(Offset? p, ChartLayout layout) {
-    _hover.value = p;
-    final ChartViewport? v = _viewport;
-    widget.hoverIndex.value = (p == null || v == null || !layout.inPlot(p)) ? null : v.barAt(p.dx);
-  }
+  void _setHover(Offset? p) => _hover.value = p;
 
   void _onPointerSignal(PointerSignalEvent event, ChartLayout layout) {
     if (event is! PointerScrollEvent) return;
@@ -129,11 +143,32 @@ class ChartCanvasState extends State<ChartCanvas> {
 
   void _onTapUp(TapUpDetails d, ChartLayout layout, PriceScale scale) {
     final ChartViewport? v = _viewport;
-    if (v == null || !layout.inPlot(d.localPosition)) return;
-    final SetupMark? hit = hitTestSetup(widget.data, v, scale, d.localPosition);
+    if (v == null) return;
+    final Offset p = d.localPosition;
+    if (!layout.inPlot(p)) {
+      devLog('[Chart] tap outside the plot (axis) -> empty');
+      widget.onEmptyTap?.call();
+      return;
+    }
+    final SetupMark? hit = hitTestSetup(widget.data, v, scale, p);
     if (hit != null) {
-      devLog('[Chart] marker tap -> ${hit.item.id}');
+      devLog('[Chart] tap -> setup marker ${hit.item.id} (marker has priority over the candle)');
       widget.onSetupTap?.call(hit);
+      return;
+    }
+    final TradeMark? trade = hitTestTrade(widget.data, v, scale, p);
+    if (trade != null) {
+      devLog('[Chart] tap -> trade marker ${trade.key} (trade has priority over the candle)');
+      widget.onTradeTap?.call(trade);
+      return;
+    }
+    final int? bar = v.barAt(p.dx);
+    if (bar != null) {
+      devLog('[Chart] tap -> candle $bar');
+      widget.onCandleTap?.call(bar);
+    } else {
+      devLog('[Chart] tap -> no bar under x=${p.dx.toStringAsFixed(1)} -> empty');
+      widget.onEmptyTap?.call();
     }
   }
 
@@ -160,8 +195,8 @@ class ChartCanvasState extends State<ChartCanvas> {
           onPointerSignal: (PointerSignalEvent e) => _onPointerSignal(e, layout),
           child: MouseRegion(
             cursor: SystemMouseCursors.precise,
-            onHover: (PointerHoverEvent e) => _setHover(e.localPosition, layout),
-            onExit: (_) => _setHover(null, layout),
+            onHover: (PointerHoverEvent e) => _setHover(e.localPosition),
+            onExit: (_) => _setHover(null),
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTapUp: (TapUpDetails d) => _onTapUp(d, layout, scale),
@@ -176,7 +211,7 @@ class ChartCanvasState extends State<ChartCanvas> {
                   }
                   return next;
                 });
-                _setHover(d.localFocalPoint, layout);
+                _setHover(d.localFocalPoint);
               },
               child: Stack(
                 fit: StackFit.expand,
@@ -191,6 +226,7 @@ class ChartCanvasState extends State<ChartCanvas> {
                         scale: scale,
                         style: style,
                         selectedSetupId: widget.selectedSetupId,
+                        selectedTradeKey: widget.selectedTradeKey,
                         highlightIndex: widget.highlightIndex,
                       ),
                     ),

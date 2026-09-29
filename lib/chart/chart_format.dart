@@ -33,3 +33,19 @@ String formatChartPrice(double? price, int? digits) {
 
 /// A plain engine number (volume, ATR, slope) with fixed decimals.
 String formatValue(double? value, int decimals) => value == null ? '—' : value.toStringAsFixed(decimals);
+
+/// An engine P&L / R value with an explicit sign: `+38.74`, `-17.99`, `0.00`.
+String formatSigned(double? value, int decimals) {
+  if (value == null) return '—';
+  final String s = value.abs().toStringAsFixed(decimals);
+  if (double.parse(s) == 0) return s;
+  return value > 0 ? '+$s' : '-$s';
+}
+
+/// An engine fraction 0..1 as a percentage: `0.571428` -> `57.1%`.
+String formatFractionPct(double? fraction, {int decimals = 1}) =>
+    fraction == null ? '—' : '${(fraction * 100).toStringAsFixed(decimals)}%';
+
+/// An engine profit factor: `∞` when the engine says so, `—` when null.
+String formatProfitFactor(double? pf, {required bool infinite}) =>
+    infinite ? '∞' : (pf == null ? '—' : pf.toStringAsFixed(2));

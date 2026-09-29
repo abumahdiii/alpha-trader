@@ -1,11 +1,14 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 
 import '../core/app_logger.dart';
 import '../core/dev_mode.dart';
 import 'chart_data.dart';
+import '../models/backtest_models.dart';
 import '../models/market_data.dart';
+import '../models/strategy.dart';
 import '../services/engine_api.dart';
 import 'chart_data_source.dart';
 import 'chart_format.dart';
@@ -17,7 +20,7 @@ enum ChartLoadState { idle, loading, ready, empty, error }
 /// depends on its pixel width). [serial] changes on every new request.
 @immutable
 class ChartViewRequest {
-  const ChartViewRequest._(this.serial, {this.focusIndex, this.reset = false});
+  const ChartViewRequest._(this.serial, {this.focusIndex, this.reset = false, this.fitBars});
 
   static const ChartViewRequest none = ChartViewRequest._(0);
 
@@ -25,6 +28,9 @@ class ChartViewRequest {
 
   /// Centre this bar.
   final int? focusIndex;
+
+  /// Zoom so about this many bars fill the plot (before centring).
+  final double? fitBars;
 
   /// Back to the newest bars at the default zoom.
   final bool reset;
@@ -77,15 +83,28 @@ const String kEngineUnavailableFa =
     'موتور تحلیل در دسترس نیست. صبر کنید تا نشانگر موتور «فعال» شود و دوباره تلاش کنید.';
 const String kEmptyRangeFa = 'در این بازه هیچ کندلی در کش نیست. بازه دیگری انتخاب کنید یا داده را به‌روز کنید.';
 const String kUnexpectedErrorFa = 'خطای غیرمنتظره در دریافت داده چارت.';
+const String kRangeOrderErrorFa = 'تاریخ شروع باید قبل از تاریخ پایان باشد.';
+
+/// Shown instead of the channel lines / values for a strategy without a channel.
+const String kNoChannelFa = 'این سیستم کانال ندارد';
 
 /// State of the chart page: inputs (symbol, timeframe, UTC date range),
 /// loading/error/empty states, the loaded [ChartData], setup selection and
 /// the data-info / update panel. All data comes from a [ChartDataSource];
 /// this class never computes a trading value.
 class ChartController extends ChangeNotifier {
-  ChartController({required ChartDataSource source}) : _source = source;
+  /// [showSetups] false: no `/chart/setups` request (the backtest chart
+  /// shows the run's trades instead of the scanned setups). [strategy] is
+  /// the system whose setups (and, for `stddev_channel`, channel) are shown.
+  ChartController({required ChartDataSource source, this.showSetups = true, String strategy = kDefaultStrategyName})
+      : _source = source,
+        _strategy = strategy;
 
   final ChartDataSource _source;
+  final bool showSetups;
+
+  /// Bars around a trade that [focusTrade] shows at least.
+  static const double minTradeFitBars = 40;
 
   /// Default window when no range is chosen: the last 30 days of data.
   static const Duration defaultWindow = Duration(days: 30);
@@ -93,6 +112,8 @@ class ChartController extends ChangeNotifier {
 
   List<SymbolItem> _symbols = const <SymbolItem>[];
   String? _symbol;
+  String _strategy;
+  List<StrategyOption> _strategies = const <StrategyOption>[];
   ChartTimeframe _timeframe = ChartTimeframe.h1;
   DateTime? _from;
   DateTime? _to;
@@ -108,6 +129,22 @@ class ChartController extends ChangeNotifier {
   String? _dataInfoError;
   bool _updating = false;
   UpdateOutcome? _updateOutcome;
+  int? _inspectedIndex;
+  TradeOverlay? _tradeOverlay;
+  TradeKey? _selectedTradeKey;
+
+  // Inputs of the last load() that went out (snapshot at its start), for
+  // the «به‌روزرسانی نمودار» highlight.
+  bool _hasLoaded = false;
+  String? _loadedSymbol;
+  ChartTimeframe? _loadedTimeframe;
+  DateTime? _loadedFrom;
+  DateTime? _loadedTo;
+
+  /// setSymbol/setTimeframe load by themselves; until that load starts the
+  /// selection is not "dirty" (no highlight flicker while the meta arrives).
+  bool _autoLoadPending = false;
+  bool _wasDirty = false;
 
   int _loadSerial = 0;
   int _infoSerial = 0;
@@ -116,6 +153,17 @@ class ChartController extends ChangeNotifier {
 
   List<SymbolItem> get symbols => _symbols;
   String? get symbol => _symbol;
+
+  /// Selected strategy name (the `strategy` query of the chart routes).
+  String get strategy => _strategy;
+
+  /// The strategy selector's entries (empty until loaded / when it failed:
+  /// the chart then stays on [strategy] without a selector).
+  List<StrategyOption> get strategies => _strategies;
+
+  /// Only `stddev_channel` has channel lines: for any other strategy the
+  /// chart neither requests nor draws a channel.
+  bool get hasChannel => strategyHasChannel(_strategy);
   ChartTimeframe get timeframe => _timeframe;
 
   /// UTC range start (inclusive); null = engine default.
@@ -132,6 +180,12 @@ class ChartController extends ChangeNotifier {
   String? get selectedSetupId => _selectedSetupId;
   SetupMark? get selectedSetup => _data?.setupById(_selectedSetupId);
   int? get highlightIndex => _highlightIndex;
+
+  /// Backtest trades drawn over the bars (null = none, e.g. the chart page).
+  TradeOverlay? get tradeOverlay => _tradeOverlay;
+
+  /// The trade picked by a table row or a marker click (kept across reloads).
+  TradeKey? get selectedTradeKey => _selectedTradeKey;
   ChartViewRequest get viewRequest => _viewRequest;
   DataInfo? get dataInfo => _dataInfo;
   bool get dataInfoLoading => _dataInfoLoading;
@@ -139,6 +193,26 @@ class ChartController extends ChangeNotifier {
   bool get updating => _updating;
   UpdateOutcome? get updateOutcome => _updateOutcome;
   bool get isLoading => _state == ChartLoadState.loading;
+
+  /// Bar whose values the candle info panel shows (opened by a click on a
+  /// candle); null = panel closed. Cleared by every load.
+  int? get inspectedIndex => _inspectedIndex;
+
+  /// True when the selected symbol / timeframe / range differs from what the
+  /// chart currently shows, i.e. «به‌روزرسانی نمودار» would change it.
+  bool get rangeDirty =>
+      _hasLoaded &&
+      !_autoLoadPending &&
+      (_symbol != _loadedSymbol || _timeframe != _loadedTimeframe || _from != _loadedFrom || _to != _loadedTo);
+
+  /// Persian validation error of the selected range (start after end), or
+  /// null. [setRange] accepts it (from and to are picked one after the
+  /// other); [load] refuses it.
+  String? get rangeErrorFa {
+    final DateTime? from = _from;
+    final DateTime? to = _to;
+    return (from != null && to != null && from.isAfter(to)) ? kRangeOrderErrorFa : null;
+  }
 
   int? get digits {
     for (final SymbolItem s in _symbols) {
@@ -149,9 +223,11 @@ class ChartController extends ChangeNotifier {
 
   // ------------------------------------------------------------ inputs
 
-  /// Symbols -> first symbol -> its default range -> load.
+  /// Symbols -> first symbol -> its default range -> load. The strategy
+  /// list loads alongside (never blocks or fails the chart).
   Future<void> init() async {
     final int serial = ++_loadSerial;
+    unawaited(loadStrategies());
     _setState(ChartLoadState.loading);
     try {
       final List<SymbolItem> list = await _source.symbols();
@@ -173,6 +249,28 @@ class ChartController extends ChangeNotifier {
     unawaited(refreshDataInfo());
   }
 
+  /// Opens a fixed series (the backtest chart): symbols (for the price
+  /// digits), then [symbol] over [from]..[to] (UTC), then the data info.
+  Future<void> openSeries({required String symbol, DateTime? from, DateTime? to}) async {
+    final int serial = ++_loadSerial;
+    _symbol = symbol;
+    _from = from?.toUtc();
+    _to = to?.toUtc();
+    _log('open series $symbol ${_fmt(_from)} .. ${_fmt(_to)}');
+    _setState(ChartLoadState.loading);
+    try {
+      final List<SymbolItem> list = await _source.symbols();
+      if (_stale(serial, 'symbols')) return;
+      _symbols = list;
+    } catch (e) {
+      // Only the digits come from here; the bars still load.
+      if (_stale(serial, 'symbols')) return;
+      _log('symbols failed (prices shown with the engine precision): $e');
+    }
+    await load();
+    unawaited(refreshDataInfo());
+  }
+
   Future<void> setSymbol(String symbol) async {
     if (symbol == _symbol) return;
     _log('symbol -> $symbol');
@@ -180,10 +278,39 @@ class ChartController extends ChangeNotifier {
     _resetSelection();
     _dataInfo = null;
     _updateOutcome = null;
+    _autoLoadPending = true;
     notifyListeners();
     await _applyDefaultRange();
     await load();
     unawaited(refreshDataInfo());
+  }
+
+  /// Reads the strategy selector's entries. A failure only hides the
+  /// selector (logged); the chart keeps its [strategy].
+  Future<void> loadStrategies() async {
+    try {
+      final List<StrategyOption> list = await _source.strategies();
+      if (_disposed) return;
+      _strategies = list;
+      _log('strategies: ${list.map((StrategyOption s) => '${s.name}(${s.source.code})').join(', ')}; '
+          'selected $_strategy');
+      notifyListeners();
+    } catch (e) {
+      if (_disposed) return;
+      _log('strategies failed (selector hidden, chart stays on $_strategy): $e');
+    }
+  }
+
+  /// Shows another strategy's setups (and hides the channel of a strategy
+  /// without one), then reloads the current range.
+  Future<void> setStrategy(String name) async {
+    if (name == _strategy) return;
+    _log('strategy $_strategy -> $name (channel: ${strategyHasChannel(name) ? 'yes' : 'no'})');
+    _strategy = name;
+    _resetSelection();
+    _autoLoadPending = true;
+    notifyListeners();
+    await load();
   }
 
   Future<void> setTimeframe(ChartTimeframe tf) async {
@@ -192,12 +319,15 @@ class ChartController extends ChangeNotifier {
     _timeframe = tf;
     _resetSelection();
     _dataInfo = null;
+    _autoLoadPending = true;
     notifyListeners();
     await load();
     unawaited(refreshDataInfo());
   }
 
-  /// Sets the UTC range without loading (the «بارگذاری» button loads).
+  /// Sets the UTC range without loading: the «به‌روزرسانی نمودار» button
+  /// loads it ([rangeDirty] highlights it meanwhile). A start after the end
+  /// is kept as picked and reported by [rangeErrorFa] instead of rejected.
   void setRange({DateTime? from, DateTime? to}) {
     _from = from?.toUtc() ?? _from;
     _to = to?.toUtc() ?? _to;
@@ -240,31 +370,49 @@ class ChartController extends ChangeNotifier {
   // ------------------------------------------------------------ loading
 
   /// Loads bars + channel (+ setups on H1) for the current inputs. A newer
-  /// call makes older in-flight responses stale; they are dropped.
+  /// call makes older in-flight responses stale; they are dropped. An
+  /// invalid range ([rangeErrorFa]) is refused without any request.
   Future<void> load() async {
     final String? symbol = _symbol;
     if (symbol == null) return;
+    _autoLoadPending = false;
+    if (rangeErrorFa != null) {
+      _log('load refused: invalid range ${formatUtc(_from!)} > ${formatUtc(_to!)}');
+      notifyListeners();
+      return;
+    }
     final int serial = ++_loadSerial;
     final ChartTimeframe tf = _timeframe;
     final DateTime? from = _from;
     final DateTime? to = _to;
+    final String strategy = _strategy;
+    final bool withChannel = strategyHasChannel(strategy);
+    final bool withSetups = tf == ChartTimeframe.h1 && showSetups;
+    _hasLoaded = true;
+    _loadedSymbol = symbol;
+    _loadedTimeframe = tf;
+    _loadedFrom = from;
+    _loadedTo = to;
+    _inspectedIndex = null;
     final Stopwatch sw = Stopwatch()..start();
-    _log('load #$serial $symbol ${tf.code} ${from ?? 'default'} .. ${to ?? 'default'}');
+    _log('load #$serial $symbol ${tf.code} ${from ?? 'default'} .. ${to ?? 'default'} strategy=$strategy '
+        '(channel ${withChannel ? 'requested' : 'not requested: this strategy has none'}, '
+        'setups ${withSetups ? 'requested' : 'not requested'})');
     _setState(ChartLoadState.loading);
     try {
       // In parallel; Future.wait also keeps a second failure from escaping
       // as an unhandled error.
-      final List<Object> results = await Future.wait<Object>(<Future<Object>>[
+      final List<Object?> results = await Future.wait<Object?>(<Future<Object?>>[
         _source.rates(symbol, tf, from: from, to: to),
-        _source.channel(symbol, tf, from: from, to: to),
+        if (withChannel) _channelOrNull(symbol, tf, from: from, to: to, strategy: strategy) else Future.value(),
         // /chart/setups filters by decision time (= confirmation bar close);
         // shifting the window by one H1 bar selects exactly the setups whose
         // confirmation bar is among the loaded bars (incl. a pending setup
         // on the newest bar).
-        if (tf == ChartTimeframe.h1) _source.setups(symbol, from: from?.add(_h1), to: to?.add(_h1)),
+        if (withSetups) _source.setups(symbol, from: from?.add(_h1), to: to?.add(_h1), strategy: strategy),
       ]);
-      final RatesResult rates = results[0] as RatesResult;
-      final ChannelResult channel = results[1] as ChannelResult;
+      final RatesResult rates = results[0]! as RatesResult;
+      final ChannelResult? channel = results[1] as ChannelResult?;
       final SetupsResult? setups = results.length > 2 ? results[2] as SetupsResult : null;
       if (_stale(serial, 'load')) return;
       final ChartData data = ChartData.build(
@@ -272,15 +420,18 @@ class ChartController extends ChangeNotifier {
         timeframe: tf,
         channelResult: channel,
         setupsResult: setups,
+        tradeOverlay: _tradeOverlay,
         digits: digits,
       );
       _data = data;
       _resetSelection();
       _log('load #$serial done in ${sw.elapsedMilliseconds} ms: ${data.length} bars, '
-          '${channel.validCount}/${channel.count} valid channel points, ${data.setups.length} setups, '
-          '${data.gaps.length} gaps, source=${rates.source} stale=${rates.stale}');
+          '${channel == null ? 'no channel' : '${channel.validCount}/${channel.count} valid channel points'}, '
+          '${data.setups.length} setups, ${data.gaps.length} gaps, source=${rates.source} stale=${rates.stale}');
+      if (setups != null) _logSetups(setups);
+      if (_tradeOverlay != null) _logOverlay('load #$serial');
       if (data.isEmpty) {
-        _setState(ChartLoadState.empty, message: rates.message ?? channel.messageFa ?? kEmptyRangeFa);
+        _setState(ChartLoadState.empty, message: rates.message ?? channel?.messageFa ?? kEmptyRangeFa);
       } else {
         _viewRequest = ChartViewRequest._(_viewRequest.serial + 1, reset: true);
         _setState(ChartLoadState.ready);
@@ -289,6 +440,39 @@ class ChartController extends ChangeNotifier {
       if (_stale(serial, 'load')) return;
       _fail(e, 'load #$serial after ${sw.elapsedMilliseconds} ms');
     }
+  }
+
+  /// `/chart/channel`, or null when the engine says this strategy has no
+  /// channel (409 `channel_not_available`: the chart shows no lines, no error).
+  Future<ChannelResult?> _channelOrNull(String symbol, ChartTimeframe tf,
+      {DateTime? from, DateTime? to, required String strategy}) async {
+    try {
+      return await _source.channel(symbol, tf, from: from, to: to, strategy: strategy);
+    } on EngineApiException catch (e) {
+      if (e.code != 'channel_not_available') rethrow;
+      _log('channel of $strategy not available (409): drawn without channel');
+      return null;
+    }
+  }
+
+  /// DEV_MODE trace of the parsed `/chart/setups` answer (counts only; the
+  /// numbers are the engine's).
+  void _logSetups(SetupsResult r) {
+    if (!kDevMode) return;
+    final StrategyProvenance p = r.provenance;
+    _log('setups of ${p.strategy} v${p.strategyVersion} (${p.strategySource.code}'
+        '${p.strategySha256 == null ? '' : ' sha=${shortSha(p.strategySha256!)}'}) params v${p.paramsVersion}');
+    final SetupsEvaluation? ev = r.evaluation;
+    final SetupsSummary? s = r.summary;
+    final BacktestWindow? w = r.backtestWindow;
+    final int outcomes = r.setups.where((SetupItem x) => x.outcome != null).length;
+    final int flags = r.setups.where((SetupItem x) => x.backtest != null).length;
+    _log('setups parsed: ${r.setups.length} items ${r.statusCounts}, $outcomes outcomes, $flags backtest flags; '
+        'evaluation ${ev == null ? 'absent' : ev.available ? 'available' : 'unavailable (${ev.messageFa})'}; '
+        'summary ${s == null ? '-' : 'closed=${s.closed} W/L=${s.wins}/${s.losses} open=${s.openEndOfData} '
+            'net=${s.netPnl} R=${s.totalR} pf=${s.profitFactorInfinite ? 'inf' : s.profitFactor}'}; '
+        'backtest window ${w == null ? '-' : w.available ? '${w.from} .. ${w.to} clipped=${w.clipped} '
+            'trades=${w.trades} net=${w.netProfit}' : 'unavailable (${w.code})'}');
   }
 
   bool _stale(int serial, String what) {
@@ -323,6 +507,29 @@ class ChartController extends ChangeNotifier {
   void _resetSelection() {
     _selectedSetupId = null;
     _highlightIndex = null;
+    _inspectedIndex = null;
+  }
+
+  /// Opens the candle info panel on bar [index] (a click on that candle).
+  void inspectCandle(int index) {
+    final ChartData? d = _data;
+    if (d == null || index < 0 || index >= d.length) {
+      _log('inspect candle $index ignored (bars=${d?.length ?? 0})');
+      return;
+    }
+    if (_inspectedIndex == index) return;
+    _inspectedIndex = index;
+    _log('candle inspected: bar $index (${formatUtc(d.candles[index].time)})');
+    notifyListeners();
+  }
+
+  /// Closes the candle info panel; [reason] is only logged.
+  void clearInspection({String reason = ''}) {
+    final int? i = _inspectedIndex;
+    if (i == null) return;
+    _inspectedIndex = null;
+    _log('candle panel closed (bar $i${reason.isEmpty ? '' : ', $reason'})');
+    notifyListeners();
   }
 
   /// Selects a setup (marker click or table row). With [jump] the chart
@@ -340,13 +547,20 @@ class ChartController extends ChangeNotifier {
 
   /// Centres the bar nearest to [t]. Outside the loaded bars, the range moves
   /// to a [defaultWindow] around [t] first (e.g. a gap from the full list).
-  Future<void> jumpToTime(DateTime t) async {
+  ///
+  /// With [until] (a span such as a trade's entry .. exit), the loaded range
+  /// must cover both ends, the chart centres the middle of the span and
+  /// zooms so the whole span plus a margin fits ([minTradeFitBars] at least).
+  Future<void> jumpToTime(DateTime t, {DateTime? until}) async {
+    final DateTime end = until == null || until.isBefore(t) ? t : until;
     final ChartData? data = _data;
-    if (data == null || !data.covers(t)) {
-      _log('jump to ${formatUtc(t)}: outside loaded bars, reloading around it');
+    if (data == null || !data.covers(t) || !data.covers(end)) {
+      _log('jump to ${formatUtc(t)}${until == null ? '' : ' .. ${formatUtc(end)}'}: outside loaded bars, '
+          'reloading around it');
       final Duration half = Duration(milliseconds: defaultWindow.inMilliseconds ~/ 2);
       _from = t.toUtc().subtract(half);
-      _to = t.toUtc().add(half);
+      _to = end.toUtc().add(half);
+      _autoLoadPending = true;
       notifyListeners();
       await load();
     }
@@ -354,10 +568,72 @@ class ChartController extends ChangeNotifier {
     if (now == null || now.isEmpty) return;
     final int? i = now.nearestIndex(t);
     if (i == null) return;
-    _log('jump to ${formatUtc(t)} -> bar $i (${formatUtc(now.candles[i].time)})');
     _highlightIndex = i;
-    _viewRequest = ChartViewRequest._(_viewRequest.serial + 1, focusIndex: i);
+    if (until == null) {
+      _log('jump to ${formatUtc(t)} -> bar $i (${formatUtc(now.candles[i].time)})');
+      _viewRequest = ChartViewRequest._(_viewRequest.serial + 1, focusIndex: i);
+    } else {
+      final int j = now.nearestIndex(end) ?? i;
+      final int span = j - i + 1;
+      final double fit = math.max(minTradeFitBars, span * 1.5 + 10);
+      final int centre = (i + j) ~/ 2;
+      _log('jump to ${formatUtc(t)} .. ${formatUtc(end)} -> bars $i..$j, centre $centre, fit ${fit.round()} bars');
+      _viewRequest = ChartViewRequest._(_viewRequest.serial + 1, focusIndex: centre, fitBars: fit);
+    }
     notifyListeners();
+  }
+
+  // ------------------------------------------------------------ backtest trades
+
+  /// Draws [overlay]'s trades over the bars (null removes them). The loaded
+  /// bars are kept; only the trade placement is rebuilt.
+  void setTradeOverlay(TradeOverlay? overlay) {
+    _tradeOverlay = overlay;
+    if (overlay == null ||
+        _selectedTradeKey == null ||
+        !overlay.trades.any((t) => tradeKeyOf(t) == _selectedTradeKey)) {
+      _selectedTradeKey = null;
+    }
+    final ChartData? d = _data;
+    if (d != null) _data = d.withTrades(overlay);
+    if (overlay == null) {
+      _log('trades overlay removed');
+    } else {
+      _logOverlay('overlay set');
+    }
+    notifyListeners();
+  }
+
+  void _logOverlay(String what) {
+    if (!kDevMode) return;
+    final TradeOverlay? o = _tradeOverlay;
+    final ChartData? d = _data;
+    _log('trades overlay ($what): run #${o?.runId}, ${o?.trades.length ?? 0} trades, '
+        '${d?.trades.length ?? 0} on the loaded bars ${_fmt(_loadedFrom)} .. ${_fmt(_loadedTo)} '
+        '(${d?.length ?? 0} bars)');
+  }
+
+  /// Selects a trade (marker click) without moving the chart.
+  void selectTrade(TradeKey? key) {
+    if (key == _selectedTradeKey) return;
+    _selectedTradeKey = key;
+    _log('select trade ${key ?? '-'}');
+    notifyListeners();
+  }
+
+  /// A trade row: select it and zoom the chart onto its entry .. exit bars
+  /// (reloading around it when it is outside the loaded bars).
+  Future<void> focusTrade(BacktestTrade t) async {
+    final DateTime? entry = t.entryTime;
+    final TradeKey key = tradeKeyOf(t);
+    if (entry == null) {
+      _log('focus trade $key ignored: no entry time');
+      return;
+    }
+    _selectedTradeKey = key;
+    final DateTime? exit = t.exitBarTime ?? t.exitTime;
+    _log('trade row $key -> zoom to ${formatUtc(entry)} .. ${exit == null ? '-' : formatUtc(exit)}');
+    await jumpToTime(entry, until: exit ?? entry);
   }
 
   void resetView() {
@@ -442,6 +718,24 @@ class ChartController extends ChangeNotifier {
       await load();
     }
   }
+
+  /// Logs [rangeDirty] transitions (every state change goes through here).
+  @override
+  void notifyListeners() {
+    if (kDevMode) {
+      final bool dirty = rangeDirty;
+      if (dirty != _wasDirty) {
+        _wasDirty = dirty;
+        _log(dirty
+            ? 'range dirty: selection $_symbol ${_timeframe.code} ${_fmt(_from)} .. ${_fmt(_to)} != loaded '
+                '$_loadedSymbol ${_loadedTimeframe?.code} ${_fmt(_loadedFrom)} .. ${_fmt(_loadedTo)}'
+            : 'range clean: selection = loaded');
+      }
+    }
+    super.notifyListeners();
+  }
+
+  static String _fmt(DateTime? t) => t == null ? '-' : formatUtc(t);
 
   void _log(String message) {
     if (!kDevMode) return;

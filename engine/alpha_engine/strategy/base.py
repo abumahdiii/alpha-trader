@@ -17,6 +17,25 @@ only see
 The caller builds these frames (:func:`slice_closed_bars`); a strategy never slices future data out
 of a bigger frame itself. :func:`assert_closed_bars` checks the rule and :func:`evaluate_checked`
 enforces the whole contract around ``Strategy.evaluate``.
+
+Engine hooks (strategy contract S1)
+-----------------------------------
+The backtester, the chart and (later) the plugin host only talk to a strategy through these members, so no
+engine module needs to know which strategy it runs:
+
+* ``evaluate(ctx)`` -- the decision on ONE closed bar (abstract);
+* ``scan(h1, h4, params, account, *, symbol)`` -- the candidates of EVERY H1 bar of a full history, ignoring
+  the open-trade state. Default: :func:`evaluate_checked` on each closed prefix ``h1[:t+1]`` with the H4 bars
+  closed at ``open_t + 1h`` -- correct by construction but O(n^2) on long histories; a strategy may override
+  it with a vectorised version that returns exactly the same candidates (tests/test_no_lookahead.py,
+  tests/test_strategy_contract.py);
+* ``first_valid_index(h1, h4, params)`` -- first H1 bar at which a decision is possible (default: from the
+  ``history_bars`` class attribute);
+* ``warmup_margin_h4_bars(params)`` -- extra H4 bars after that bar before a backtest window may start
+  (``backtest.periods.earliest_start``; default 0) and ``warmup_texts_fa`` -- the Persian wording of the
+  period errors / notes that mention it;
+* ``identity`` -- :class:`StrategyIdentity` (name, code version, source file SHA-256, builtin/plugin), part
+  of every cache key and every result's provenance.
 """
 
 from __future__ import annotations
@@ -25,20 +44,23 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
+import numpy as np
 import pandas as pd
 
 from ..logging_setup import get_logger, is_dev_mode
 from ..storage.account_settings import AccountSettings
-from .params import ParamSchema, ParamValue
-from .signal import SignalCandidate
+from .params import ParamSchema, ParamValue, params_hash
+from .signal import SignalCandidate, setup_slug
 
 logger = get_logger(__name__)
 
 H1_DURATION = timedelta(hours=1)
 H4_DURATION = timedelta(hours=4)
 TIME_COLUMN = "time"
+
+StrategySource = Literal["builtin", "plugin"]
 
 
 class LookAheadError(RuntimeError):
@@ -47,6 +69,51 @@ class LookAheadError(RuntimeError):
 
 class StrategyContractError(RuntimeError):
     """A strategy returned something that violates the ``evaluate`` contract."""
+
+
+class StrategyParamsError(ValueError):
+    """Params rejected by ``Strategy.validate_params`` (Persian messages in ``errors_fa``)."""
+
+    def __init__(self, strategy_name: str, errors_fa: list[str]) -> None:
+        super().__init__(f"{strategy_name}: " + "; ".join(errors_fa))
+        self.strategy_name = strategy_name
+        self.errors_fa = list(errors_fa)
+
+
+@dataclass(frozen=True)
+class StrategyIdentity:
+    """Who decided: part of every scan cache key and of every result's provenance.
+
+    ``sha256`` = SHA-256 of the strategy's source file for uploaded plugins (``None`` for built-in code,
+    whose identity is the engine build + ``version``); ``source`` = ``builtin`` | ``plugin``.
+    """
+
+    name: str
+    version: int
+    sha256: str | None = None
+    source: StrategySource = "builtin"
+
+    @property
+    def cache_key(self) -> tuple[str, int, str | None]:
+        return (self.name, self.version, self.sha256)
+
+    def label(self) -> str:
+        """``name vN [source sha=abcdef012345]`` for logs."""
+        sha = "" if self.sha256 is None else f" sha={self.sha256[:12]}"
+        return f"{self.name} v{self.version} [{self.source}{sha}]"
+
+
+@dataclass(frozen=True)
+class WarmupTextsFa:
+    """Persian wording of the period errors / notes that mention a strategy's warm-up (``{margin}`` = the
+    margin in H4 bars). The defaults are strategy-neutral; a strategy overrides ``Strategy.warmup_texts_fa``."""
+
+    no_valid_bar: str = "داده کش برای اجرای سیستم کافی نیست (هیچ کندلی با داده کافی برای تصمیم سیستم وجود ندارد)."
+    too_short: str = ("داده کش برای گرم شدن اندیکاتورها کافی نیست: بعد از اولین کندل معتبر سیستم به {margin} کندل "
+                      "H4 دیگر (حاشیه گرم شدن اندیکاتورها) نیاز است.")
+    window_too_early: str = "سیستم به داده کافی و حاشیه گرم شدن اندیکاتورها ({margin} کندل H4) نیاز دارد."
+    limits: str = "سیستم به داده کافی و حاشیه گرم شدن اندیکاتورها ({margin} کندل H4) نیاز دارد"
+    clip_reason: str = "گرم شدن اندیکاتورهای سیستم"
 
 
 def bar_open_times(frame: pd.DataFrame) -> pd.DatetimeIndex:
@@ -140,12 +207,31 @@ class Strategy(ABC):
       strategy's ``name``/``version``, and no entry price (entry = open of the next bar, resolved later).
 
     Callers should go through :func:`evaluate_checked`, which enforces these points.
+
+    Optional class attributes: ``history_bars`` (H1 bars ``evaluate`` needs before it can decide; drives the
+    default :meth:`first_valid_index`), ``source`` / ``code_sha256`` (:attr:`identity`; set by the plugin host)
+    and ``warmup_texts_fa``. See the module docstring for the engine hooks.
     """
 
     name: ClassVar[str]
     version: ClassVar[int]
     title_fa: ClassVar[str]
     param_schema: ClassVar[ParamSchema]
+    history_bars: ClassVar[int] = 1
+    source: ClassVar[StrategySource] = "builtin"
+    code_sha256: ClassVar[str | None] = None
+    warmup_texts_fa: ClassVar[WarmupTextsFa] = WarmupTextsFa()
+
+    @property
+    def identity(self) -> StrategyIdentity:
+        return StrategyIdentity(name=self.name, version=self.version, sha256=self.code_sha256, source=self.source)
+
+    def clean_params(self, params: Mapping[str, Any] | None) -> dict[str, ParamValue]:
+        """:meth:`validate_params` or :class:`StrategyParamsError`."""
+        clean, errors = self.validate_params(params)
+        if errors:
+            raise StrategyParamsError(self.name, errors)
+        return clean
 
     @classmethod
     def validate_params(cls, values: Mapping[str, Any] | None) -> tuple[dict[str, ParamValue], list[str]]:
@@ -169,6 +255,62 @@ class Strategy(ABC):
     @abstractmethod
     def evaluate(self, ctx: StrategyContext) -> SignalCandidate | None:
         """Decide on the closed H1 bar at the end of ``ctx.h1``. See the class docstring."""
+
+    # ------------------------------------------------------------------ engine hooks (defaults)
+    def first_valid_index(self, h1: pd.DataFrame, h4: pd.DataFrame, params: Mapping[str, Any] | None) -> int | None:
+        """First H1 bar index at which ``evaluate`` can decide (``None``: never in this history).
+
+        Default: bar ``history_bars - 1`` (the first bar with ``history_bars`` closed H1 bars up to it)."""
+        need = max(1, int(self.history_bars))
+        return need - 1 if len(h1) >= need else None
+
+    def warmup_margin_h4_bars(self, params: Mapping[str, Any] | None) -> int:
+        """Extra H4 bars after :meth:`first_valid_index` before a backtest window may start (path-dependent
+        indicators such as Wilder ATR still carry their seed). Default: 0."""
+        return 0
+
+    def scan(
+        self,
+        h1: pd.DataFrame,
+        h4: pd.DataFrame,
+        params: Mapping[str, Any] | None,
+        account: AccountSettings,
+        *,
+        symbol: str,
+    ) -> list[SignalCandidate]:
+        """Candidates of every H1 bar of ``h1`` (chronological), ignoring the open-trade state.
+
+        Default: :func:`evaluate_checked` on the closed prefix of every bar -- H1 ``h1[:t+1]`` and the H4 bars
+        with ``open + 4h <= open_t + 1h`` -- with the validated params (``prepare`` is not used here). Correct
+        by construction (the contract is checked per bar) but O(n^2); override with an equivalent vectorised
+        version for long histories. ``h1`` must be sorted by open time.
+        """
+        clean = self.clean_params(params)
+        phash = params_hash(clean)
+        if len(h1) == 0:
+            return []
+        h1_ns = bar_open_times(h1).as_unit("ns").asi8
+        if len(h1_ns) > 1 and not (np.diff(h1_ns) > 0).all():
+            raise ValueError("scan: H1 bars must be sorted by open time without duplicates")
+        h4_times = bar_open_times(h4)
+        h4_sorted = h4_times.is_monotonic_increasing
+        h4_close_ns = h4_times.as_unit("ns").asi8 + pd.Timedelta(H4_DURATION).value
+        h1_step = pd.Timedelta(H1_DURATION).value
+        out: list[SignalCandidate] = []
+        for t in range(len(h1_ns)):
+            decision_ns = int(h1_ns[t]) + h1_step
+            if h4_sorted:
+                h4_t = h4.iloc[: int(np.searchsorted(h4_close_ns, decision_ns, side="right"))]
+            else:
+                h4_t = slice_closed_bars(h4, H4_DURATION, pd.Timestamp(decision_ns, tz="UTC"))
+            ctx = StrategyContext(symbol=symbol, h1=h1.iloc[: t + 1], h4=h4_t, account=account, params=clean)
+            cand = evaluate_checked(self, ctx, phash)
+            if cand is not None:
+                out.append(cand)
+        if is_dev_mode():
+            logger.debug("%s %s default scan (per-bar evaluate): bars=%d candidates=%d params=%s",
+                         self.identity.label(), symbol, len(h1_ns), len(out), phash[:12])
+        return out
 
 
 def evaluate_checked(strategy: Strategy, ctx: StrategyContext, params_hash: str | None = None) -> SignalCandidate | None:
@@ -206,7 +348,7 @@ def evaluate_checked(strategy: Strategy, ctx: StrategyContext, params_hash: str 
     if is_dev_mode():
         logger.debug(
             "%s %s @ %s: %s %s line=%s ref=%s sl=%s extra=%s",
-            strategy.name, ctx.symbol, decision_time.isoformat(), result.direction, result.setup.value,
+            strategy.name, ctx.symbol, decision_time.isoformat(), result.direction, setup_slug(result.setup),
             result.line, result.reference_price, result.stop_loss, result.extra,
         )
     return result

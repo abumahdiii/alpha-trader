@@ -7,8 +7,10 @@ import 'dart:math' as math;
 
 import 'package:alpha_trader/chart/chart_data_source.dart';
 import 'package:alpha_trader/chart/chart_format.dart';
+import 'package:alpha_trader/models/backtest_models.dart';
 import 'package:alpha_trader/models/chart_models.dart';
 import 'package:alpha_trader/models/market_data.dart';
+import 'package:alpha_trader/models/strategy.dart';
 import 'package:alpha_trader/services/engine_api.dart';
 
 /// Synthetic open times from [start] every [step], skipping the weekend.
@@ -64,7 +66,8 @@ ChannelPoint syntheticPoint(Candle c, int i, ChartTimeframe tf) {
   );
 }
 
-SetupItem syntheticSetup(String symbol, Candle conf, Candle? next, SetupStatus status, TradeSide side, int n) {
+SetupItem syntheticSetup(String symbol, Candle conf, Candle? next, SetupStatus status, TradeSide side, int n,
+    {SetupOutcome? outcome, SetupBacktestFlag? backtest}) {
   final double sl = side == TradeSide.buy ? conf.low - 1 : conf.high + 1;
   final double? entry = status == SetupStatus.pendingEntry ? null : next?.open;
   return SetupItem(
@@ -83,6 +86,9 @@ SetupItem syntheticSetup(String symbol, Candle conf, Candle? next, SetupStatus s
     decisionTime: conf.time.add(const Duration(hours: 1)),
     entryTime: entry == null ? null : next!.time,
     entry: entry,
+    entryBidOpen: entry == null ? null : entry - (side == TradeSide.buy ? 0.25 : 0),
+    spreadAtEntryPoints: entry == null ? null : 25,
+    entrySpreadSource: entry == null ? null : EntrySpreadSource.historical,
     stopLoss: sl,
     takeProfit: status == SetupStatus.accepted ? entry! + (entry - sl) * 2 : null,
     rr: 2,
@@ -95,15 +101,103 @@ SetupItem syntheticSetup(String symbol, Candle conf, Candle? next, SetupStatus s
     riskAmount: status == SetupStatus.accepted ? 10 : null,
     volumeNoteFa: status == SetupStatus.pendingEntry ? 'کندل بعد هنوز در کش نیست.' : null,
     reasonFa: 'لمس خط پایین کانال صعودی و پین‌بار صعودی.',
+    outcome: outcome,
+    backtest: backtest,
   );
 }
+
+/// Fixture outcome (numbers are fixtures, not trading math).
+SetupOutcome fakeOutcome(SetupResult result, String exitReason, String exitReasonFa, DateTime exitBar,
+        {required double exitPrice, required double pnlPrice, required double netPnl, double? r}) =>
+    SetupOutcome(
+      result: result,
+      exitReason: exitReason,
+      exitReasonFa: exitReasonFa,
+      exitBarTime: exitBar,
+      exitTime: exitBar.add(const Duration(hours: 1)),
+      exitPrice: exitPrice,
+      pnlPrice: pnlPrice,
+      grossPnl: netPnl,
+      commission: 0,
+      netPnl: netPnl,
+      rMultiple: r,
+      barsHeld: 3,
+      heldOverWeekend: false,
+    );
+
+const String kFakeEndOfDataFa =
+    'پایان داده؛ ستاپ تا آخرین کندل کش باز ماند و با قیمت بسته شدن آن کندل بسته شد (نتیجه موقت)';
+const String kFakeEvaluationFa = 'ارزیابی مستقل هر ستاپ، بدون قید یک معامله باز؛ با نتیجه بک‌تست فرق دارد';
+const String kFakePositionOpenFa = 'در بک‌تست پوزیشن دیگری باز بود (حداکثر یک معامله باز)؛ این ستاپ معامله نشد.';
+const String kFakeGapStopFa = 'کندل ورود آن طرف حد ضرر باز شد (گپ از حد ضرر عبور کرد)؛ ورود انجام نشد.';
+const String kFakeEvaluationUnavailableFa = 'مشخصات نماد در کش نیست؛ نتیجه ستاپ‌ها محاسبه نمی‌شود.';
+const String kFakeSlGapFa = 'حد ضرر (گپ؛ پر شدن با قیمت باز شدن کندل)';
+
+/// Engine summary fixture: deliberately NOT the sum of the fixture rows, so a
+/// test can tell engine totals from a client-side sum.
+const SetupsSummary kFakeSummary = SetupsSummary(
+  total: 5,
+  accepted: 3,
+  rejected: 1,
+  pendingEntry: 1,
+  closed: 2,
+  wins: 4,
+  losses: 3,
+  breakeven: 0,
+  openEndOfData: 1,
+  winRate: 0.5714285714285714,
+  netPnl: 103.9,
+  grossProfit: 151.46,
+  grossLoss: 47.56,
+  profitFactor: 3.1846,
+  profitFactorInfinite: false,
+  totalR: 2.5,
+  avgR: 0.357,
+  rCount: 7,
+  openNetPnl: 5.12,
+);
+
+const String kFakePluginName = 'ma_cross';
+const String kFakePluginTitleFa = 'کراس دو میانگین';
+const String kFakePluginSetupTitleFa = 'کراس صعودی میانگین‌ها';
+const String kFakePluginSha = '2d070ea08a45aa11bb22cc33dd44ee55ff66778899aabbccddeeff0011223344';
+
+/// The selector's entries: the built-in channel system and one plugin.
+const List<StrategyOption> kFakeStrategyOptions = <StrategyOption>[
+  StrategyOption(name: 'stddev_channel', titleFa: 'کانال انحراف معیار', version: 1),
+  StrategyOption(
+    name: kFakePluginName,
+    titleFa: kFakePluginTitleFa,
+    version: 2,
+    source: StrategySource.plugin,
+    sha256: kFakePluginSha,
+  ),
+];
+
+final BacktestWindow kFakeWindow = BacktestWindow(
+  from: DateTime.utc(2021, 11, 1, 9),
+  to: DateTime.utc(2021, 11, 20),
+  clipped: true,
+  noteFa: 'شروع بازه به اولین زمان مجاز محدود شد.',
+  available: true,
+  trades: 5,
+  netProfit: -12.69,
+);
 
 class FakeChartDataSource implements ChartDataSource {
   FakeChartDataSource({
     this.h1Count = 800,
     this.symbolNames = const <String>['XAUUSD.x', 'BRNUSD.x'],
     this.digits = 2,
-  });
+    this.evaluationAvailable = true,
+    this.summary = kFakeSummary,
+    BacktestWindow? window,
+  }) : window = window ?? kFakeWindow;
+
+  /// false: like an engine without the symbol spec (no outcomes / flags).
+  final bool evaluationAvailable;
+  final SetupsSummary summary;
+  final BacktestWindow window;
 
   final int h1Count;
   final List<String> symbolNames;
@@ -118,6 +212,13 @@ class FakeChartDataSource implements ChartDataSource {
   final Map<String, Completer<void>> gates = <String, Completer<void>>{};
 
   final List<String> calls = <String>[];
+
+  /// What strategies() answers (null: throws [error] or a connection error).
+  List<StrategyOption>? strategyOptions = kFakeStrategyOptions;
+
+  /// `strategy` argument of every channel() / setups() call, in order.
+  final List<String?> channelStrategies = <String?>[];
+  final List<String?> setupsStrategies = <String?>[];
 
   final Map<String, List<Candle>> _h1 = <String, List<Candle>>{};
   final Map<String, List<Candle>> _h4 = <String, List<Candle>>{};
@@ -134,7 +235,9 @@ class FakeChartDataSource implements ChartDataSource {
   }
 
   /// Setup confirmation bar indices in the full H1 series.
-  List<int> setupIndices() => <int>[h1Count ~/ 2, h1Count - 20, h1Count - 12, h1Count - 1];
+  /// accepted TP (buy), accepted SL gap (sell), accepted end of data (sell),
+  /// rejected (buy), pending (sell).
+  List<int> setupIndices() => <int>[h1Count ~/ 2, h1Count - 40, h1Count - 20, h1Count - 12, h1Count - 1];
 
   List<SetupItem> allSetups(String symbol) {
     final List<Candle> b = bars(symbol, ChartTimeframe.h1);
@@ -142,15 +245,72 @@ class FakeChartDataSource implements ChartDataSource {
     const List<SetupStatus> st = <SetupStatus>[
       SetupStatus.accepted,
       SetupStatus.accepted,
+      SetupStatus.accepted,
       SetupStatus.rejected,
       SetupStatus.pendingEntry,
     ];
+    const List<TradeSide> side = <TradeSide>[
+      TradeSide.buy,
+      TradeSide.sell,
+      TradeSide.sell,
+      TradeSide.buy,
+      TradeSide.sell,
+    ];
+    DateTime at(int i) => b[math.min(i, b.length - 1)].time;
+    final List<SetupOutcome?> outcomes = <SetupOutcome?>[
+      fakeOutcome(SetupResult.tp, 'tp', 'حد سود', at(idx[0] + 4),
+          exitPrice: 2010.75, pnlPrice: 10.5, netPnl: 38.74, r: 2),
+      fakeOutcome(SetupResult.sl, 'sl_gap', kFakeSlGapFa, at(idx[1] + 2),
+          exitPrice: 2001.38, pnlPrice: -0.83, netPnl: -24.9, r: -1.0456),
+      fakeOutcome(SetupResult.endOfData, 'end_of_period', kFakeEndOfDataFa, at(b.length - 1),
+          exitPrice: 1999.5, pnlPrice: 0.2, netPnl: 5.12, r: 0.25),
+      null,
+      null,
+    ];
+    const List<SetupBacktestFlag?> flags = <SetupBacktestFlag?>[
+      SetupBacktestFlag(traded: true, tradeIndex: 3, netPnl: 38.74),
+      SetupBacktestFlag(traded: false, reason: 'position_open', reasonFa: kFakePositionOpenFa),
+      SetupBacktestFlag(traded: true, tradeIndex: 4, netPnl: 5.12),
+      SetupBacktestFlag(traded: false, reason: 'gap_through_stop', reasonFa: kFakeGapStopFa),
+      null,
+    ];
+    final bool ev = evaluationAvailable;
     return <SetupItem>[
       for (int k = 0; k < idx.length; k++)
-        syntheticSetup(symbol, b[idx[k]], idx[k] + 1 < b.length ? b[idx[k] + 1] : null, st[k],
-            k.isEven ? TradeSide.buy : TradeSide.sell, idx[k]),
+        syntheticSetup(symbol, b[idx[k]], idx[k] + 1 < b.length ? b[idx[k] + 1] : null, st[k], side[k], idx[k],
+            outcome: ev ? outcomes[k] : null, backtest: ev ? flags[k] : null),
     ];
   }
+
+  /// A plugin's setups (no channel line, slug type, own title): the same
+  /// fixture setups re-labelled the way the engine sends them.
+  List<SetupItem> pluginSetups(String symbol) => <SetupItem>[
+        for (final SetupItem s in allSetups(symbol))
+          SetupItem(
+            id: '${s.id}:$kFakePluginName',
+            symbol: s.symbol,
+            status: s.status,
+            rejectionReasonFa: s.rejectionReasonFa,
+            setupType: 'ma_cross_up',
+            setupTitleFa: kFakePluginSetupTitleFa,
+            direction: s.direction,
+            pattern: 'ma_cross',
+            confirmationBarTime: s.confirmationBarTime,
+            decisionTime: s.decisionTime,
+            entryTime: s.entryTime,
+            entry: s.entry,
+            entryBidOpen: s.entryBidOpen,
+            stopLoss: s.stopLoss,
+            takeProfit: s.takeProfit,
+            rr: s.rr,
+            referencePrice: s.referencePrice,
+            indicativeTakeProfit: s.indicativeTakeProfit,
+            volume: s.volume,
+            reasonFa: 'کراس میانگین سریع از بالای میانگین کند.',
+            outcome: s.outcome,
+            backtest: s.backtest,
+          ),
+      ];
 
   /// Full-history gaps: every weekend, plus one old "missing" gap.
   List<Gap> allGaps(String symbol, ChartTimeframe tf) {
@@ -254,10 +414,37 @@ class FakeChartDataSource implements ChartDataSource {
     params: <String, Object?>{'n': 100, 'k': 2},
   );
 
+  static const StrategyProvenance pluginProvenance = StrategyProvenance(
+    strategy: kFakePluginName,
+    strategyVersion: 2,
+    strategySource: StrategySource.plugin,
+    strategySha256: kFakePluginSha,
+    paramsVersion: 1,
+    paramsHash: '99887766554433221100',
+    params: <String, Object?>{'fast': 10, 'slow': 30},
+  );
+
   @override
-  Future<ChannelResult> channel(String symbol, ChartTimeframe timeframe, {DateTime? from, DateTime? to}) async {
+  Future<List<StrategyOption>> strategies() async {
+    calls.add('strategies');
+    final List<StrategyOption>? options = strategyOptions;
+    if (options == null) {
+      throw error ?? const EngineApiException(EngineApiErrorKind.connection, 'اتصال به موتور برقرار نشد.');
+    }
+    return options;
+  }
+
+  @override
+  Future<ChannelResult> channel(String symbol, ChartTimeframe timeframe,
+      {DateTime? from, DateTime? to, String? strategy}) async {
     calls.add('channel $symbol ${timeframe.code}');
+    channelStrategies.add(strategy);
     _maybeThrow();
+    if (strategy != null && strategy != 'stddev_channel') {
+      // Like the engine: only stddev_channel has a channel.
+      throw const EngineApiException(EngineApiErrorKind.badStatus, 'این سیستم کانال ندارد.',
+          statusCode: 409, code: 'channel_not_available');
+    }
     final List<Candle> all = bars(symbol, timeframe);
     final List<ChannelPoint> pts = <ChannelPoint>[
       for (int i = 0; i < all.length; i++)
@@ -276,21 +463,37 @@ class FakeChartDataSource implements ChartDataSource {
   }
 
   @override
-  Future<SetupsResult> setups(String symbol, {DateTime? from, DateTime? to}) async {
+  Future<SetupsResult> setups(String symbol, {DateTime? from, DateTime? to, String? strategy}) async {
     calls.add('setups $symbol');
+    setupsStrategies.add(strategy);
     _maybeThrow();
-    final List<SetupItem> s =
-        allSetups(symbol).where((SetupItem x) => _within(x.decisionTime, from, to)).toList(growable: false);
+    final bool plugin = strategy != null && strategy != 'stddev_channel';
+    final List<SetupItem> s = (plugin ? pluginSetups(symbol) : allSetups(symbol))
+        .where((SetupItem x) => _within(x.decisionTime, from, to))
+        .toList(growable: false);
     return SetupsResult(
       symbol: symbol,
-      provenance: provenance,
+      provenance: plugin ? pluginProvenance : provenance,
       from: from,
       to: to,
       account: const ChartAccount(balance: 1000, riskPct: 1, leverage: 100, rr: 2),
       count: s.length,
-      statusCounts: const <String, int>{'accepted': 2, 'rejected': 1, 'pending_entry': 1},
+      statusCounts: const <String, int>{'accepted': 3, 'rejected': 1, 'pending_entry': 1},
       setups: s,
       noteFa: 'یادداشت ردها',
+      evaluation: SetupsEvaluation(
+        available: evaluationAvailable,
+        messageFa: evaluationAvailable ? null : kFakeEvaluationUnavailableFa,
+        labelFa: kFakeEvaluationFa,
+        endOfDataLabelFa: kFakeEndOfDataFa,
+        labelsFa: evaluationAvailable
+            ? const <String>['موقت تا تایید چک داده', 'اسپرد تاریخی بروکر (خرید با ask، فروش با bid)', 'کمیسیون صفر']
+            : const <String>[],
+      ),
+      summary: summary,
+      backtestWindow: evaluationAvailable
+          ? window
+          : const BacktestWindow(available: false, code: 'spec_missing', messageFa: 'مشخصات نماد در کش نیست.'),
     );
   }
 
@@ -340,4 +543,56 @@ class FakeChartDataSource implements ChartDataSource {
     return updateResult ??
         RatesUpdateResult(symbol: symbol, updated: const <TimeframeUpdate>[], messageFa: 'کش $symbol به‌روز شد.');
   }
+}
+
+/// Fixture backtest trade on the synthetic bars: entry at the open of
+/// [bars][entry], exit on [bars][exit] at the SL / TP level for sl / tp
+/// reasons, else at that bar's close. The prices are fixtures, not trading
+/// math.
+BacktestTrade fakeTrade(List<Candle> bars, int n, int entry, int exit,
+    {String direction = 'buy', String exitReason = 'tp', int window = 0}) {
+  final bool buy = direction == 'buy';
+  final double open = bars[entry].open;
+  final double sl = buy ? open - 5 : open + 5;
+  final double tp = buy ? open + 10 : open - 10;
+  final double exitPrice = switch (exitReason) {
+    'tp' || 'tp_gap' => tp,
+    'sl' || 'sl_gap' => sl,
+    _ => bars[exit].close,
+  };
+  final double net = switch (exitReason) {
+    'tp' || 'tp_gap' => 50,
+    'sl' || 'sl_gap' => -25,
+    _ => 3.5,
+  };
+  return BacktestTrade(
+    windowIndex: window,
+    tradeIndex: n,
+    direction: direction,
+    setupType: 'bounce',
+    line: 'lower',
+    pattern: 'pin_bar',
+    confirmationBarTime: bars[math.max(0, entry - 1)].time,
+    decisionTime: bars[entry].time,
+    entryTime: bars[entry].time,
+    entry: open,
+    stopLoss: sl,
+    takeProfit: tp,
+    rr: 2,
+    volume: 0.05,
+    riskAmount: 25,
+    balanceBefore: 2500,
+    exitBarTime: bars[exit].time,
+    exitTime: bars[exit].time.add(const Duration(hours: 1)),
+    exitPrice: exitPrice,
+    exitReason: exitReason,
+    exitReasonFa: 'دلیل خروج $exitReason',
+    grossPnl: net,
+    commission: 0,
+    netPnl: net,
+    rMultiple: net / 25,
+    balanceAfter: 2500 + net,
+    barsHeld: exit - entry,
+    reasonFa: 'دلیل آزمایشی معامله $n',
+  );
 }

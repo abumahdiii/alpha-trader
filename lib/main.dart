@@ -13,8 +13,11 @@ import 'core/main_window.dart';
 import 'core/single_instance_guard.dart';
 import 'providers/engine_api_provider.dart';
 import 'providers/engine_status_provider.dart';
+import 'providers/shell_navigation.dart';
+import 'providers/signals_provider.dart';
 import 'screens/shell_screen.dart';
 import 'services/engine_process.dart';
+import 'services/signal_alerts.dart';
 import 'theme/theme.dart';
 import 'theme/theme_provider.dart';
 
@@ -68,6 +71,19 @@ Future<void> main() async {
     // Created here (not lazily inside the tree) so the engine can be started
     // right after runApp without waiting for a widget to read it.
     final EngineStatusProvider engineStatus = EngineStatusProvider(launcher: EngineProcess());
+    // Data API for the pages; non-null only while the engine runs.
+    final EngineApiProvider engineApis = EngineApiProvider(engine: engineStatus);
+    // Live signals for the whole app lifetime (WS /ws/signals while the
+    // engine runs), with sound + Windows notification per NEW signal.
+    // SUGGESTIONS ONLY: nothing in the app can send an order.
+    final SignalsProvider signals = SignalsProvider(apis: engineApis);
+    final SignalAlertPrefs alertPrefs = await SignalAlertPrefs.load();
+    final SignalAlertDispatcher alerts = SignalAlertDispatcher(
+      signals: signals.newSignals,
+      alerter: platformSignalAlerter(windowHandle: windowManager.getId),
+      prefs: alertPrefs,
+      digitsOf: signals.digitsOf,
+    );
 
     runApp(
       MultiProvider(
@@ -76,10 +92,12 @@ Future<void> main() async {
             create: (context) => ThemeProvider(initialThemeMode: initialThemeMode),
           ),
           ChangeNotifierProvider<EngineStatusProvider>.value(value: engineStatus),
-          // Data API for the pages; non-null only while the engine runs.
-          ChangeNotifierProvider<EngineApiProvider>(
-            create: (_) => EngineApiProvider(engine: engineStatus),
-          ),
+          ChangeNotifierProvider<EngineApiProvider>.value(value: engineApis),
+          ChangeNotifierProvider<SignalsProvider>.value(value: signals),
+          ChangeNotifierProvider<SignalAlertPrefs>.value(value: alertPrefs),
+          Provider<SignalAlertDispatcher>.value(value: alerts),
+          // Shown shell page + cross-page requests (chart -> backtest prefill).
+          ChangeNotifierProvider<ShellNavigation>(create: (_) => ShellNavigation()),
         ],
         child: const AlphaTraderApp(),
       ),
@@ -139,8 +157,15 @@ class _AlphaTraderAppState extends State<AlphaTraderApp> with WindowListener {
   /// Stops the engine (POST /shutdown -> wait -> kill, < 4 s; see
   /// EngineProcess.stop), then flushes the diagnostic log no matter what.
   Future<void> _shutdown() async {
+    final EngineStatusProvider engine = context.read<EngineStatusProvider>();
+    final SignalAlertDispatcher alerts = context.read<SignalAlertDispatcher>();
     try {
-      final EngineStatusProvider engine = context.read<EngineStatusProvider>();
+      // Removes the tray icon of the signal notifications.
+      await alerts.dispose();
+    } catch (e) {
+      devLog('[Shutdown] signal alerts dispose failed: $e');
+    }
+    try {
       devLog('[Shutdown] stopping engine (state=${engine.state.name}, port=${engine.port})');
       await engine.stop();
     } catch (e, s) {

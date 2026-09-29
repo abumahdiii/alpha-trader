@@ -4,6 +4,8 @@
 import 'package:alpha_trader/chart/chart_controller.dart';
 import 'package:alpha_trader/chart/chart_view.dart';
 import 'package:alpha_trader/chart/widgets/chart_canvas.dart';
+import 'package:alpha_trader/providers/shell_navigation.dart';
+import 'package:alpha_trader/screens/backtest/backtest_screen.dart';
 import 'package:alpha_trader/screens/chart/chart_screen.dart';
 import 'package:alpha_trader/services/engine_api.dart';
 import 'package:alpha_trader/widgets/engine_gate.dart';
@@ -12,6 +14,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../helpers/backtest_fixtures.dart';
 import '../helpers/engine_fakes.dart';
 
 final DateTime _t0 = DateTime.utc(2026, 9, 21); // Monday
@@ -91,6 +94,80 @@ Map<String, Object?> _setup(int i) => {
       'sizing_warnings_fa': <String>[],
       'reason_fa': 'لمس خط پایین و پین‌بار صعودی',
       'indicators': {'atr_h1': 4.5},
+      // Phase 5 (engine/README.md "/chart/setups").
+      'entry_bid_open': 2600.75 + i,
+      'spread_at_entry_points': 25,
+      'entry_spread_source': 'historical',
+      'outcome': {
+        'result': 'tp',
+        'exit_reason': 'tp',
+        'exit_reason_fa': 'حد سود',
+        'exit_bar_time': _iso(_time(i + 3)),
+        'exit_time': _iso(_time(i + 4)),
+        'exit_price': 2609.0 + i,
+        'pnl_price': 8.0,
+        'gross_pnl': 16.0,
+        'commission': 0.0,
+        'net_pnl': 16.0,
+        'r_multiple': 2.0,
+        'bars_held': 3,
+        'held_over_weekend': false,
+        'flags': <String>[],
+      },
+      'backtest': {'traded': true, 'reason': null, 'reason_fa': null, 'trade_index': 1, 'net_pnl': 16.0},
+    };
+
+const String _windowFrom = '2026-08-23T23:00:00Z';
+const String _windowTo = '2026-09-22T21:00:00Z';
+
+Map<String, Object?> _phase5Blocks() => {
+      'evaluation': {
+        'available': true,
+        'message_fa': null,
+        'basis': 'independent_setups',
+        'label_fa': 'ارزیابی مستقل هر ستاپ، بدون قید یک معامله باز؛ با نتیجه بک‌تست فرق دارد',
+        'end_of_data_label_fa': 'پایان داده؛ ستاپ تا آخرین کندل کش باز ماند (نتیجه موقت)',
+        'cost_model': {
+          'spread': 'historical',
+          'fallback_spread_points': null,
+          'commission_per_lot_per_side': 0.0,
+          'swap': 'none',
+        },
+        'spread_fallback': null,
+        'labels_fa': ['موقت تا تایید چک داده', 'کمیسیون صفر', 'بدون سوآپ'],
+      },
+      'summary': {
+        'total': 1,
+        'accepted': 1,
+        'rejected': 0,
+        'pending_entry': 0,
+        'closed': 1,
+        'wins': 1,
+        'losses': 0,
+        'breakeven': 0,
+        'open_end_of_data': 0,
+        'win_rate': 1.0,
+        'net_pnl': 16.0,
+        'gross_profit': 16.0,
+        'gross_loss': 0.0,
+        'profit_factor': null,
+        'profit_factor_infinite': true,
+        'total_r': 2.0,
+        'avg_r': 2.0,
+        'r_count': 1,
+        'open_net_pnl': 0.0,
+      },
+      'backtest_window': {
+        'from': _windowFrom,
+        'to': _windowTo,
+        'clipped': false,
+        'note_fa': null,
+        'available': true,
+        'code': null,
+        'message_fa': null,
+        'trades': 1,
+        'net_profit': 16.0,
+      },
     };
 
 FakeEngineHttp _http({ResponseBody Function(RequestOptions r)? channel}) => FakeEngineHttp({
@@ -170,6 +247,7 @@ FakeEngineHttp _http({ResponseBody Function(RequestOptions r)? channel}) => Fake
             'setups': [_setup(40)],
             'note_fa': 'یادداشت',
             'message_fa': null,
+            ..._phase5Blocks(),
           }),
       'GET /rates/gaps': (r) => jsonBody({
             'symbol': 'XAUUSD.x',
@@ -233,10 +311,71 @@ void main() {
     expect(setups.queryParameters['to'], '2026-09-23T00:00:00.000Z');
     expect(http.sent('GET /chart/channel').last.queryParameters['timeframe'], 'H1');
 
-    // Setup table lists the engine's setup; the candle panel shows digits=2 prices.
+    // Setup table lists the engine's setup.
     expect(find.byKey(const ValueKey<String>('setup-row-XAUUSD.x:40:8e223612f12a')), findsOneWidget);
-    expect(find.text('2648.00'), findsWidgets); // close of the last bar (2601 + 47)
+    // The candle panel is closed until a candle is clicked; then it shows digits=2 prices.
+    const ValueKey<String> panel = ValueKey<String>('candle-info-panel');
+    expect(find.byKey(panel), findsNothing);
+    final ChartCanvasState canvas = tester.state<ChartCanvasState>(find.byType(ChartCanvas));
+    await tester.tapAt(tester.getTopLeft(find.byType(ChartCanvas)) +
+        Offset(canvas.viewport!.xOf(_bars - 1), canvas.priceScale!.yOf(2648.0)));
+    await settle(tester);
+    expect(find.byKey(panel), findsOneWidget);
+    expect(
+        find.descendant(of: find.byKey(panel), matching: find.text('2648.00')), findsWidgets); // last close (2601 + 47)
     expect(find.textContaining('پارامترها: نسخه 4'), findsOneWidget);
+    await h.dispose(tester);
+  });
+
+  testWidgets('«بک‌تست همین بازه» opens the backtest page with the engine window and autoRun',
+      (WidgetTester tester) async {
+    final EngineHarness h = await _pumpScreen(tester, _http());
+    // The engine's summary and outcome reach the pane over the real EngineApi.
+    expect(find.descendant(of: find.byKey(const ValueKey<String>('summary-pf')), matching: find.text('∞')),
+        findsOneWidget);
+    expect(find.descendant(of: find.byKey(const ValueKey<String>('summary-net-pnl')), matching: find.text('+16.00 \$')),
+        findsOneWidget);
+    expect(h.navigation.page, ShellPage.chart);
+
+    final Finder button = find.byKey(const ValueKey<String>('setups-backtest-range'));
+    expect(tester.widget<ButtonStyleButton>(button).onPressed, isNotNull);
+    await tester.tap(button);
+    await settle(tester);
+    expect(h.navigation.page, ShellPage.backtest);
+    final BacktestPrefill p = h.navigation.pendingBacktest!;
+    expect(p.symbol, 'XAUUSD.x');
+    expect(p.from, DateTime.utc(2026, 8, 23, 23), reason: 'backtest_window.from as sent by the engine');
+    expect(p.to, DateTime.utc(2026, 9, 22, 21), reason: 'backtest_window.to as sent by the engine');
+    expect(p.autoRun, isTrue);
+    expect(p.strategy, 'stddev_channel', reason: 'the strategy of the shown setups');
+    await h.dispose(tester);
+  });
+
+  testWidgets('end to end: chart button -> ShellNavigation -> backtest page submits the engine window exactly',
+      (WidgetTester tester) async {
+    tester.view.physicalSize = const Size(3000, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final FakeSocketConnector sockets = FakeSocketConnector();
+    final EngineHarness h = EngineHarness(http: FakeBacktestEngine().http(extra: _http().routes));
+    await tester.pumpWidget(h.wrap(Row(children: <Widget>[
+      const Expanded(child: ChartScreen()),
+      Expanded(child: BacktestScreen(watcherFactory: sockets.watcher)),
+    ])));
+    await h.start(tester);
+    await settle(tester, 20);
+
+    await tester.tap(find.byKey(const ValueKey<String>('setups-backtest-range')));
+    await settle(tester, 20);
+    expect(h.navigation.page, ShellPage.backtest);
+    expect(h.navigation.pendingBacktest, isNull, reason: 'consumed by the backtest page');
+    final Map<String, Object?> body =
+        FakeEngineHttp.bodyOf(h.http.sent('POST /backtests').single)! as Map<String, Object?>;
+    expect(body['symbol'], 'XAUUSD.x');
+    expect(body['mode'], 'manual');
+    expect(body['strategy'], 'stddev_channel');
+    expect(DateTime.parse(body['from']! as String), DateTime.parse(_windowFrom), reason: 'not rounded to a day');
+    expect(DateTime.parse(body['to']! as String), DateTime.parse(_windowTo), reason: 'not the next midnight');
     await h.dispose(tester);
   });
 

@@ -12,6 +12,7 @@ import 'package:flutter/foundation.dart';
 
 import 'json_reader.dart';
 import 'market_data.dart';
+import 'strategy.dart';
 
 /// Required ISO-8601 UTC timestamp.
 DateTime _utc(JsonReader r, String key) {
@@ -399,12 +400,14 @@ class ChannelPoint {
 }
 
 /// Strategy provenance shared by both chart responses. Mirrors
-/// `_StrategyInfo` (routes/chart.py:110-116).
+/// `_StrategyInfo` (routes/chart.py).
 @immutable
 class StrategyProvenance {
   const StrategyProvenance({
     required this.strategy,
     required this.strategyVersion,
+    this.strategySource = StrategySource.builtin,
+    this.strategySha256,
     required this.paramsVersion,
     required this.paramsHash,
     required this.params,
@@ -412,6 +415,12 @@ class StrategyProvenance {
 
   final String strategy;
   final int strategyVersion;
+
+  /// `builtin` | `plugin` (absent on an older engine = builtin).
+  final StrategySource strategySource;
+
+  /// SHA-256 of an uploaded plugin's file; null for built-in strategies.
+  final String? strategySha256;
   final int paramsVersion;
   final String paramsHash;
   final Map<String, Object?> params;
@@ -419,6 +428,8 @@ class StrategyProvenance {
   factory StrategyProvenance.read(JsonReader r) => StrategyProvenance(
         strategy: r.str('strategy'),
         strategyVersion: r.integer('strategy_version'),
+        strategySource: StrategySource.parse(r.strOrNull('strategy_source')),
+        strategySha256: r.strOrNull('strategy_sha256'),
         paramsVersion: r.integer('params_version'),
         paramsHash: r.str('params_hash'),
         params: _rawMap(r, 'params'),
@@ -469,8 +480,8 @@ class ChannelResult {
 /// `accepted` | `rejected` | `pending_entry` (routes/chart.py:81, `SetupStatus`).
 enum SetupStatus {
   accepted('accepted', 'پذیرفته'),
-  rejected('rejected', 'رد شده'),
-  pendingEntry('pending_entry', 'در انتظار ورود');
+  rejected('rejected', 'ردشده'),
+  pendingEntry('pending_entry', 'منتظر ورود');
 
   const SetupStatus(this.code, this.titleFa);
 
@@ -509,11 +520,15 @@ enum ChannelLine {
 
   final String titleFa;
 
-  static ChannelLine parse(String code) => switch (code) {
+  static ChannelLine parse(String code) => tryParse(code) ?? (throw FormatException('unknown channel line "$code"'));
+
+  /// null for a strategy without channel lines (`line: null`) or a line
+  /// name this UI does not know (shown without a line, never a failure).
+  static ChannelLine? tryParse(String? code) => switch (code) {
         'lower' => ChannelLine.lower,
         'mid' => ChannelLine.mid,
         'upper' => ChannelLine.upper,
-        _ => throw FormatException('unknown channel line "$code"'),
+        _ => null,
       };
 }
 
@@ -526,12 +541,149 @@ const Map<String, String> patternTitlesFa = <String, String>{
   'bearish_engulfing': 'اینگالف نزولی',
 };
 
-/// One scanned setup. Mirrors `SetupItem` (routes/chart.py:131-162).
+/// `historical` | `filled` | `fallback` | `zero` (routes/chart.py
+/// `SpreadSourceName`): where the entry bar's spread came from.
+enum EntrySpreadSource {
+  historical('historical', 'اسپرد تاریخی بروکر'),
+  filled('filled', 'اسپرد صفر، پرشده با آخرین اسپرد قبلی'),
+  fallback('fallback', 'اسپرد جایگزین (پیش از اولین اسپرد بروکر)'),
+  zero('zero', 'بدون اسپرد (صفر)');
+
+  const EntrySpreadSource(this.code, this.titleFa);
+
+  final String code;
+  final String titleFa;
+
+  /// Unknown codes are kept out (null) instead of failing the whole table.
+  static EntrySpreadSource? parse(String? code) {
+    for (final EntrySpreadSource s in EntrySpreadSource.values) {
+      if (s.code == code) return s;
+    }
+    return null;
+  }
+}
+
+/// `tp` | `sl` | `end_of_data` (backtest/setup_outcomes.py `SetupResult`).
+enum SetupResult {
+  tp('tp', 'حد سود'),
+  sl('sl', 'حد ضرر'),
+  endOfData('end_of_data', 'پایان داده');
+
+  const SetupResult(this.code, this.titleFa);
+
+  final String code;
+
+  /// Short table label. The engine's own wording is in
+  /// [SetupOutcome.exitReasonFa] / [SetupsEvaluation.endOfDataLabelFa].
+  final String titleFa;
+
+  static SetupResult parse(String code) => SetupResult.values.firstWhere(
+        (SetupResult r) => r.code == code,
+        orElse: () => throw FormatException('unknown setup result "$code"'),
+      );
+}
+
+/// Independent result of an accepted setup (no "one open trade" constraint).
+/// Mirrors `SetupOutcomeOut` (routes/chart.py). Every number is the
+/// engine's; the UI only formats it.
+@immutable
+class SetupOutcome {
+  const SetupOutcome({
+    required this.result,
+    required this.exitReason,
+    required this.exitReasonFa,
+    required this.exitBarTime,
+    required this.exitTime,
+    required this.exitPrice,
+    required this.pnlPrice,
+    required this.grossPnl,
+    required this.commission,
+    required this.netPnl,
+    this.rMultiple,
+    required this.barsHeld,
+    required this.heldOverWeekend,
+    this.flags = const <String>[],
+  });
+
+  final SetupResult result;
+
+  /// `sl` | `tp` | `sl_gap` | `tp_gap` | `end_of_period`.
+  final String exitReason;
+  final String exitReasonFa;
+
+  /// OPEN of the exit bar (chart marker).
+  final DateTime exitBarTime;
+
+  /// Gap exits: bar open; intrabar hits and end of data: bar close.
+  final DateTime exitTime;
+  final double exitPrice;
+
+  /// Price move in the trade's favour (sell: entry - exit).
+  final double pnlPrice;
+  final double grossPnl;
+  final double commission;
+  final double netPnl;
+  final double? rMultiple;
+  final int barsHeld;
+  final bool heldOverWeekend;
+  final List<String> flags;
+
+  /// Exit at the open of a bar that gapped through SL/TP.
+  bool get isGap => exitReason == 'sl_gap' || exitReason == 'tp_gap';
+
+  factory SetupOutcome.read(JsonReader r) => SetupOutcome(
+        result: SetupResult.parse(r.str('result')),
+        exitReason: r.str('exit_reason'),
+        exitReasonFa: r.str('exit_reason_fa'),
+        exitBarTime: _utc(r, 'exit_bar_time'),
+        exitTime: _utc(r, 'exit_time'),
+        exitPrice: r.number('exit_price'),
+        pnlPrice: r.number('pnl_price'),
+        grossPnl: r.number('gross_pnl'),
+        commission: r.number('commission'),
+        netPnl: r.number('net_pnl'),
+        rMultiple: r.numberOrNull('r_multiple'),
+        barsHeld: r.integer('bars_held'),
+        heldOverWeekend: r.boolean('held_over_weekend'),
+        flags: r.has('flags') ? _strings(r, 'flags') : const <String>[],
+      );
+}
+
+/// Was this setup traded by the manual backtest of the chart range
+/// (`backtest_window`)? Mirrors `SetupBacktestFlag` (routes/chart.py).
+@immutable
+class SetupBacktestFlag {
+  const SetupBacktestFlag({required this.traded, this.reason, this.reasonFa, this.tradeIndex, this.netPnl});
+
+  final bool traded;
+
+  /// Not traded: `position_open` | `entry_outside_window` | `missing_gap` |
+  /// `gap_through_stop` | `invalid_levels` | `sizing_rejected` |
+  /// `outside_window` | `not_reached`.
+  final String? reason;
+  final String? reasonFa;
+  final int? tradeIndex;
+
+  /// The backtest trade's net P&L (the backtest's momentary balance).
+  final double? netPnl;
+
+  factory SetupBacktestFlag.read(JsonReader r) => SetupBacktestFlag(
+        traded: r.boolean('traded'),
+        reason: r.strOrNull('reason'),
+        reasonFa: r.strOrNull('reason_fa'),
+        tradeIndex: r.intOrNull('trade_index'),
+        netPnl: r.numberOrNull('net_pnl'),
+      );
+}
+
+/// One scanned setup. Mirrors `SetupItem` (routes/chart.py).
 ///
 /// `pending_entry`: [entry], [entryTime], [takeProfit] and all sizing
 /// fields are null; only the indicative [referencePrice] /
 /// [indicativeTakeProfit] exist. `rejected`: [takeProfit]/[volume] may be
-/// null and [rejectionReasonFa] says why.
+/// null and [rejectionReasonFa] says why. Phase 5: [entry] is the
+/// simulator fill (buy = ask open, sell = bid open); the raw bid open of
+/// the entry bar is [entryBidOpen].
 @immutable
 class SetupItem {
   const SetupItem({
@@ -543,13 +695,16 @@ class SetupItem {
     required this.setupTitleFa,
     required this.direction,
     required this.pattern,
-    required this.line,
+    this.line,
     this.lineValue,
     this.channelDirection,
     required this.confirmationBarTime,
     required this.decisionTime,
     this.entryTime,
     this.entry,
+    this.entryBidOpen,
+    this.spreadAtEntryPoints,
+    this.entrySpreadSource,
     required this.stopLoss,
     this.takeProfit,
     required this.rr,
@@ -564,17 +719,25 @@ class SetupItem {
     this.sizingWarningsFa = const <String>[],
     required this.reasonFa,
     this.indicators = const <String, Object?>{},
+    this.outcome,
+    this.backtest,
   });
 
   final String id;
   final String symbol;
   final SetupStatus status;
   final String? rejectionReasonFa;
+
+  /// A StdDev setup (`bounce_lower`, ...) or another strategy's slug.
   final String setupType;
+
+  /// The engine's title (for a slug without a title: the slug itself).
   final String setupTitleFa;
   final TradeSide direction;
   final String pattern;
-  final ChannelLine line;
+
+  /// null: the strategy has no channel lines (plugins).
+  final ChannelLine? line;
   final double? lineValue;
   final String? channelDirection;
 
@@ -586,7 +749,16 @@ class SetupItem {
 
   /// OPEN of the next cached H1 bar t+1; null while pending.
   final DateTime? entryTime;
+
+  /// Simulator fill: buy = ask open (bid open + spread), sell = bid open.
   final double? entry;
+
+  /// Raw (bid) open of bar t+1 (the phase-3 meaning of "entry").
+  final double? entryBidOpen;
+
+  /// Spread of bar t+1 actually used (after the zero fill / fallback).
+  final int? spreadAtEntryPoints;
+  final EntrySpreadSource? entrySpreadSource;
   final double stopLoss;
   final double? takeProfit;
   final double rr;
@@ -608,39 +780,68 @@ class SetupItem {
   /// `SignalCandidate.extra` — the inputs of the decision.
   final Map<String, Object?> indicators;
 
+  /// Independent outcome (accepted + evaluation available), else null.
+  final SetupOutcome? outcome;
+
+  /// Traded in the backtest of this range? Null without a backtest window.
+  final SetupBacktestFlag? backtest;
+
   String get patternTitleFa => patternTitlesFa[pattern] ?? pattern;
 
-  factory SetupItem.read(JsonReader r) => SetupItem(
-        id: r.str('id'),
-        symbol: r.str('symbol'),
-        status: SetupStatus.parse(r.str('status')),
-        rejectionReasonFa: r.strOrNull('rejection_reason_fa'),
-        setupType: r.str('setup_type'),
-        setupTitleFa: r.str('setup_title_fa'),
-        direction: TradeSide.parse(r.str('direction')),
-        pattern: r.str('pattern'),
-        line: ChannelLine.parse(r.str('line')),
-        lineValue: r.numberOrNull('line_value'),
-        channelDirection: r.strOrNull('channel_direction'),
-        confirmationBarTime: _utc(r, 'confirmation_bar_time'),
-        decisionTime: _utc(r, 'decision_time'),
-        entryTime: r.utcOrNull('entry_time'),
-        entry: r.numberOrNull('entry'),
-        stopLoss: r.number('stop_loss'),
-        takeProfit: r.numberOrNull('take_profit'),
-        rr: r.number('rr'),
-        riskDistance: r.numberOrNull('risk_distance'),
-        referencePrice: r.number('reference_price'),
-        indicativeTakeProfit: r.number('indicative_take_profit'),
-        volume: r.numberOrNull('volume'),
-        actualRisk: r.numberOrNull('actual_risk'),
-        margin: r.numberOrNull('margin'),
-        riskAmount: r.numberOrNull('risk_amount'),
-        volumeNoteFa: r.strOrNull('volume_note_fa'),
-        sizingWarningsFa: _strings(r, 'sizing_warnings_fa'),
-        reasonFa: r.str('reason_fa'),
-        indicators: _rawMap(r, 'indicators'),
-      );
+  /// The setup title, plus the channel line when there is one and the title
+  /// does not name it.
+  String get typeTitleFa {
+    final ChannelLine? l = line;
+    if (l == null || setupTitleFa.contains(l.titleFa)) return setupTitleFa;
+    return '$setupTitleFa (${l.titleFa})';
+  }
+
+  factory SetupItem.read(JsonReader r) {
+    final String setupType = r.str('setup_type');
+    final String? title = r.strOrNull('setup_title_fa');
+    return SetupItem(
+      id: r.str('id'),
+      symbol: r.str('symbol'),
+      status: SetupStatus.parse(r.str('status')),
+      rejectionReasonFa: r.strOrNull('rejection_reason_fa'),
+      setupType: setupType,
+      setupTitleFa: title == null || title.trim().isEmpty ? setupType : title,
+      direction: TradeSide.parse(r.str('direction')),
+      pattern: r.strOrNull('pattern') ?? '',
+      line: ChannelLine.tryParse(r.strOrNull('line')),
+      lineValue: r.numberOrNull('line_value'),
+      channelDirection: r.strOrNull('channel_direction'),
+      confirmationBarTime: _utc(r, 'confirmation_bar_time'),
+      decisionTime: _utc(r, 'decision_time'),
+      entryTime: r.utcOrNull('entry_time'),
+      entry: r.numberOrNull('entry'),
+      entryBidOpen: r.numberOrNull('entry_bid_open'),
+      spreadAtEntryPoints: r.intOrNull('spread_at_entry_points'),
+      entrySpreadSource: EntrySpreadSource.parse(r.strOrNull('entry_spread_source')),
+      stopLoss: r.number('stop_loss'),
+      takeProfit: r.numberOrNull('take_profit'),
+      rr: r.number('rr'),
+      riskDistance: r.numberOrNull('risk_distance'),
+      referencePrice: r.number('reference_price'),
+      indicativeTakeProfit: r.number('indicative_take_profit'),
+      volume: r.numberOrNull('volume'),
+      actualRisk: r.numberOrNull('actual_risk'),
+      margin: r.numberOrNull('margin'),
+      riskAmount: r.numberOrNull('risk_amount'),
+      volumeNoteFa: r.strOrNull('volume_note_fa'),
+      sizingWarningsFa: _strings(r, 'sizing_warnings_fa'),
+      reasonFa: r.str('reason_fa'),
+      indicators: _rawMap(r, 'indicators'),
+      outcome: _objectOrNull(r, 'outcome', SetupOutcome.read),
+      backtest: _objectOrNull(r, 'backtest', SetupBacktestFlag.read),
+    );
+  }
+}
+
+/// An optional nested object: absent (older engine) or null -> null.
+T? _objectOrNull<T>(JsonReader r, String key, T Function(JsonReader) read) {
+  final JsonReader? o = r.objectOrNull(key);
+  return o == null ? null : read(o);
 }
 
 /// Account settings used for sizing. Mirrors `AccountSettings`
@@ -662,7 +863,242 @@ class ChartAccount {
       );
 }
 
-/// `GET /chart/setups`. Mirrors `SetupsResponse` (routes/chart.py:165-176).
+/// Costs of the setup evaluation. Mirrors `backtest.models.CostModel`.
+@immutable
+class SetupsCostModel {
+  const SetupsCostModel({
+    required this.spread,
+    this.fallbackSpreadPoints,
+    required this.commissionPerLotPerSide,
+    required this.swap,
+  });
+
+  /// Always `historical` (bars are bid; ask = bid + spread).
+  final String spread;
+
+  /// null = auto, 0 = explicit zero cost, > 0 = user value.
+  final int? fallbackSpreadPoints;
+  final double commissionPerLotPerSide;
+
+  /// Always `none`.
+  final String swap;
+
+  factory SetupsCostModel.read(JsonReader r) => SetupsCostModel(
+        spread: r.strOrNull('spread') ?? 'historical',
+        fallbackSpreadPoints: r.intOrNull('fallback_spread_points'),
+        commissionPerLotPerSide: r.numberOrNull('commission_per_lot_per_side') ?? 0,
+        swap: r.strOrNull('swap') ?? 'none',
+      );
+}
+
+/// The fallback spread the evaluation used for bars with no earlier broker
+/// spread. Mirrors `backtest.models.SpreadFallback`.
+@immutable
+class SetupsSpreadFallback {
+  const SetupsSpreadFallback({
+    required this.points,
+    required this.source,
+    this.observedFrom,
+    this.observedTo,
+    required this.observedBars,
+    this.observedMedian,
+    required this.fallbackBars,
+    required this.zeroBars,
+    required this.totalBars,
+  });
+
+  final int points;
+
+  /// `auto_median_observed` | `user` | `none`.
+  final String source;
+  final DateTime? observedFrom;
+  final DateTime? observedTo;
+  final int observedBars;
+  final double? observedMedian;
+
+  /// Evaluated bars priced with [points] / with zero / in total.
+  final int fallbackBars;
+  final int zeroBars;
+  final int totalBars;
+
+  factory SetupsSpreadFallback.read(JsonReader r) => SetupsSpreadFallback(
+        points: r.integer('points'),
+        source: r.str('source'),
+        observedFrom: r.utcOrNull('observed_from'),
+        observedTo: r.utcOrNull('observed_to'),
+        observedBars: r.integer('observed_bars'),
+        observedMedian: r.numberOrNull('observed_median'),
+        fallbackBars: r.integer('fallback_bars'),
+        zeroBars: r.integer('zero_bars'),
+        totalBars: r.integer('total_bars'),
+      );
+}
+
+/// How the per-setup outcomes were evaluated. Mirrors `SetupsEvaluation`
+/// (routes/chart.py). [available] false: no outcomes / flags / summary
+/// numbers (only counts) and [messageFa] says why.
+@immutable
+class SetupsEvaluation {
+  const SetupsEvaluation({
+    required this.available,
+    this.messageFa,
+    this.basis = 'independent_setups',
+    required this.labelFa,
+    required this.endOfDataLabelFa,
+    this.costModel,
+    this.spreadFallback,
+    this.labelsFa = const <String>[],
+  });
+
+  final bool available;
+  final String? messageFa;
+  final String basis;
+
+  /// «ارزیابی مستقل هر ستاپ، بدون قید یک معامله باز؛ با نتیجه بک‌تست فرق دارد».
+  final String labelFa;
+
+  /// Tooltip of the «پایان داده» result.
+  final String endOfDataLabelFa;
+  final SetupsCostModel? costModel;
+  final SetupsSpreadFallback? spreadFallback;
+
+  /// Provisional-data, spread, commission and swap labels.
+  final List<String> labelsFa;
+
+  factory SetupsEvaluation.read(JsonReader r) => SetupsEvaluation(
+        available: r.boolean('available'),
+        messageFa: r.strOrNull('message_fa'),
+        basis: r.strOrNull('basis') ?? 'independent_setups',
+        labelFa: r.strOrNull('label_fa') ?? '',
+        endOfDataLabelFa: r.strOrNull('end_of_data_label_fa') ?? '',
+        costModel: _objectOrNull(r, 'cost_model', SetupsCostModel.read),
+        spreadFallback: _objectOrNull(r, 'spread_fallback', SetupsSpreadFallback.read),
+        labelsFa: r.has('labels_fa') && r.raw('labels_fa') != null ? _strings(r, 'labels_fa') : const <String>[],
+      );
+}
+
+/// Range summary of the listed setups. Mirrors `SetupsSummary`
+/// (routes/chart.py): counts over all setups; wins / losses / win rate /
+/// P&L / PF / R over the CLOSED (TP/SL) outcomes; [openNetPnl] = end-of-data
+/// P&L (never in the other numbers). Computed by the engine only.
+@immutable
+class SetupsSummary {
+  const SetupsSummary({
+    required this.total,
+    required this.accepted,
+    required this.rejected,
+    required this.pendingEntry,
+    required this.closed,
+    required this.wins,
+    required this.losses,
+    required this.breakeven,
+    required this.openEndOfData,
+    this.winRate,
+    required this.netPnl,
+    required this.grossProfit,
+    required this.grossLoss,
+    this.profitFactor,
+    required this.profitFactorInfinite,
+    required this.totalR,
+    this.avgR,
+    required this.rCount,
+    required this.openNetPnl,
+  });
+
+  final int total;
+  final int accepted;
+  final int rejected;
+  final int pendingEntry;
+  final int closed;
+  final int wins;
+  final int losses;
+  final int breakeven;
+  final int openEndOfData;
+
+  /// wins / closed, 0..1.
+  final double? winRate;
+  final double netPnl;
+  final double grossProfit;
+  final double grossLoss;
+
+  /// null without losses; see [profitFactorInfinite].
+  final double? profitFactor;
+  final bool profitFactorInfinite;
+  final double totalR;
+  final double? avgR;
+  final int rCount;
+  final double openNetPnl;
+
+  factory SetupsSummary.read(JsonReader r) => SetupsSummary(
+        total: r.integer('total'),
+        accepted: r.integer('accepted'),
+        rejected: r.integer('rejected'),
+        pendingEntry: r.integer('pending_entry'),
+        closed: r.integer('closed'),
+        wins: r.integer('wins'),
+        losses: r.integer('losses'),
+        breakeven: r.integer('breakeven'),
+        openEndOfData: r.integer('open_end_of_data'),
+        winRate: r.numberOrNull('win_rate'),
+        netPnl: r.number('net_pnl'),
+        grossProfit: r.number('gross_profit'),
+        grossLoss: r.number('gross_loss'),
+        profitFactor: r.numberOrNull('profit_factor'),
+        profitFactorInfinite: r.boolOrNull('profit_factor_infinite') ?? false,
+        totalR: r.number('total_r'),
+        avgR: r.numberOrNull('avg_r'),
+        rCount: r.integer('r_count'),
+        openNetPnl: r.number('open_net_pnl'),
+      );
+}
+
+/// The manual backtest window of the chart range (what «بک‌تست همین بازه»
+/// submits) and that run's result. Mirrors `BacktestWindowOut`
+/// (routes/chart.py). [from]/[to] are sent back exactly as received.
+@immutable
+class BacktestWindow {
+  const BacktestWindow({
+    this.from,
+    this.to,
+    this.clipped = false,
+    this.noteFa,
+    required this.available,
+    this.code,
+    this.messageFa,
+    this.trades,
+    this.netProfit,
+  });
+
+  final DateTime? from;
+
+  /// Exclusive end.
+  final DateTime? to;
+  final bool clipped;
+  final String? noteFa;
+  final bool available;
+
+  /// `window_too_early` | `spec_missing` | `no_data` | ... when unavailable.
+  final String? code;
+  final String? messageFa;
+  final int? trades;
+  final double? netProfit;
+
+  factory BacktestWindow.read(JsonReader r) => BacktestWindow(
+        from: r.utcOrNull('from'),
+        to: r.utcOrNull('to'),
+        clipped: r.boolOrNull('clipped') ?? false,
+        noteFa: r.strOrNull('note_fa'),
+        available: r.boolean('available'),
+        code: r.strOrNull('code'),
+        messageFa: r.strOrNull('message_fa'),
+        trades: r.intOrNull('trades'),
+        netProfit: r.numberOrNull('net_profit'),
+      );
+}
+
+/// `GET /chart/setups`. Mirrors `SetupsResponse` (routes/chart.py).
+/// [evaluation], [summary] and [backtestWindow] are null only for an older
+/// engine that does not send them.
 @immutable
 class SetupsResult {
   const SetupsResult({
@@ -677,6 +1113,9 @@ class SetupsResult {
     required this.setups,
     required this.noteFa,
     this.messageFa,
+    this.evaluation,
+    this.summary,
+    this.backtestWindow,
   });
 
   final String symbol;
@@ -690,6 +1129,12 @@ class SetupsResult {
   final List<SetupItem> setups;
   final String noteFa;
   final String? messageFa;
+  final SetupsEvaluation? evaluation;
+  final SetupsSummary? summary;
+  final BacktestWindow? backtestWindow;
+
+  /// Outcomes, flags and summary numbers are present.
+  bool get evaluationAvailable => evaluation?.available ?? false;
 
   factory SetupsResult.fromJson(Object? json) {
     final JsonReader r = JsonReader(json, 'setups');
@@ -706,6 +1151,9 @@ class SetupsResult {
       setups: r.objects('setups', SetupItem.read),
       noteFa: r.str('note_fa'),
       messageFa: r.strOrNull('message_fa'),
+      evaluation: _objectOrNull(r, 'evaluation', SetupsEvaluation.read),
+      summary: _objectOrNull(r, 'summary', SetupsSummary.read),
+      backtestWindow: _objectOrNull(r, 'backtest_window', BacktestWindow.read),
     );
   }
 }

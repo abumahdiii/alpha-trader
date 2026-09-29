@@ -1,26 +1,33 @@
 import '../models/chart_models.dart';
 import '../models/market_data.dart';
+import '../models/strategy.dart';
 import '../services/engine_api.dart';
 
 /// Everything the chart reads from the engine. Implemented by
 /// [EngineChartDataSource] in the app and by an in-memory fake in tests.
 ///
 /// All times are UTC. `from`/`to` null means "engine default" (last 30 days
-/// of data). Failures are [EngineApiException]s: Persian `messageFa` (the
-/// engine's own `message_fa` for the chart/update routes), `code`,
-/// `errorsFa`, and `kind == connection` when the engine is unreachable.
+/// of data); `strategy` null means the engine default (`stddev_channel`).
+/// Failures are [EngineApiException]s: Persian `messageFa` (the engine's own
+/// `message_fa` for the chart/update routes), `code`, `errorsFa`, and
+/// `kind == connection` when the engine is unreachable.
 abstract interface class ChartDataSource {
   /// `GET /symbols`.
   Future<List<SymbolItem>> symbols();
 
+  /// The strategy selector's entries (`GET /strategies` + plugin badges).
+  Future<List<StrategyOption>> strategies();
+
   /// `GET /rates?symbol&timeframe&from&to`.
   Future<RatesResult> rates(String symbol, ChartTimeframe timeframe, {DateTime? from, DateTime? to});
 
-  /// `GET /chart/channel?symbol&timeframe&from&to`.
-  Future<ChannelResult> channel(String symbol, ChartTimeframe timeframe, {DateTime? from, DateTime? to});
+  /// `GET /chart/channel?symbol&timeframe&from&to&strategy` (409
+  /// `channel_not_available` for a strategy without a channel).
+  Future<ChannelResult> channel(String symbol, ChartTimeframe timeframe,
+      {DateTime? from, DateTime? to, String? strategy});
 
-  /// `GET /chart/setups?symbol&from&to` (H1 setups, filtered by decision time).
-  Future<SetupsResult> setups(String symbol, {DateTime? from, DateTime? to});
+  /// `GET /chart/setups?symbol&from&to&strategy` (H1 setups, filtered by decision time).
+  Future<SetupsResult> setups(String symbol, {DateTime? from, DateTime? to, String? strategy});
 
   /// `GET /rates/gaps?symbol&timeframe` (full cached history).
   Future<GapsResult> gaps(String symbol, ChartTimeframe timeframe);
@@ -43,16 +50,20 @@ class EngineChartDataSource implements ChartDataSource {
   Future<List<SymbolItem>> symbols() async => (await api.getSymbols()).symbols;
 
   @override
+  Future<List<StrategyOption>> strategies() => api.listStrategyOptions();
+
+  @override
   Future<RatesResult> rates(String symbol, ChartTimeframe timeframe, {DateTime? from, DateTime? to}) =>
       api.getRates(symbol: symbol, timeframe: timeframe.code, from: from, to: to);
 
   @override
-  Future<ChannelResult> channel(String symbol, ChartTimeframe timeframe, {DateTime? from, DateTime? to}) =>
-      api.getChartChannel(symbol: symbol, timeframe: timeframe.code, from: from, to: to);
+  Future<ChannelResult> channel(String symbol, ChartTimeframe timeframe,
+          {DateTime? from, DateTime? to, String? strategy}) =>
+      api.getChartChannel(symbol: symbol, timeframe: timeframe.code, from: from, to: to, strategy: strategy);
 
   @override
-  Future<SetupsResult> setups(String symbol, {DateTime? from, DateTime? to}) =>
-      api.getChartSetups(symbol: symbol, from: from, to: to);
+  Future<SetupsResult> setups(String symbol, {DateTime? from, DateTime? to, String? strategy}) =>
+      api.getChartSetups(symbol: symbol, from: from, to: to, strategy: strategy);
 
   @override
   Future<GapsResult> gaps(String symbol, ChartTimeframe timeframe) =>
