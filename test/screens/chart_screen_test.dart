@@ -347,6 +347,7 @@ void main() {
     expect(p.from, DateTime.utc(2026, 8, 23, 23), reason: 'backtest_window.from as sent by the engine');
     expect(p.to, DateTime.utc(2026, 9, 22, 21), reason: 'backtest_window.to as sent by the engine');
     expect(p.autoRun, isTrue);
+    expect(p.strategy, 'stddev_channel', reason: 'the strategy of the shown setups');
     await h.dispose(tester);
   });
 
@@ -372,6 +373,7 @@ void main() {
         FakeEngineHttp.bodyOf(h.http.sent('POST /backtests').single)! as Map<String, Object?>;
     expect(body['symbol'], 'XAUUSD.x');
     expect(body['mode'], 'manual');
+    expect(body['strategy'], 'stddev_channel');
     expect(DateTime.parse(body['from']! as String), DateTime.parse(_windowFrom), reason: 'not rounded to a day');
     expect(DateTime.parse(body['to']! as String), DateTime.parse(_windowTo), reason: 'not the next midnight');
     await h.dispose(tester);

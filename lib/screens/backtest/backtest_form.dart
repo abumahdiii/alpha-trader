@@ -3,10 +3,12 @@ import 'package:flutter/services.dart';
 
 import '../../models/backtest_models.dart';
 import '../../models/market_data.dart';
+import '../../models/strategy.dart';
 import '../../theme/app_semantic_colors.dart';
 import '../../widgets/loading_button.dart';
 import '../../widgets/number_stepper_field.dart';
 import '../../widgets/section_card.dart';
+import '../../widgets/strategy_selector.dart';
 import 'backtest_controller.dart';
 import 'backtest_format.dart';
 
@@ -31,6 +33,22 @@ class BacktestFormPanel extends StatelessWidget {
       key: const ValueKey<String>('bt-form'),
       padding: const EdgeInsets.all(16),
       children: [
+        _label(context, 'سیستم معاملاتی'),
+        StrategySelector(
+          key: const ValueKey<String>('bt-strategy'),
+          options: c.strategies.isEmpty ? const [StrategyOption.fallback] : c.strategies,
+          value: c.strategy,
+          isExpanded: true,
+          enabled: !c.isSubmitting,
+          onChanged: c.setStrategy,
+        ),
+        if (c.strategyOption?.isPlugin ?? false)
+          _hint(
+            context,
+            'این سیستم از فایل بارگذاری‌شده است و فقط در فرآیند جدای موتور (بدون دسترسی به متاتریدر) اجرا می‌شود. '
+            'هش فایل همراه نتیجه ذخیره می‌شود.',
+          ),
+        const SizedBox(height: 16),
         _label(context, 'نماد'),
         _symbolField(context),
         FieldErrors(c.errorsOf(BacktestField.symbol)),

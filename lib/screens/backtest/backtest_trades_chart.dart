@@ -10,6 +10,7 @@ import '../../chart/chart_view.dart';
 import '../../chart/widgets/setups_pane.dart';
 import '../../core/dev_mode.dart';
 import '../../models/backtest_models.dart';
+import '../../models/strategy.dart';
 import '../../theme/app_semantic_colors.dart';
 import '../../widgets/status_message.dart';
 import 'backtest_format.dart';
@@ -54,11 +55,16 @@ class BacktestTradesChart extends StatefulWidget {
     this.periodEnd,
     this.digits,
     this.showWindow = false,
+    this.strategy,
   });
 
   final ChartDataSource source;
   final int runId;
   final String symbol;
+
+  /// The run's strategy: its channel is drawn only for `stddev_channel`
+  /// (null = the default strategy).
+  final String? strategy;
 
   /// The trades to draw (a random run: those of the selected window, or all).
   final List<BacktestTrade> trades;
@@ -76,7 +82,8 @@ class BacktestTradesChart extends StatefulWidget {
 }
 
 class BacktestTradesChartState extends State<BacktestTradesChart> with AutomaticKeepAliveClientMixin {
-  late final ChartController _chart = ChartController(source: widget.source, showSetups: false);
+  late final ChartController _chart =
+      ChartController(source: widget.source, showSetups: false, strategy: widget.strategy ?? kDefaultStrategyName);
 
   /// The chart's controller (read by tests).
   ChartController get chart => _chart;

@@ -175,3 +175,99 @@ class StrategyUpdateResult {
     );
   }
 }
+
+/// The built-in StdDev channel system: the default strategy of every page
+/// and the only one with channel lines (`/chart/channel` answers 409
+/// `channel_not_available` for any other).
+const String kDefaultStrategyName = 'stddev_channel';
+
+/// Whether [name] (null = the default) draws channel lines.
+bool strategyHasChannel(String? name) => (name ?? kDefaultStrategyName) == kDefaultStrategyName;
+
+/// Where a strategy's code comes from (`strategy_source`): shipped with the
+/// engine, or an uploaded, sandboxed Python file.
+enum StrategySource {
+  builtin('builtin', 'داخلی'),
+  plugin('plugin', 'پلاگین');
+
+  const StrategySource(this.code, this.titleFa);
+
+  final String code;
+  final String titleFa;
+
+  /// Unknown / missing (runs stored before the field existed) = builtin.
+  static StrategySource parse(String? code) => code == 'plugin' ? plugin : builtin;
+}
+
+/// The identity of a registered plugin version (what [StrategyOption.merge] needs).
+typedef PluginRef = ({String name, int version, String sha256});
+
+/// First 12 hex characters of a SHA-256 (the full value goes in a tooltip).
+String shortSha(String sha) => sha.length > 12 ? sha.substring(0, 12) : sha;
+
+/// One entry of a strategy selector (chart toolbar, backtest form): a
+/// registered strategy from `GET /strategies`, marked as a plugin when
+/// `GET /plugins` lists a registered version of it.
+@immutable
+class StrategyOption {
+  const StrategyOption({
+    required this.name,
+    this.titleFa,
+    this.version,
+    this.source = StrategySource.builtin,
+    this.sha256,
+  });
+
+  /// Used when `/strategies` could not be read: only the default system.
+  static const StrategyOption fallback = StrategyOption(name: kDefaultStrategyName);
+
+  final String name;
+  final String? titleFa;
+
+  /// Code version (sent as `strategy_version`, so the engine refuses a run
+  /// if the registered code changed meanwhile); null when unknown.
+  final int? version;
+  final StrategySource source;
+
+  /// Plugin file SHA-256 (plugins only).
+  final String? sha256;
+
+  bool get isPlugin => source == StrategySource.plugin;
+  bool get hasChannel => strategyHasChannel(name);
+  String get displayTitle => (titleFa ?? '').trim().isEmpty ? name : titleFa!;
+
+  /// Builtin strategies first (engine order), then plugins by name. A
+  /// strategy is a plugin when a REGISTERED plugin version carries its name.
+  static List<StrategyOption> merge(List<StrategyInfo> strategies, Iterable<PluginRef> registeredPlugins) {
+    final Map<String, PluginRef> plugins = {for (final PluginRef p in registeredPlugins) p.name: p};
+    final List<StrategyOption> builtin = [];
+    final List<StrategyOption> uploaded = [];
+    for (final StrategyInfo s in strategies) {
+      final PluginRef? p = plugins[s.name];
+      (p == null ? builtin : uploaded).add(StrategyOption(
+        name: s.name,
+        titleFa: s.titleFa,
+        version: s.version,
+        source: p == null ? StrategySource.builtin : StrategySource.plugin,
+        sha256: p?.sha256,
+      ));
+    }
+    uploaded.sort((StrategyOption a, StrategyOption b) => a.name.compareTo(b.name));
+    return List<StrategyOption>.unmodifiable([...builtin, ...uploaded]);
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is StrategyOption &&
+      other.name == name &&
+      other.titleFa == titleFa &&
+      other.version == version &&
+      other.source == source &&
+      other.sha256 == sha256;
+
+  @override
+  int get hashCode => Object.hash(name, titleFa, version, source, sha256);
+
+  @override
+  String toString() => 'StrategyOption($name v${version ?? '?'} ${source.code})';
+}

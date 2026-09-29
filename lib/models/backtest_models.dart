@@ -16,6 +16,7 @@ import 'package:flutter/foundation.dart';
 import 'account_settings.dart';
 import 'backtest_result_models.dart';
 import 'json_reader.dart';
+import 'strategy.dart';
 
 export 'backtest_result_models.dart';
 
@@ -86,6 +87,8 @@ class BacktestRequest {
     required DateTime this.to,
     this.commissionPerLotPerSide,
     this.fallbackSpreadPoints,
+    this.strategy,
+    this.strategyVersion,
   })  : mode = BacktestMode.manual,
         windowsCount = null,
         windowMonths = null,
@@ -98,12 +101,21 @@ class BacktestRequest {
     this.seed,
     this.commissionPerLotPerSide,
     this.fallbackSpreadPoints,
+    this.strategy,
+    this.strategyVersion,
   })  : mode = BacktestMode.random,
         from = null,
         to = null;
 
   final String symbol;
   final BacktestMode mode;
+
+  /// Registered strategy name (null = the engine default `stddev_channel`).
+  final String? strategy;
+
+  /// Must equal the registered code version (else 404 `strategy_not_found`):
+  /// the run uses exactly the code the user picked.
+  final int? strategyVersion;
 
   /// Manual: `[from, to)` in UTC.
   final DateTime? from;
@@ -119,6 +131,8 @@ class BacktestRequest {
   Map<String, Object> toJson() => {
         'symbol': symbol,
         'mode': mode.code,
+        if (strategy != null) 'strategy': strategy!,
+        if (strategyVersion != null) 'strategy_version': strategyVersion!,
         if (from != null) 'from': from!.toUtc().toIso8601String(),
         if (to != null) 'to': to!.toUtc().toIso8601String(),
         if (windowsCount != null) 'windows_count': windowsCount!,
@@ -214,6 +228,8 @@ class BacktestRunSummary {
     this.seedGenerated,
     this.strategy,
     this.strategyVersion,
+    this.strategySource = StrategySource.builtin,
+    this.strategySha256,
     this.paramsVersion,
     this.paramsHash,
     this.provisional = true,
@@ -247,6 +263,12 @@ class BacktestRunSummary {
   final bool? seedGenerated;
   final String? strategy;
   final int? strategyVersion;
+
+  /// `builtin` | `plugin` (runs stored before the field existed: builtin).
+  final StrategySource strategySource;
+
+  /// SHA-256 of the plugin file the run used; null for built-in strategies.
+  final String? strategySha256;
   final int? paramsVersion;
   final String? paramsHash;
   final bool provisional;
@@ -283,6 +305,8 @@ class BacktestRunSummary {
         seedGenerated: r.boolOrNull('seed_generated'),
         strategy: r.strOrNull('strategy'),
         strategyVersion: r.intOrNull('strategy_version'),
+        strategySource: StrategySource.parse(r.strOrNull('strategy_source')),
+        strategySha256: r.strOrNull('strategy_sha256'),
         paramsVersion: r.intOrNull('params_version'),
         paramsHash: r.strOrNull('params_hash'),
         provisional: r.boolOrNull('provisional') ?? true,

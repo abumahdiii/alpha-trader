@@ -8,6 +8,7 @@ import '../core/dev_mode.dart';
 import 'chart_data.dart';
 import '../models/backtest_models.dart';
 import '../models/market_data.dart';
+import '../models/strategy.dart';
 import '../services/engine_api.dart';
 import 'chart_data_source.dart';
 import 'chart_format.dart';
@@ -84,14 +85,20 @@ const String kEmptyRangeFa = 'در این بازه هیچ کندلی در کش �
 const String kUnexpectedErrorFa = 'خطای غیرمنتظره در دریافت داده چارت.';
 const String kRangeOrderErrorFa = 'تاریخ شروع باید قبل از تاریخ پایان باشد.';
 
+/// Shown instead of the channel lines / values for a strategy without a channel.
+const String kNoChannelFa = 'این سیستم کانال ندارد';
+
 /// State of the chart page: inputs (symbol, timeframe, UTC date range),
 /// loading/error/empty states, the loaded [ChartData], setup selection and
 /// the data-info / update panel. All data comes from a [ChartDataSource];
 /// this class never computes a trading value.
 class ChartController extends ChangeNotifier {
   /// [showSetups] false: no `/chart/setups` request (the backtest chart
-  /// shows the run's trades instead of the scanned setups).
-  ChartController({required ChartDataSource source, this.showSetups = true}) : _source = source;
+  /// shows the run's trades instead of the scanned setups). [strategy] is
+  /// the system whose setups (and, for `stddev_channel`, channel) are shown.
+  ChartController({required ChartDataSource source, this.showSetups = true, String strategy = kDefaultStrategyName})
+      : _source = source,
+        _strategy = strategy;
 
   final ChartDataSource _source;
   final bool showSetups;
@@ -105,6 +112,8 @@ class ChartController extends ChangeNotifier {
 
   List<SymbolItem> _symbols = const <SymbolItem>[];
   String? _symbol;
+  String _strategy;
+  List<StrategyOption> _strategies = const <StrategyOption>[];
   ChartTimeframe _timeframe = ChartTimeframe.h1;
   DateTime? _from;
   DateTime? _to;
@@ -144,6 +153,17 @@ class ChartController extends ChangeNotifier {
 
   List<SymbolItem> get symbols => _symbols;
   String? get symbol => _symbol;
+
+  /// Selected strategy name (the `strategy` query of the chart routes).
+  String get strategy => _strategy;
+
+  /// The strategy selector's entries (empty until loaded / when it failed:
+  /// the chart then stays on [strategy] without a selector).
+  List<StrategyOption> get strategies => _strategies;
+
+  /// Only `stddev_channel` has channel lines: for any other strategy the
+  /// chart neither requests nor draws a channel.
+  bool get hasChannel => strategyHasChannel(_strategy);
   ChartTimeframe get timeframe => _timeframe;
 
   /// UTC range start (inclusive); null = engine default.
@@ -203,9 +223,11 @@ class ChartController extends ChangeNotifier {
 
   // ------------------------------------------------------------ inputs
 
-  /// Symbols -> first symbol -> its default range -> load.
+  /// Symbols -> first symbol -> its default range -> load. The strategy
+  /// list loads alongside (never blocks or fails the chart).
   Future<void> init() async {
     final int serial = ++_loadSerial;
+    unawaited(loadStrategies());
     _setState(ChartLoadState.loading);
     try {
       final List<SymbolItem> list = await _source.symbols();
@@ -261,6 +283,34 @@ class ChartController extends ChangeNotifier {
     await _applyDefaultRange();
     await load();
     unawaited(refreshDataInfo());
+  }
+
+  /// Reads the strategy selector's entries. A failure only hides the
+  /// selector (logged); the chart keeps its [strategy].
+  Future<void> loadStrategies() async {
+    try {
+      final List<StrategyOption> list = await _source.strategies();
+      if (_disposed) return;
+      _strategies = list;
+      _log('strategies: ${list.map((StrategyOption s) => '${s.name}(${s.source.code})').join(', ')}; '
+          'selected $_strategy');
+      notifyListeners();
+    } catch (e) {
+      if (_disposed) return;
+      _log('strategies failed (selector hidden, chart stays on $_strategy): $e');
+    }
+  }
+
+  /// Shows another strategy's setups (and hides the channel of a strategy
+  /// without one), then reloads the current range.
+  Future<void> setStrategy(String name) async {
+    if (name == _strategy) return;
+    _log('strategy $_strategy -> $name (channel: ${strategyHasChannel(name) ? 'yes' : 'no'})');
+    _strategy = name;
+    _resetSelection();
+    _autoLoadPending = true;
+    notifyListeners();
+    await load();
   }
 
   Future<void> setTimeframe(ChartTimeframe tf) async {
@@ -335,6 +385,9 @@ class ChartController extends ChangeNotifier {
     final ChartTimeframe tf = _timeframe;
     final DateTime? from = _from;
     final DateTime? to = _to;
+    final String strategy = _strategy;
+    final bool withChannel = strategyHasChannel(strategy);
+    final bool withSetups = tf == ChartTimeframe.h1 && showSetups;
     _hasLoaded = true;
     _loadedSymbol = symbol;
     _loadedTimeframe = tf;
@@ -342,22 +395,24 @@ class ChartController extends ChangeNotifier {
     _loadedTo = to;
     _inspectedIndex = null;
     final Stopwatch sw = Stopwatch()..start();
-    _log('load #$serial $symbol ${tf.code} ${from ?? 'default'} .. ${to ?? 'default'}');
+    _log('load #$serial $symbol ${tf.code} ${from ?? 'default'} .. ${to ?? 'default'} strategy=$strategy '
+        '(channel ${withChannel ? 'requested' : 'not requested: this strategy has none'}, '
+        'setups ${withSetups ? 'requested' : 'not requested'})');
     _setState(ChartLoadState.loading);
     try {
       // In parallel; Future.wait also keeps a second failure from escaping
       // as an unhandled error.
-      final List<Object> results = await Future.wait<Object>(<Future<Object>>[
+      final List<Object?> results = await Future.wait<Object?>(<Future<Object?>>[
         _source.rates(symbol, tf, from: from, to: to),
-        _source.channel(symbol, tf, from: from, to: to),
+        if (withChannel) _channelOrNull(symbol, tf, from: from, to: to, strategy: strategy) else Future.value(),
         // /chart/setups filters by decision time (= confirmation bar close);
         // shifting the window by one H1 bar selects exactly the setups whose
         // confirmation bar is among the loaded bars (incl. a pending setup
         // on the newest bar).
-        if (tf == ChartTimeframe.h1 && showSetups) _source.setups(symbol, from: from?.add(_h1), to: to?.add(_h1)),
+        if (withSetups) _source.setups(symbol, from: from?.add(_h1), to: to?.add(_h1), strategy: strategy),
       ]);
-      final RatesResult rates = results[0] as RatesResult;
-      final ChannelResult channel = results[1] as ChannelResult;
+      final RatesResult rates = results[0]! as RatesResult;
+      final ChannelResult? channel = results[1] as ChannelResult?;
       final SetupsResult? setups = results.length > 2 ? results[2] as SetupsResult : null;
       if (_stale(serial, 'load')) return;
       final ChartData data = ChartData.build(
@@ -371,12 +426,12 @@ class ChartController extends ChangeNotifier {
       _data = data;
       _resetSelection();
       _log('load #$serial done in ${sw.elapsedMilliseconds} ms: ${data.length} bars, '
-          '${channel.validCount}/${channel.count} valid channel points, ${data.setups.length} setups, '
-          '${data.gaps.length} gaps, source=${rates.source} stale=${rates.stale}');
+          '${channel == null ? 'no channel' : '${channel.validCount}/${channel.count} valid channel points'}, '
+          '${data.setups.length} setups, ${data.gaps.length} gaps, source=${rates.source} stale=${rates.stale}');
       if (setups != null) _logSetups(setups);
       if (_tradeOverlay != null) _logOverlay('load #$serial');
       if (data.isEmpty) {
-        _setState(ChartLoadState.empty, message: rates.message ?? channel.messageFa ?? kEmptyRangeFa);
+        _setState(ChartLoadState.empty, message: rates.message ?? channel?.messageFa ?? kEmptyRangeFa);
       } else {
         _viewRequest = ChartViewRequest._(_viewRequest.serial + 1, reset: true);
         _setState(ChartLoadState.ready);
@@ -387,10 +442,26 @@ class ChartController extends ChangeNotifier {
     }
   }
 
+  /// `/chart/channel`, or null when the engine says this strategy has no
+  /// channel (409 `channel_not_available`: the chart shows no lines, no error).
+  Future<ChannelResult?> _channelOrNull(String symbol, ChartTimeframe tf,
+      {DateTime? from, DateTime? to, required String strategy}) async {
+    try {
+      return await _source.channel(symbol, tf, from: from, to: to, strategy: strategy);
+    } on EngineApiException catch (e) {
+      if (e.code != 'channel_not_available') rethrow;
+      _log('channel of $strategy not available (409): drawn without channel');
+      return null;
+    }
+  }
+
   /// DEV_MODE trace of the parsed `/chart/setups` answer (counts only; the
   /// numbers are the engine's).
   void _logSetups(SetupsResult r) {
     if (!kDevMode) return;
+    final StrategyProvenance p = r.provenance;
+    _log('setups of ${p.strategy} v${p.strategyVersion} (${p.strategySource.code}'
+        '${p.strategySha256 == null ? '' : ' sha=${shortSha(p.strategySha256!)}'}) params v${p.paramsVersion}');
     final SetupsEvaluation? ev = r.evaluation;
     final SetupsSummary? s = r.summary;
     final BacktestWindow? w = r.backtestWindow;
