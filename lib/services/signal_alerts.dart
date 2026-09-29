@@ -191,8 +191,7 @@ class SignalAlertPrefs extends ChangeNotifier {
 
   Future<void> setSound(bool value) => _set(soundKey, value, () => _sound = value, _sound);
 
-  Future<void> setNotification(bool value) =>
-      _set(notificationKey, value, () => _notification = value, _notification);
+  Future<void> setNotification(bool value) => _set(notificationKey, value, () => _notification = value, _notification);
 
   Future<void> _set(String key, bool value, VoidCallback apply, bool current) async {
     if (value == current) return;

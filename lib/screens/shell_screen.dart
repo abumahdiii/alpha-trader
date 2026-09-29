@@ -119,57 +119,57 @@ class _ShellScreenState extends State<ShellScreen> {
 
     return SignalNoticeListener(
       child: Scaffold(
-      appBar: AppBar(
-        title: const Text('Alpha Trader'),
-        actions: [
-          const EngineStatusIndicator(),
-          IconButton(
-            tooltip: themeProvider.isDark() ? 'تم روشن' : 'تم تاریک',
-            icon: Icon(themeProvider.isDark() ? Icons.light_mode : Icons.dark_mode),
-            onPressed: () => themeProvider.toggleTheme(
-              themeProvider.isDark() ? ThemeMode.light : ThemeMode.dark,
+        appBar: AppBar(
+          title: const Text('Alpha Trader'),
+          actions: [
+            const EngineStatusIndicator(),
+            IconButton(
+              tooltip: themeProvider.isDark() ? 'تم روشن' : 'تم تاریک',
+              icon: Icon(themeProvider.isDark() ? Icons.light_mode : Icons.dark_mode),
+              onPressed: () => themeProvider.toggleTheme(
+                themeProvider.isDark() ? ThemeMode.light : ThemeMode.dark,
+              ),
             ),
-          ),
-        ],
-      ),
-      body: Row(
-        children: [
-          NavigationRail(
-            selectedIndex: selected < 0 ? 0 : selected,
-            onDestinationSelected: (int i) => _select(navigation, i),
-            labelType: NavigationRailLabelType.all,
-            destinations: [
-              for (final ShellDestination d in ShellScreen.destinations)
-                NavigationRailDestination(
-                  icon: icon(d, d.icon),
-                  selectedIcon: icon(d, d.selectedIcon),
-                  disabled: !d.enabled,
-                  label: d.enabled
-                      ? Text(d.label)
-                      : Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(d.label),
-                            Text(
-                              ShellScreen.comingSoon,
-                              style: text.labelSmall?.copyWith(color: colors.mutedText),
-                            ),
-                          ],
-                        ),
-                ),
-            ],
-          ),
-          const VerticalDivider(width: 1),
-          Expanded(
-            child: IndexedStack(
-              index: selected < 0 ? 0 : selected,
-              children: [
-                for (final ShellDestination d in ShellScreen.destinations) d.page ?? const SizedBox.shrink(),
+          ],
+        ),
+        body: Row(
+          children: [
+            NavigationRail(
+              selectedIndex: selected < 0 ? 0 : selected,
+              onDestinationSelected: (int i) => _select(navigation, i),
+              labelType: NavigationRailLabelType.all,
+              destinations: [
+                for (final ShellDestination d in ShellScreen.destinations)
+                  NavigationRailDestination(
+                    icon: icon(d, d.icon),
+                    selectedIcon: icon(d, d.selectedIcon),
+                    disabled: !d.enabled,
+                    label: d.enabled
+                        ? Text(d.label)
+                        : Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(d.label),
+                              Text(
+                                ShellScreen.comingSoon,
+                                style: text.labelSmall?.copyWith(color: colors.mutedText),
+                              ),
+                            ],
+                          ),
+                  ),
               ],
             ),
-          ),
-        ],
-      ),
+            const VerticalDivider(width: 1),
+            Expanded(
+              child: IndexedStack(
+                index: selected < 0 ? 0 : selected,
+                children: [
+                  for (final ShellDestination d in ShellScreen.destinations) d.page ?? const SizedBox.shrink(),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

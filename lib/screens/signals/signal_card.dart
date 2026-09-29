@@ -154,7 +154,8 @@ class _SignalCardState extends State<SignalCard> {
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           // ---------------------------------------------------------- header
           Wrap(spacing: 10, runSpacing: 6, crossAxisAlignment: WrapCrossAlignment.center, children: [
-            Text(s.symbol, style: tt.titleLarge?.copyWith(fontWeight: FontWeight.bold), textDirection: TextDirection.ltr),
+            Text(s.symbol,
+                style: tt.titleLarge?.copyWith(fontWeight: FontWeight.bold), textDirection: TextDirection.ltr),
             DirectionChip(s.direction),
             Text(s.setupTitleFa ?? s.setupType ?? kDash, style: tt.titleSmall),
             if (s.isPlugin) PluginBadge(tooltip: s.strategySha256),
@@ -332,7 +333,10 @@ Future<void> showSignalDetails(BuildContext context, LiveSignal s, {required Cha
     if (s.reasonFa != null) ('دلیل', s.reasonFa!),
     if (s.backtestWouldSkip) ('بک‌تست', 'رد می‌کرد: ${s.backtestSkipReasonFa ?? kDash}'),
     if (s.entryGap != null)
-      ('گپ کندل ورود', '${s.entryGap!.kind ?? kDash}${s.entryGap!.provisional ? ' (موقت)' : ''} ${s.entryGap!.noteFa ?? ''}'),
+      (
+        'گپ کندل ورود',
+        '${s.entryGap!.kind ?? kDash}${s.entryGap!.provisional ? ' (موقت)' : ''} ${s.entryGap!.noteFa ?? ''}'
+      ),
     ('سیستم', strategyLineFa(s)),
     if (s.paramsHash != null) ('هش پارامترها', shortSha(s.paramsHash!)),
     for (final MapEntry<String, Object?> e in s.indicators.entries) ('شاخص ${e.key}', '${e.value}'),

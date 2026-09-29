@@ -138,8 +138,7 @@ class _AccountSettingsFormState extends State<AccountSettingsForm> {
         _clearErrors();
         if (e.isValidation) {
           final split = e.splitErrors({
-            for (final MapEntry<String, String> l in AccountSettings.engineLabelsFa.entries)
-              l.key: ['«${l.value}»'],
+            for (final MapEntry<String, String> l in AccountSettings.engineLabelsFa.entries) l.key: ['«${l.value}»'],
           });
           _fieldErrors = split.byField;
           _generalErrors = split.general;

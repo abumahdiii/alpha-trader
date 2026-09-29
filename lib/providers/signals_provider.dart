@@ -133,9 +133,8 @@ class SignalsProvider extends ChangeNotifier {
   int? digitsOf(String symbol) => _digits[symbol];
 
   /// The engine's symbols (status ticks / checks and `GET /symbols`), sorted.
-  List<String> get knownSymbols =>
-      List<String>.unmodifiable({...?_status?.symbols, ..._digits.keys, ..._active.values.map((s) => s.symbol)}.toList()
-        ..sort());
+  List<String> get knownSymbols => List<String>.unmodifiable(
+      {...?_status?.symbols, ..._digits.keys, ..._active.values.map((s) => s.symbol)}.toList()..sort());
 
   static final DateTime _epoch = DateTime.utc(1970);
 
@@ -221,7 +220,8 @@ class SignalsProvider extends ChangeNotifier {
   void _dropped(int gen, String why) {
     if (_disposed || gen != _generation || _api == null) return;
     _generation++; // late callbacks of this socket are ignored from now on
-    final Duration delay = backoff.isEmpty ? const Duration(seconds: 5) : backoff[math.min(_attempt, backoff.length - 1)];
+    final Duration delay =
+        backoff.isEmpty ? const Duration(seconds: 5) : backoff[math.min(_attempt, backoff.length - 1)];
     _attempt++;
     _log('socket lost: $why -> retry #$_attempt in ${delay.inMilliseconds} ms');
     _closeSocket(why);

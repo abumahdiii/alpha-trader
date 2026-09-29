@@ -45,14 +45,11 @@ List<ChartPriceLevel> signalLevels(LiveSignal s, int? confIndex) {
     if (s.indicativeEntry != null)
       ChartPriceLevel(
           kind: ChartLevelKind.entry, price: s.indicativeEntry!, tag: 'Entry≈', fromIndex: from, dashed: true),
-    if (s.stopLoss != null) ChartPriceLevel(kind: ChartLevelKind.stopLoss, price: s.stopLoss!, tag: 'SL', fromIndex: from),
+    if (s.stopLoss != null)
+      ChartPriceLevel(kind: ChartLevelKind.stopLoss, price: s.stopLoss!, tag: 'SL', fromIndex: from),
     if (s.takeProfitIndicative != null)
       ChartPriceLevel(
-          kind: ChartLevelKind.takeProfit,
-          price: s.takeProfitIndicative!,
-          tag: 'TP≈',
-          fromIndex: from,
-          dashed: true),
+          kind: ChartLevelKind.takeProfit, price: s.takeProfitIndicative!, tag: 'TP≈', fromIndex: from, dashed: true),
   ];
 }
 
@@ -178,7 +175,8 @@ class SignalMiniChartState extends State<SignalMiniChart> {
     } else if (data == null || data.isEmpty) {
       body = const StatusMessage(icon: Icons.inbox_outlined, title: 'در این بازه داده‌ای در کش نیست.');
     } else {
-      body = SignalChartCanvas(data: data, confirmationIndex: _confIndex, levels: signalLevels(widget.signal, _confIndex));
+      body =
+          SignalChartCanvas(data: data, confirmationIndex: _confIndex, levels: signalLevels(widget.signal, _confIndex));
     }
     return Column(
       key: ValueKey<String>('signal-mini-chart-${widget.signal.id}'),
@@ -244,9 +242,8 @@ class SignalChartCanvas extends StatelessWidget {
         final ChartLayout layout = ChartLayout(Size(box.maxWidth, box.maxHeight));
         final ChartViewport viewport = viewportFor(data, confirmationIndex, layout.plot.width);
         final IndexRange? range = viewport.visibleRange;
-        final PriceScale scale = range == null
-            ? const PriceScale(min: 0, max: 1, top: 0, bottom: 1)
-            : scaleFor(data, range, layout, levels);
+        final PriceScale scale =
+            range == null ? const PriceScale(min: 0, max: 1, top: 0, bottom: 1) : scaleFor(data, range, layout, levels);
         return ClipRect(
           child: CustomPaint(
             size: layout.size,

@@ -304,7 +304,8 @@ enum ChartLevelKind { entry, stopLoss, takeProfit }
 /// axis. The price is the engine's; only its screen position is computed.
 @immutable
 class ChartPriceLevel {
-  const ChartPriceLevel({required this.kind, required this.price, required this.tag, this.fromIndex, this.dashed = false});
+  const ChartPriceLevel(
+      {required this.kind, required this.price, required this.tag, this.fromIndex, this.dashed = false});
 
   final ChartLevelKind kind;
   final double price;

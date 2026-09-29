@@ -50,7 +50,8 @@ class SignalsScreen extends StatelessWidget {
         ]),
         Expanded(
           child: TabBarView(children: [
-            EngineGate(builder: (BuildContext context, EngineApi api) => _ActiveTab(source: _source(api), clock: clock)),
+            EngineGate(
+                builder: (BuildContext context, EngineApi api) => _ActiveTab(source: _source(api), clock: clock)),
             EngineGate(
               builder: (BuildContext context, EngineApi api) {
                 final SignalsProvider p = context.read<SignalsProvider>();

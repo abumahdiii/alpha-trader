@@ -98,7 +98,8 @@ void main() {
       port: 1,
       httpClientAdapter: FakeEngineHttp({
         'POST /signals/settings': (r) => (FakeEngineHttp.bodyOf(r)! as Map)['live_strategy'] == 'ma_cross'
-            ? engineError(409, 'plugin_not_live', 'سیستم‌های بارگذاری‌شده (پلاگین) فعلا فقط در چارت و بک‌تست قابل استفاده‌اند.')
+            ? engineError(
+                409, 'plugin_not_live', 'سیستم‌های بارگذاری‌شده (پلاگین) فعلا فقط در چارت و بک‌تست قابل استفاده‌اند.')
             : engineError(404, 'strategy_not_found', 'سیستم «nope» پیدا نشد.'),
       }),
     );

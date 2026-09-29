@@ -166,8 +166,7 @@ void main() {
     await rig.dispose(tester);
   });
 
-  testWidgets('status message: status replaced and the active list re-read over REST (expiry updates)',
-      (tester) async {
+  testWidgets('status message: status replaced and the active list re-read over REST (expiry updates)', (tester) async {
     final FakeEngineHttp http = FakeEngineHttp({
       'GET /signals': (_) => jsonBody(signalsPageJson([signalJson(id: 1, expires: '2021-10-26T16:00:00Z')])),
     });

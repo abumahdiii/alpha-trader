@@ -32,7 +32,8 @@ class LiveSignalSettingsSection extends StatelessWidget {
     final EngineApi? api = context.watch<EngineApiProvider>().api;
     return SectionCard(
       title: title,
-      subtitle: 'موتور بعد از بسته شدن هر کندل H1 نمادها را بررسی می‌کند و فقط پیشنهاد می‌دهد؛ هیچ سفارشی ارسال نمی‌شود.',
+      subtitle:
+          'موتور بعد از بسته شدن هر کندل H1 نمادها را بررسی می‌کند و فقط پیشنهاد می‌دهد؛ هیچ سفارشی ارسال نمی‌شود.',
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         // Not EngineGate: the page already shows one big «engine not running» state.
         if (api == null)

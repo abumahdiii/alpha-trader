@@ -135,9 +135,11 @@ class _Checks extends StatelessWidget {
             child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
               SizedBox(
                 width: 110,
-                child: Text(sym, textDirection: TextDirection.ltr, style: tt.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+                child: Text(sym,
+                    textDirection: TextDirection.ltr, style: tt.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
               ),
-              SizedBox(width: 170, child: Text(status.checks[sym]?.resultFa ?? 'هنوز بررسی نشده', style: tt.bodyMedium)),
+              SizedBox(
+                  width: 170, child: Text(status.checks[sym]?.resultFa ?? 'هنوز بررسی نشده', style: tt.bodyMedium)),
               Expanded(
                 child: Text(
                   [

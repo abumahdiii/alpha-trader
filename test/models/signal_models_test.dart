@@ -56,7 +56,11 @@ void main() {
         'account': null,
         'entry_gap': 3,
         'indicators': null,
-        'mismatch': {'fields': ['direction', 'stop_loss'], 'scan': {}, 'evaluate': {}},
+        'mismatch': {
+          'fields': ['direction', 'stop_loss'],
+          'scan': {},
+          'evaluate': {}
+        },
         'strategy_source': 'plugin',
         'strategy_sha256': 'aa' * 32,
         'future_field': {'x': 1},
@@ -82,7 +86,12 @@ void main() {
       expect(() => LiveSignal.fromJson({'symbol': 'X'}), throwsFormatException);
       expect(() => LiveSignal.fromJson([1]), throwsFormatException);
       expect(LiveSignal.tryParse('x'), isNull);
-      final List<LiveSignal> list = LiveSignal.listFrom([signalJson(id: 1), {'id': 'two'}, null, signalJson(id: 3)]);
+      final List<LiveSignal> list = LiveSignal.listFrom([
+        signalJson(id: 1),
+        {'id': 'two'},
+        null,
+        signalJson(id: 3)
+      ]);
       expect(list.map((LiveSignal s) => s.id), [1, 3]);
     });
 
@@ -99,7 +108,10 @@ void main() {
       expect(LiveSignal.fromJson(signalJson(status: 'rejected', mismatch: {'fields': <String>[]})).statusReasonFa,
           'ناهمخوانی اسکن و ارزیابی');
       final Map<String, Object?> sup = signalJson(status: 'superseded')
-        ..['superseded'] = {'reason_fa': 'اسکن تازه ستاپ را دیگر تولید نمی‌کند.', 'fields': ['stop_loss']};
+        ..['superseded'] = {
+          'reason_fa': 'اسکن تازه ستاپ را دیگر تولید نمی‌کند.',
+          'fields': ['stop_loss']
+        };
       final LiveSignal s = LiveSignal.fromJson(sup);
       expect(s.statusReasonFa, 'اسکن تازه ستاپ را دیگر تولید نمی‌کند.');
       expect(s.supersededFields, ['stop_loss']);
@@ -170,8 +182,8 @@ void main() {
   });
 
   test('settings + POST result with status; grace validation bounds', () {
-    final LiveSignalSettingsResult r =
-        LiveSignalSettingsResult.fromJson({'enabled': true, 'live_strategy': 'stddev_channel', 'grace_s': 30, 'status': signalStatusJson()});
+    final LiveSignalSettingsResult r = LiveSignalSettingsResult.fromJson(
+        {'enabled': true, 'live_strategy': 'stddev_channel', 'grace_s': 30, 'status': signalStatusJson()});
     expect(r.settings, const LiveSignalSettings(enabled: true, liveStrategy: 'stddev_channel', graceS: 30));
     expect(r.status!.state, LiveSignalsState.running);
     expect(LiveSignalSettingsResult.fromJson({'enabled': false}).status, isNull);
@@ -191,14 +203,21 @@ void main() {
       expect(snap.status!.enabled, isTrue);
       expect(SignalsWsMessage.fromJson(signalMsg(signalJson(id: 4)))!.signal!.id, 4);
       expect(SignalsWsMessage.fromJson(signalMsg(signalJson(id: 4), type: 'expired'))!.type, SignalsWsType.expired);
-      expect(SignalsWsMessage.fromJson(signalMsg(signalJson(id: 4), type: 'superseded'))!.type, SignalsWsType.superseded);
+      expect(
+          SignalsWsMessage.fromJson(signalMsg(signalJson(id: 4), type: 'superseded'))!.type, SignalsWsType.superseded);
       expect(SignalsWsMessage.fromJson(statusMsg(signalStatusJson(enabled: false)))!.status!.enabled, isFalse);
       expect(SignalsWsMessage.fromJson(keepaliveMsg())!.type, SignalsWsType.keepalive);
       final SignalsWsMessage odd = SignalsWsMessage.fromJson({'type': 'tick', 'foo': 1})!;
       expect(odd.type, SignalsWsType.unknown);
       expect(odd.rawType, 'tick');
       expect(SignalsWsMessage.fromJson('text'), isNull);
-      expect(SignalsWsMessage.fromJson({'type': 'signal', 'signal': {'no': 'id'}})!.signal, isNull);
+      expect(
+          SignalsWsMessage.fromJson({
+            'type': 'signal',
+            'signal': {'no': 'id'}
+          })!
+              .signal,
+          isNull);
     });
   });
 
