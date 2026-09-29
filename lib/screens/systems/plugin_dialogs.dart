@@ -51,7 +51,8 @@ class PluginReportView extends StatelessWidget {
     final AppSemanticColors colors = context.appColors;
     final PluginDynamicReport? d = p.validation.dynamicReport;
     String yesNo(bool? v) => v == null ? '—' : (v ? 'بله' : 'خیر');
-    String seconds(double? v) => v == null ? '—' : '${formatNumber(v, decimals: 2)} ثانیه';
+    String seconds(double? v) =>
+        v == null ? '—' : '${formatNumber(v, decimals: v == v.roundToDouble() ? 0 : 2)} ثانیه';
     String count(int? v) => v == null ? '—' : formatNumber(v);
 
     return Column(
