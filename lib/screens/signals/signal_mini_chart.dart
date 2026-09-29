@@ -102,7 +102,11 @@ class SignalMiniChartState extends State<SignalMiniChart> {
   @override
   void didUpdateWidget(SignalMiniChart oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.signal.id != widget.signal.id || !identical(oldWidget.source, widget.source)) unawaited(_load());
+    // Only another signal reloads the bars: the page rebuilds the source
+    // object on every provider change, and an engine restart recreates this
+    // State anyway (EngineGate keys its subtree on the API). An updated copy
+    // of the same signal (e.g. its expiry) only redraws its levels.
+    if (oldWidget.signal.id != widget.signal.id) unawaited(_load());
   }
 
   Future<void> _load() async {

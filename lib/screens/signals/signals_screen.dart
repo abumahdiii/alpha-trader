@@ -54,6 +54,8 @@ class SignalsScreen extends StatelessWidget {
                 builder: (BuildContext context, EngineApi api) => _ActiveTab(source: _source(api), clock: clock)),
             EngineGate(
               builder: (BuildContext context, EngineApi api) {
+                // Rebuilt only when the known symbols change (the filter choices).
+                context.select<SignalsProvider, String>((SignalsProvider p) => p.knownSymbols.join(','));
                 final SignalsProvider p = context.read<SignalsProvider>();
                 return Padding(
                   padding: const EdgeInsets.all(16),

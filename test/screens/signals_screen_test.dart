@@ -262,6 +262,15 @@ void main() {
     }
     expect(find.text(SignalMiniChart.legendFa), findsOneWidget);
 
+    // Other provider traffic rebuilds the page but never reloads the bars.
+    int ratesCalls() => p.source.calls.where((String c) => c.startsWith('rates')).length;
+    expect(ratesCalls(), 1);
+    await p.send(tester, signalMsg(signalJson(id: 9, symbol: 'BRENT.x')));
+    await p.send(tester, signalMsg(signalJson(id: 1, volume: 0.14, wouldSkip: true, gapProvisional: true)));
+    await settle(tester);
+    expect(ratesCalls(), 1);
+    expect(find.byType(SignalMiniChart), findsOneWidget);
+
     await tester.tap(_key('signal-chart-toggle-1'));
     await settle(tester);
     expect(find.byType(SignalMiniChart), findsNothing);
