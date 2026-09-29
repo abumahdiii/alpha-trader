@@ -23,6 +23,12 @@ created by the lifespan right after the database is opened; runs left ``queued``
 process are marked ``interrupted`` first. On shutdown the jobs are stopped (running run cancelled and joined
 briefly) BEFORE the database is closed.
 
+Live-signal routes (``GET /signals``, ``GET /signals/{id}``, ``GET /signals/status``, ``GET|POST /signals/settings``,
+``WS /ws/signals``; :mod:`alpha_engine.routes.signals`) use ``app.state.live_signals``
+(:class:`~alpha_engine.signals.service.LiveSignals`: one scheduler thread, SUGGESTIONS ONLY), started by the lifespan
+after the backtest jobs and stopped before them (and before the database closes). It does nothing until the user
+enables it.
+
 Plugin routes (``GET /plugins/template``, ``GET|POST /plugins``, ``POST /plugins/{name}/{version}/enable|disable``,
 ``DELETE /plugins/{name}/{version}``; :mod:`alpha_engine.routes.plugins`): the lifespan registers every stored
 plugin's latest active version right after the database opened (:func:`load_plugins`; a broken file is logged and
@@ -202,6 +208,45 @@ def stop_backtest_jobs(app: FastAPI) -> None:
             logger.debug("shutdown: backtest jobs shutdown failed", exc_info=True)
 
 
+def start_live_signals(app: FastAPI) -> Any:
+    """Create and start ``app.state.live_signals`` (the H1-close scheduler; ``None`` without a database).
+
+    The thread idles until the user enables live signals; with MT5 unreachable its state is ``mt5_down``."""
+    from .signals.service import LiveSignals
+
+    db: EngineConnection | None = getattr(app.state, "db", None)
+    if db is None:
+        return None
+    try:
+        market = app.state.market_data
+        live = LiveSignals(db, market, registry=getattr(app.state, "strategy_registry", None),
+                           lru=getattr(app.state, "chart_cache", None),
+                           clock=getattr(market, "clock", None) or (lambda: datetime.now(timezone.utc)))
+        live.start()
+    except Exception as exc:
+        logger.error("live signals could not be started (%s: %s)", type(exc).__name__, exc)
+        if is_dev_mode():
+            logger.debug("startup: live signals failed", exc_info=True)
+        return None
+    if is_dev_mode():
+        logger.debug("startup: live signals scheduler ready (%s)", live.settings.to_api())
+    return live
+
+
+def stop_live_signals(app: FastAPI) -> None:
+    """Stop the live-signal scheduler (never raises); before the database closes."""
+    live = getattr(app.state, "live_signals", None)
+    app.state.live_signals = None
+    if live is None:
+        return
+    try:
+        live.shutdown()
+    except Exception:
+        logger.warning("live signals did not shut down cleanly")
+        if is_dev_mode():
+            logger.debug("shutdown: live signals shutdown failed", exc_info=True)
+
+
 def load_plugins(app: FastAPI) -> set[str]:
     """Register every stored plugin's latest ACTIVE version in the app's registry (after the database opened).
 
@@ -256,6 +301,7 @@ def create_app(
     from .routes import plugins as plugins_routes
     from .routes import rates as rates_routes
     from .routes import settings as settings_routes
+    from .routes import signals as signals_routes
     from .routes import strategies as strategies_routes
     from .routes import symbols as symbols_routes
     from .strategy.registry import default_registry
@@ -276,9 +322,11 @@ def create_app(
             app_.state.db = open_engine_db(settings)
             app_.state.backtest_jobs = start_backtest_jobs(app_)
             app_.state.plugin_names = load_plugins(app_)
+            app_.state.live_signals = start_live_signals(app_)
             yield
         finally:
             try:
+                stop_live_signals(app_)
                 stop_backtest_jobs(app_)
                 unload_plugins(app_)
                 close_engine_db(app_)
@@ -295,6 +343,7 @@ def create_app(
     app.state.server = None  # set by __main__ to the uvicorn.Server handle
     app.state.db = None  # opened by the lifespan
     app.state.backtest_jobs = None  # created by the lifespan (needs the database)
+    app.state.live_signals = None  # created by the lifespan (needs the database), stopped before it closes
     app.state.plugin_names = set()  # plugin names registered by this app (lifespan + /plugins routes)
     app.state.strategy_registry = registry
     app.state.chart_cache = chart_routes.ChartCache()
@@ -305,6 +354,7 @@ def create_app(
     app.include_router(chart_routes.router)
     app.include_router(backtests_routes.router)
     app.include_router(plugins_routes.router)
+    app.include_router(signals_routes.router)
 
     @app.middleware("http")
     async def dev_request_log(
