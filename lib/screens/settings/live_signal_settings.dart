@@ -9,12 +9,12 @@ import '../../core/dev_mode.dart';
 import '../../core/number_format.dart';
 import '../../models/signal_models.dart';
 import '../../models/strategy.dart';
+import '../../providers/engine_api_provider.dart';
 import '../../providers/signals_provider.dart';
 import '../../services/engine_api.dart';
 import '../../services/signal_alerts.dart';
 import '../../theme/app_semantic_colors.dart';
 import '../../widgets/app_toast.dart';
-import '../../widgets/engine_gate.dart';
 import '../../widgets/section_card.dart';
 import '../../widgets/status_message.dart';
 import '../../widgets/strategy_selector.dart';
@@ -29,16 +29,23 @@ class LiveSignalSettingsSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final EngineApi? api = context.watch<EngineApiProvider>().api;
     return SectionCard(
       title: title,
       subtitle: 'موتور بعد از بسته شدن هر کندل H1 نمادها را بررسی می‌کند و فقط پیشنهاد می‌دهد؛ هیچ سفارشی ارسال نمی‌شود.',
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        EngineGate(builder: (BuildContext context, EngineApi api) => LiveSignalSettingsForm(api: api)),
+        // Not EngineGate: the page already shows one big «engine not running» state.
+        if (api == null)
+          Text(engineDownFa, style: TextStyle(color: context.appColors.mutedText))
+        else
+          KeyedSubtree(key: ObjectKey(api), child: LiveSignalSettingsForm(api: api)),
         const Divider(height: 32),
         const SignalAlertToggles(),
       ]),
     );
   }
+
+  static const String engineDownFa = 'تنظیمات سیگنال لایو بعد از فعال شدن موتور نمایش داده می‌شود.';
 }
 
 /// The engine part: every change is posted at once (partial body).

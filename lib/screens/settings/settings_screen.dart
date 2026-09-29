@@ -37,12 +37,12 @@ class SettingsScreen extends StatelessWidget {
               subtitle: 'موتور حجم پیشنهادی هر ستاپ را با این مقادیر محاسبه می‌کند.',
               child: EngineGate(builder: (context, api) => AccountSettingsForm(api: api)),
             ),
-            const LiveSignalSettingsSection(),
             const SectionCard(
               title: 'اتصال متاتریدر ۵',
               subtitle: 'فقط نمایش. موتور به ترمینال باز و لاگین‌شده وصل می‌شود و رمزی ذخیره نمی‌کند.',
               child: Mt5ConnectionBlock(),
             ),
+            const LiveSignalSettingsSection(),
           ],
         ),
       ),
