@@ -178,14 +178,18 @@ class MarketDataService:
         years: float = DEFAULT_YEARS,
         start: datetime | None = None,
         force_full: bool = False,
+        now_utc: datetime | None = None,
     ) -> UpdateResult:
-        """Bring the cache for ``symbol``/``timeframe`` up to date from MT5 (needs a connection)."""
+        """Bring the cache for ``symbol``/``timeframe`` up to date from MT5 (needs a connection).
+
+        ``now_utc`` (live signals): the "now" that decides which bar is still forming -- the broker's server time
+        instead of this service's clock (see ``Mt5Adapter.fetch_rates``)."""
         tf = Timeframe.parse(timeframe)
         name = validate_symbol_name(symbol)
         if self.adapter is None:
             raise Mt5Error("no MT5 adapter")
         self.adapter.require_connected()
-        now = self.clock()
+        now = now_utc if now_utc is not None else self.clock()
         target_start = pd.Timestamp(start or history_start_for(years, now)).tz_convert("UTC")
         model = self.effective_model()
         with self.cache.lock(name, tf):
@@ -212,7 +216,7 @@ class MarketDataService:
             if is_dev_mode():
                 logger.debug("update %s %s: %s from %s (%s)", name, tf.value, "full" if full else "incremental",
                              iso_z(fetch_from), reason or "cache present")
-            result = self.adapter.fetch_rates(name, tf, fetch_from.to_pydatetime(), None, model)
+            result = self.adapter.fetch_rates(name, tf, fetch_from.to_pydatetime(), None, model, now_utc=now_utc)
             if full:
                 merged = merge_frames(None, result.frame)
                 first_available = iso_z(merged["time"].iloc[0]) if len(merged) else None

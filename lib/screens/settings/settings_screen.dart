@@ -15,9 +15,11 @@ import '../../widgets/loading_button.dart';
 import '../../widgets/number_stepper_field.dart';
 import '../../widgets/section_card.dart';
 import '../../widgets/status_message.dart';
+import 'live_signal_settings.dart';
 
-/// «تنظیمات»: account/risk settings (engine `GET|PUT /settings`) and the
-/// MT5 connection as reported by `/health` (display only).
+/// «تنظیمات»: account/risk settings (engine `GET|PUT /settings`), live
+/// signals (`/signals/settings` + local alert toggles) and the MT5
+/// connection as reported by `/health` (display only).
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
@@ -40,6 +42,7 @@ class SettingsScreen extends StatelessWidget {
               subtitle: 'فقط نمایش. موتور به ترمینال باز و لاگین‌شده وصل می‌شود و رمزی ذخیره نمی‌کند.',
               child: Mt5ConnectionBlock(),
             ),
+            const LiveSignalSettingsSection(),
           ],
         ),
       ),
@@ -135,8 +138,7 @@ class _AccountSettingsFormState extends State<AccountSettingsForm> {
         _clearErrors();
         if (e.isValidation) {
           final split = e.splitErrors({
-            for (final MapEntry<String, String> l in AccountSettings.engineLabelsFa.entries)
-              l.key: ['«${l.value}»'],
+            for (final MapEntry<String, String> l in AccountSettings.engineLabelsFa.entries) l.key: ['«${l.value}»'],
           });
           _fieldErrors = split.byField;
           _generalErrors = split.general;

@@ -6,6 +6,8 @@ import 'package:alpha_trader/providers/shell_navigation.dart';
 import 'package:alpha_trader/screens/backtest/backtest_screen.dart';
 import 'package:alpha_trader/screens/chart/chart_screen.dart';
 import 'package:alpha_trader/screens/shell_screen.dart';
+import 'package:alpha_trader/screens/signals/signal_format.dart';
+import 'package:alpha_trader/screens/signals/signals_screen.dart';
 import 'package:alpha_trader/widgets/engine_gate.dart';
 import 'package:alpha_trader/widgets/engine_status_indicator.dart';
 
@@ -20,7 +22,7 @@ void main() {
         'GET /strategies': (_) => jsonBody([strategyJson()]),
       });
 
-  testWidgets('rail has 5 destinations; only signal is disabled with «به‌زودی»', (tester) async {
+  testWidgets('rail has 5 destinations, all enabled (phase 6: signal page is live)', (tester) async {
     final EngineHarness h = EngineHarness(http: http());
     await tester.pumpWidget(h.wrap(const ShellScreen()));
     await tester.pumpAndSettle();
@@ -29,12 +31,12 @@ void main() {
     expect(rail.destinations, hasLength(5));
     expect(
       [for (final d in rail.destinations) d.disabled],
-      [false, false, false, true, false],
+      [false, false, false, false, false],
     );
     for (final String label in ['چارت', 'سیستم‌ها', 'بک‌تست', 'سیگنال', 'تنظیمات']) {
       expect(find.text(label), findsOneWidget, reason: label);
     }
-    expect(find.text(ShellScreen.comingSoon), findsOneWidget);
+    expect(find.text(ShellScreen.comingSoon), findsNothing);
     expect(rail.selectedIndex, 0);
     expect(find.byType(ChartScreen), findsOneWidget);
     await h.dispose(tester);
@@ -64,14 +66,17 @@ void main() {
     await h.dispose(tester);
   });
 
-  testWidgets('navigates to enabled pages; disabled ones do nothing', (tester) async {
+  testWidgets('navigates to every page (signal included)', (tester) async {
     final EngineHarness h = EngineHarness(http: http());
     await tester.pumpWidget(h.wrap(const ShellScreen()));
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('سیگنال'));
     await tester.pumpAndSettle();
-    expect(tester.widget<NavigationRail>(find.byType(NavigationRail)).selectedIndex, 0);
+    expect(tester.widget<NavigationRail>(find.byType(NavigationRail)).selectedIndex, 3);
+    expect(h.navigation.page, ShellPage.signal);
+    expect(find.byType(SignalsScreen), findsOneWidget);
+    expect(find.text(kSuggestionOnlyFa), findsOneWidget);
 
     await tester.tap(find.text('بک‌تست'));
     await tester.pumpAndSettle();

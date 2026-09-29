@@ -79,6 +79,18 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+@dataclass(frozen=True)
+class Tick:
+    """Last tick of a symbol as the terminal reports it: ``server_time`` is a SERVER-clock epoch (convert with the
+    offset model), ``bid``/``ask`` are prices (0.0 when the broker sent none)."""
+
+    symbol: str
+    server_time: int
+    bid: float
+    ask: float
+    server_time_msc: int = 0
+
+
 @dataclass
 class FetchResult:
     """Outcome of a (chunked) rates fetch. ``frame`` is canonical UTC (or raw server epochs for
@@ -376,6 +388,24 @@ class Mt5Adapter:
     def live_offset(self, symbol: str = "XAUUSD.x") -> LiveOffset:
         return estimate_live_offset(self.last_tick_time(symbol), self._clock())
 
+    def tick(self, symbol: str) -> Tick | None:
+        """Last tick of ``symbol`` (read-only ``symbol_info_tick``): server-clock epoch, bid, ask; ``None`` when the
+        terminal has no tick for it. Used by the live signals for the server-time boundary and the indicative
+        entry (``signals/``); never for anything that trades."""
+        self.require_connected()
+        raw = self._call("symbol_info_tick", validate_symbol_name(symbol))
+        if raw is None:
+            return None
+        server_time = int(getattr(raw, "time", 0) or 0)
+        if server_time <= 0:
+            return None
+        msc = int(getattr(raw, "time_msc", 0) or 0)
+        out = Tick(symbol=symbol, server_time=server_time, bid=float(getattr(raw, "bid", 0.0) or 0.0),
+                   ask=float(getattr(raw, "ask", 0.0) or 0.0), server_time_msc=msc or server_time * 1000)
+        if is_dev_mode():
+            logger.debug("tick %s: server_time=%d bid=%s ask=%s", symbol, out.server_time, out.bid, out.ask)
+        return out
+
     # --- rates ------------------------------------------------------------------------------------
 
     def copy_rates_raw(self, symbol: str, timeframe: Timeframe | str, server_from: int, server_to: int) -> pd.DataFrame | None:
@@ -451,15 +481,18 @@ class Mt5Adapter:
         model: OffsetModel,
         *,
         chunk_days: int | None = None,
+        now_utc: datetime | None = None,
     ) -> FetchResult:
         """Closed bars with UTC open time in ``[start_utc, end_utc]`` (``end_utc`` None = now).
 
         The request is made in server time (``model.utc_to_server``) padded by one day on both sides,
         converted to UTC, trimmed to the range, and the still-forming bar (``open + timeframe > now``)
-        is dropped.
+        is dropped. ``now_utc`` replaces the adapter clock (the PC clock) for that "now": the live signals pass
+        the broker's server time (estimated from its ticks) so a PC clock that runs ahead of the server can
+        never make a still-forming bar look closed (phase 6, decision 4).
         """
         tf = Timeframe.parse(timeframe)
-        now = self._clock()
+        now = now_utc if now_utc is not None else self._clock()
         end = min(end_utc or now, now)
         start_epoch = int(pd.Timestamp(start_utc).timestamp())
         end_epoch = int(pd.Timestamp(end).timestamp())

@@ -631,3 +631,82 @@ window_index,trade_index,direction,setup_type,line,pattern,confirmation_bar_time
 `spread_at_exit_points` is empty (null: buy exits are on the bid). `format=csv&table=run` starts
 `key,label_fa,value` / `id,شناسه اجرا,1` / `status,وضعیت,done` / ... / `params_hash,هش پارامترها,8e22...`;
 a random run with seed 9223372036854775807 shows it exactly in both formats.
+
+## Live signals (phase 6, SUGGESTIONS ONLY)
+
+`alpha_engine/signals/` (`service.LiveSignals` scheduler thread = `app.state.live_signals`, `live` pure helpers),
+`storage/signals_repo.py`, `routes/signals.py`. The engine **suggests** positions; it never places, modifies or
+checks an order (MT5 only through the read-only adapter: `symbol_info_tick` + the incremental `copy_rates` cache
+update). The scheduler starts with the app, idles until the user enables it (`POST /signals/settings
+{"enabled": true}`; default OFF) and is stopped before the database closes.
+
+**Per H1 boundary `B`** (broker SERVER time, `grace_s` after it, default 20 s; symbols one at a time):
+
+1. *Server time* (decision 4): ticks are polled every 15 s; `clock_skew = min(pc_now - tick_utc)` over the last
+   hour of MOVING ticks (a new tick since the previous poll). `|skew| > 10 s` -> server time = `pc_now - skew`
+   (warning + `tick` event). The cache update gets this server time (`MarketDataService.update(now_utc=...)` ->
+   `Mt5Adapter.fetch_rates(now_utc=...)`), so a PC clock running ahead never makes a forming bar look closed. Two
+   warm-up polls happen before the first check (and after every reconnect).
+2. *Incremental cache update* H1 (+ H4 when an H4 bucket closed at `B` or H4 is behind). Only an existing MT5
+   cache is updated (`no_cache` / seed data / offset-model change -> error event, no signal).
+3. *Completeness*: bar `B - 1h` (and the H4 bar closed at `B`) must be cached. No tick in that hour (or the next
+   bar already forming) -> `market_closed`; ticks but no bar -> retried each poll up to 3 min, then `incomplete`
+   (no signal).
+4. *Decision = the backtest's code path*: `scan_for(prepare_history(...))` (same function + LRU as backtests and
+   `/chart/setups`) gives the candidate of bar `t`; cross-check `evaluate_checked(build_context(..., now_utc=B))`.
+   Both none -> `no_setup`; equal in EVERY field (exact) -> signal; otherwise a `rejected` row with `mismatch`
+   (+ `mismatch` event), never an active signal.
+5. *Signal* (every setup becomes a suggestion, decision 1): indicative entry = current tick (buy = ask, sell = bid)
+   when the tick is at/after the decision time, else last close + spread (buy) / last close (sell); SL from the
+   candidate; `take_profit_indicative = cand.resolve_levels(entry)` (the REAL TP is resolved at the actual fill);
+   volume = `risk.sizing.size_position` with the CURRENT `/settings` and the cached spec (the simulator's call).
+   Levels invalid at that price (already beyond the SL) or sizing rejected -> `rejected` with a Persian reason.
+   `backtest_would_skip` + `backtest_skip_reason_fa`: `simulator.simulate_window` over the scan candidates from the
+   first agreed signal of this strategy/params/symbol (<= 90 days back) to `t` -- true when a trade of an earlier
+   setup would still be open (`position_open`), i.e. exactly what a manual backtest from that start would skip.
+6. *Expiry* (decision 2): close of the entry bar = the next TRADING H1 bar. Entry bar forming at decision time ->
+   `expires = B + 1h`. Market closed after the bar (Friday close, daily break) -> `expires_time: null`,
+   `expiry_pending: true`, `gap_class_provisional: true`; the first tick after the reopen sets a provisional expiry,
+   the next check corrects it from the cache (first cached bar after `t`).
+7. *Revisions*: signals of the last 3 bars are compared with the fresh scan (the update re-reads the last 2 cached
+   bars); no longer produced identically (ignoring `rr` / indicative TP, which follow `/settings`) -> `superseded`.
+8. *Gaps*: the step `t -> t+1` is classified once `t+1` is cached, with the bars up to `t+1` only. `weekend` /
+   `holiday` / 1 hour are final; `session_break` / `missing` stay `provisional` (the classifier also looks 28 days
+   ahead, known limit). A `missing` step sets `backtest_would_skip` (provisional label) -- never a silent reject.
+9. *Dedupe*: `UNIQUE(strategy_name, strategy_version, params_hash, symbol, confirmation_bar_open_utc)`.
+10. *MT5 down*: state `mt5_down`, reconnect via `ensure_connected` with backoff 10/20/40/60/120/300 s, events
+    `mt5_status`, no signal with missing data; nothing can crash the engine (the loop catches everything).
+
+Live strategy: a registered BUILT-IN strategy (default `stddev_channel`); uploaded plugins are refused (409
+`plugin_not_live`; user decision: plugins are chart + backtest only for now).
+
+Storage (DB migration **v4**): `signals`, `signal_events` (`tick|mt5_status|check|mismatch|error`, pruned after 30
+days) -- both cleared by the `tgc_startup` reset (`signal*` prefix) -- and `live_settings` (kept by the reset).
+
+| Route | Response |
+|---|---|
+| `GET /signals?status&symbol&limit=50&offset=0` | `{count, total, offset, limit, signals: [item]}`, newest confirmation bar first; `status` in `active\|expired\|superseded\|rejected`; 422 `invalid_query` |
+| `GET /signals/{id}` | item; 404 `signal_not_found` |
+| `GET /signals/status` | `{enabled, state: disabled\|starting\|running\|mt5_down\|stopped, mt5_state, live_strategy, grace_s, server_offset, server_time_utc, clock_skew_s, clock_skew_warning, last_tick_utc: {symbol: iso\|null}, last_check_utc, next_check_utc, checks: {symbol: {boundary_utc, result, reason_fa[, signal_id]}}, last_error_fa, last_error_utc}` |
+| `GET /signals/settings` | `{enabled, live_strategy, grace_s}` |
+| `POST /signals/settings` | partial `{enabled?, live_strategy?, grace_s? (0..600)}` -> settings + `status`; 422 `invalid_body` (Persian `errors_fa`), 404 `strategy_not_found`, 409 `plugin_not_live` / `stored_params_invalid` |
+| `WS /ws/signals` | first `{"type": "snapshot", seq, status, active: [item]}`, then `{"type": "signal"\|"expired"\|"superseded", "signal": item}`, `{"type": "status", "status": {...}}` (on a significant change), `{"type": "keepalive", "time_utc"}` after 15 s idle |
+
+Check `result` values: `signal`, `rejected`, `no_setup`, `mismatch`, `duplicate`, `market_closed`, `incomplete`,
+`update_failed`, `error`. Without a database every route answers 503 `db_unavailable`.
+
+Item: `{id, symbol, status, strategy, strategy_version, strategy_source, strategy_sha256, params_version,
+params_hash, confirmation_bar_time, decision_time, entry_bar_time, expires_time, expiry_pending, direction,
+setup_type, setup_title_fa, pattern, line, reference_price, indicative_entry, entry_source: tick|last_close,
+stop_loss, take_profit_indicative, take_profit_note_fa, rr, volume, risk_amount (actual risk at the indicative
+entry), sizing {accepted, volume, raw_volume, risk_amount, value_per_unit, loss_per_lot, actual_risk, margin,
+reason_fa, warnings}, account {balance, risk_pct, leverage, rr}, reason_fa, rejection_reason_fa,
+backtest_would_skip, backtest_skip_reason_fa, gap_class_provisional, entry_gap {kind, provisional, entry_bar_time,
+note_fa}, indicators (candidate extra), mismatch {scan, evaluate, fields, boundary_utc} | null, superseded {...} |
+null, note_fa, created_time, updated_time}` (times ISO UTC `Z`, prices unrounded: format with the symbol digits).
+
+Worked example (gold, default settings 2500 / 1 % / 100 / rr 2; `tests/test_live_helpers.py`): buy, SL
+2062.8835288730947, tick bid 2064.37 / ask 2064.68 -> entry 2064.68 (ask), distance 1.79647, TP (indicative)
+2064.68 + 2 x 1.79647 = 2068.27294; risk 25.00 / (1.79647 x 100) = 0.13916 -> 0.13 lots, actual risk 23.354,
+margin 0.13 x 100 x 2064.68 / 100 = 268.41. Stale tick -> 2064.10 + 34 points = 2064.44, TP 2067.55294, 0.16 lots,
+risk 24.904. Sell SL 2066.00 at bid 2064.37 -> TP 2061.11, 0.15 lots, risk 24.45.

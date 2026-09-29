@@ -2,7 +2,7 @@
 //
 // Two layers:
 //  * [ChartPainter] — grid, gaps, candles, channel lines, setups, backtest
-//    trades, axes.
+//    trades, horizontal price levels (live signal mini chart), axes.
 //    Repaints only when data / viewport / scale / selection / style change.
 //  * [CrosshairPainter] — hover crosshair and its axis labels; driven by a
 //    Listenable so mouse moves repaint only this layer.
@@ -282,16 +282,48 @@ void _dashedSegment(Canvas canvas, Offset a, Offset b, Paint paint, {double dash
 
 /// Draws [text] in a filled label box centred vertically at [anchor] (left
 /// aligned) or horizontally (top aligned) — used for axis labels.
-void _labelBox(Canvas canvas, String text, Offset anchor, ChartStyle style, {required bool vertical}) {
+void _labelBox(Canvas canvas, String text, Offset anchor, ChartStyle style,
+    {required bool vertical, Color? background, Color? foreground}) {
   final TextPainter tp = TextPainter(
-    text: TextSpan(text: text, style: style.axisTextStyle.copyWith(color: style.onLabel)),
+    text: TextSpan(text: text, style: style.axisTextStyle.copyWith(color: foreground ?? style.onLabel)),
     textDirection: TextDirection.ltr,
   )..layout();
   final Rect box = vertical
       ? Rect.fromLTWH(anchor.dx, anchor.dy - tp.height / 2 - 2, tp.width + 8, tp.height + 4)
       : Rect.fromLTWH(anchor.dx - tp.width / 2 - 4, anchor.dy, tp.width + 8, tp.height + 4);
-  canvas.drawRect(box, style.fillPaint..color = style.labelBackground);
+  canvas.drawRect(box, style.fillPaint..color = background ?? style.labelBackground);
   tp.paint(canvas, box.topLeft + const Offset(4, 2));
+}
+
+/// What a [ChartPriceLevel] marks (its colour: entry / bear / bull).
+enum ChartLevelKind { entry, stopLoss, takeProfit }
+
+/// A horizontal price line with a tag (e.g. a live signal's indicative
+/// entry, SL and TP), drawn from bar [fromIndex] (null = the plot's left
+/// edge) to the right edge, with the price in a coloured box on the price
+/// axis. The price is the engine's; only its screen position is computed.
+@immutable
+class ChartPriceLevel {
+  const ChartPriceLevel(
+      {required this.kind, required this.price, required this.tag, this.fromIndex, this.dashed = false});
+
+  final ChartLevelKind kind;
+  final double price;
+  final String tag;
+  final int? fromIndex;
+  final bool dashed;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ChartPriceLevel &&
+      other.kind == kind &&
+      other.price == price &&
+      other.tag == tag &&
+      other.fromIndex == fromIndex &&
+      other.dashed == dashed;
+
+  @override
+  int get hashCode => Object.hash(kind, price, tag, fromIndex, dashed);
 }
 
 /// Static chart layer.
@@ -305,6 +337,7 @@ class ChartPainter extends CustomPainter {
     this.selectedSetupId,
     this.selectedTradeKey,
     this.highlightIndex,
+    this.levels = const <ChartPriceLevel>[],
   });
 
   final ChartData data;
@@ -315,6 +348,9 @@ class ChartPainter extends CustomPainter {
   final String? selectedSetupId;
   final TradeKey? selectedTradeKey;
   final int? highlightIndex;
+
+  /// Horizontal price levels (live signal entry / SL / TP); none on the chart page.
+  final List<ChartPriceLevel> levels;
 
   /// Bars drawn by the last [paint] — evidence that culling works.
   @visibleForTesting
@@ -347,9 +383,51 @@ class ChartPainter extends CustomPainter {
       debugLastPaintedBars = 0;
       debugLastPaintedTrades = 0;
     }
+    _paintLevelLines(canvas, plot);
     canvas.restore();
     _paintPriceAxis(canvas);
+    _paintLevelLabels(canvas);
     if (range != null) _paintTimeAxis(canvas, range);
+  }
+
+  // ------------------------------------------------------------ price levels
+
+  Color _levelColor(ChartLevelKind kind) => switch (kind) {
+        ChartLevelKind.entry => style.entry,
+        ChartLevelKind.stopLoss => style.bear,
+        ChartLevelKind.takeProfit => style.bull,
+      };
+
+  void _paintLevelLines(Canvas canvas, Rect plot) {
+    for (final ChartPriceLevel l in levels) {
+      final double y = scale.yOf(l.price);
+      final int? from = l.fromIndex;
+      final double x1 = from == null ? plot.left : math.max(plot.left, viewport.xOf(from) - _w / 2);
+      if (x1 >= plot.right) continue;
+      final Color color = _levelColor(l.kind);
+      final Paint p = style.strokePaint
+        ..color = color
+        ..strokeWidth = 1.4;
+      if (l.dashed) {
+        _dashedHLine(canvas, x1, plot.right, y, p);
+      } else {
+        canvas.drawLine(Offset(x1, y), Offset(plot.right, y), p);
+      }
+      final TextPainter tp = TextPainter(
+        text: TextSpan(text: l.tag, style: style.axisTextStyle.copyWith(color: color, fontWeight: FontWeight.bold)),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, Offset(plot.right - tp.width - 4, y - tp.height - 1));
+    }
+  }
+
+  void _paintLevelLabels(Canvas canvas) {
+    for (final ChartPriceLevel l in levels) {
+      final double y = scale.yOf(l.price);
+      if (y < layout.plot.top || y > layout.plot.bottom) continue;
+      _labelBox(canvas, formatChartPrice(l.price, data.digits), Offset(layout.priceAxis.left + 1, y), style,
+          vertical: true, background: _levelColor(l.kind), foreground: style.axisBackground);
+    }
   }
 
   // ------------------------------------------------------------ grid & axes
@@ -770,7 +848,8 @@ class ChartPainter extends CustomPainter {
       !identical(old.style, style) ||
       old.selectedSetupId != selectedSetupId ||
       old.selectedTradeKey != selectedTradeKey ||
-      old.highlightIndex != highlightIndex;
+      old.highlightIndex != highlightIndex ||
+      !listEquals(old.levels, levels);
 }
 
 /// Hover crosshair layer; repaints on [hover] changes without rebuilding.

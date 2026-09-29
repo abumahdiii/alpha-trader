@@ -197,6 +197,76 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         """,
         "CREATE INDEX ix_strategy_plugins_status ON strategy_plugins (name, status)",
     ),
+    # v4 (phase 6, live signals; storage/signals_repo.py). SUGGESTIONS ONLY -- nothing here is an order.
+    # ``signals``: one row per decision of the live scheduler (active / expired / superseded / rejected), deduped
+    # on (strategy, code version, params hash, symbol, confirmation bar). ``signal_events``: the scheduler's
+    # journal (checks, MT5 state changes, mismatches, errors). Both start with "signal", so the tgc_startup reset
+    # clears them; ``live_settings`` (the user's live on/off + selected strategy) deliberately does NOT, so a
+    # data reset keeps the settings. No foreign keys to the strategy tables (provenance is snapshotted).
+    4: (
+        """
+        CREATE TABLE signals (
+            id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol                    TEXT    NOT NULL,
+            strategy_name             TEXT    NOT NULL,
+            strategy_version          INTEGER NOT NULL CHECK (strategy_version >= 1),
+            strategy_sha256           TEXT,
+            strategy_source           TEXT    NOT NULL CHECK (strategy_source IN ('builtin', 'plugin')),
+            params_version            INTEGER,
+            params_hash               TEXT    NOT NULL CHECK (length(params_hash) = 64),
+            confirmation_bar_open_utc TEXT    NOT NULL,
+            decision_time_utc         TEXT    NOT NULL,
+            expires_utc               TEXT,
+            status                    TEXT    NOT NULL CHECK (status IN ('active', 'expired', 'superseded', 'rejected')),
+            direction                 TEXT    CHECK (direction IN ('buy', 'sell')),
+            setup                     TEXT,
+            setup_title_fa            TEXT,
+            pattern                   TEXT,
+            line                      TEXT,
+            reference_price           REAL,
+            indicative_entry          REAL,
+            entry_source              TEXT    CHECK (entry_source IN ('tick', 'last_close')),
+            stop_loss                 REAL,
+            take_profit_indicative    REAL,
+            rr                        REAL,
+            volume                    REAL,
+            risk_amount               REAL,
+            sizing_json               TEXT,
+            reason_fa                 TEXT,
+            rejection_reason_fa       TEXT,
+            backtest_would_skip       INTEGER NOT NULL DEFAULT 0 CHECK (backtest_would_skip IN (0, 1)),
+            backtest_skip_reason_fa   TEXT,
+            extra_json                TEXT    NOT NULL DEFAULT '{}',
+            account_json              TEXT,
+            mismatch_json             TEXT,
+            gap_class_provisional     INTEGER NOT NULL DEFAULT 0 CHECK (gap_class_provisional IN (0, 1)),
+            created_utc               TEXT    NOT NULL,
+            updated_utc               TEXT    NOT NULL,
+            UNIQUE (strategy_name, strategy_version, params_hash, symbol, confirmation_bar_open_utc)
+        )
+        """,
+        "CREATE INDEX ix_signals_status ON signals (status, symbol)",
+        "CREATE INDEX ix_signals_symbol_bar ON signals (symbol, confirmation_bar_open_utc)",
+        """
+        CREATE TABLE signal_events (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            time_utc     TEXT    NOT NULL,
+            kind         TEXT    NOT NULL CHECK (kind IN ('tick', 'mt5_status', 'check', 'mismatch', 'error')),
+            symbol       TEXT,
+            payload_json TEXT    NOT NULL DEFAULT '{}'
+        )
+        """,
+        "CREATE INDEX ix_signal_events_time ON signal_events (time_utc)",
+        """
+        CREATE TABLE live_settings (
+            id            INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled       INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+            live_strategy TEXT    NOT NULL,
+            grace_s       REAL    NOT NULL CHECK (grace_s >= 0 AND grace_s <= 600),
+            updated_utc   TEXT    NOT NULL
+        )
+        """,
+    ),
 }
 SCHEMA_VERSION: int = max(MIGRATIONS)
 
