@@ -24,10 +24,15 @@ class StrategyEditor extends StatefulWidget {
     required this.api,
     required this.strategy,
     required this.onSaved,
+    this.plugin,
   });
 
   final EngineApi api;
   final StrategyInfo strategy;
+
+  /// Set when [strategy] is an uploaded plugin (its registered version):
+  /// the header shows the source and the file hash.
+  final PluginRef? plugin;
 
   /// Reports the engine's answer after a save/reset so the list is updated.
   final ValueChanged<StrategyInfo> onSaved;
@@ -163,6 +168,12 @@ class _StrategyEditorState extends State<StrategyEditor> with AsyncActionGuard<S
           children: [
             _chip('شناسه: ${_info.name}'),
             _chip('نسخه کد: ${_info.version}'),
+            if (widget.plugin != null)
+              Tooltip(
+                message: 'هش کامل فایل سیستم (sha256): ${widget.plugin!.sha256}',
+                child: _chip('پلاگین — فایل ${shortSha(widget.plugin!.sha256)}',
+                    key: const ValueKey<String>('editor-plugin-chip')),
+              ),
             _chip('نسخه پارامترها: ${_info.paramsVersion}'),
             if (_info.paramsSavedUtc != null)
               _chip('ذخیره‌شده در: ${formatLocalDateTime(_info.paramsSavedUtc!)} (وقت محلی)'),
@@ -228,7 +239,8 @@ class _StrategyEditorState extends State<StrategyEditor> with AsyncActionGuard<S
     );
   }
 
-  Widget _chip(String label) => Chip(
+  Widget _chip(String label, {Key? key}) => Chip(
+        key: key,
         label: Text(label),
         visualDensity: VisualDensity.compact,
       );
