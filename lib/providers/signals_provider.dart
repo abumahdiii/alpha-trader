@@ -132,6 +132,11 @@ class SignalsProvider extends ChangeNotifier {
   /// Price digits of [symbol] from `GET /symbols` (null until known).
   int? digitsOf(String symbol) => _digits[symbol];
 
+  /// The engine's symbols (status ticks / checks and `GET /symbols`), sorted.
+  List<String> get knownSymbols =>
+      List<String>.unmodifiable({...?_status?.symbols, ..._digits.keys, ..._active.values.map((s) => s.symbol)}.toList()
+        ..sort());
+
   static final DateTime _epoch = DateTime.utc(1970);
 
   /// A status just returned by another call (e.g. `POST /signals/settings`):
